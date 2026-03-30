@@ -651,6 +651,40 @@ Hardware drivers implement the ``SleController`` trait::
 The built-in ``VirtualController`` implements this trait for loopback
 testing without physical hardware.
 
+USB transport module
+--------------------
+
+The ``sle_usb.rs`` module implements DLI packet framing for
+USB-attached controllers and provides ``UsbController`` implementing
+the ``SleController`` trait.
+
+USB wire format for DLI command packets (sent on bulk OUT EP3):
+
+.. code-block:: none
+
+    Byte 0:       0xA1 (Command type)
+    Bytes 1-2:    opcode (LE16)
+    Byte 3:       parameter length
+    Bytes 4..N:   parameters
+
+Async unicast data header (bulk EP2/EP3):
+
+.. code-block:: none
+
+    Byte 0:       0xA3 (AsyncUnicast type)
+    Bytes 1-2:    link_id_seg (LE16)
+                  [15:4] = link_id (12 bits)
+                  [3:2]  = segmentation (0=complete, 1=first, 2=cont, 3=last)
+                  [1]    = reserved
+                  [0]    = priority
+    Bytes 3-4:    data_len (LE16, 9-bit effective)
+    Bytes 5..N:   payload
+
+Currently the USB controller returns ``ENODEV`` on ``open()`` as no
+hardware drivers are registered. A separate ``sparklink_usb`` kernel
+module implementing ``usb::Driver`` will register the USB transport
+when hardware is available.
+
 debugfs interface
 =================
 

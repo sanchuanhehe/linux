@@ -312,10 +312,10 @@ pub struct SciDevInfo {
 pub struct SleAdvParams {
     /// Target SCI device index.
     pub dev_index: u16,
-    /// Discovery level (see `DiscoveryLevel`).
-    pub discovery_level: u8,
     /// Advertising interval in milliseconds.
     pub interval_ms: u16,
+    /// Discovery level (see `DiscoveryLevel`).
+    pub discovery_level: u8,
     _reserved: [u8; 11],
 }
 

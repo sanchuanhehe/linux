@@ -104,10 +104,10 @@ struct sci_dev_info {
 
 struct sle_adv_params {
 	uint16_t dev_index;
-	uint8_t  discovery_level;
 	uint16_t interval_ms;
+	uint8_t  discovery_level;
 	uint8_t  _reserved[11];
-} __attribute__((packed));
+};
 
 struct sle_scan_params {
 	uint16_t dev_index;

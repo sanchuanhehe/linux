@@ -25,10 +25,10 @@ pub const SM3_DIGEST_SIZE: usize = 32;
 /// SM3 block size in bytes.
 const SM3_BLOCK_SIZE: usize = 64;
 
-/// SM3 initial hash values.
+/// SM3 initial hash values (GB/T 32905-2016 Section 4).
 const SM3_IV: [u32; 8] = [
     0x7380166F, 0x4914B2B9, 0x172442D7, 0xDA8A0600,
-    0xAC78BA68, 0x0390FC11, 0xCF8AC6C3, 0x8F46292F,
+    0xA96F30BC, 0x163138AA, 0xE38DEE4D, 0xB0FB0E4E,
 ];
 
 #[inline(always)]

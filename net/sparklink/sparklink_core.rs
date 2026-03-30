@@ -21,6 +21,7 @@ mod sle_crypto;
 mod sle_security;
 mod sle_ssap;
 mod sle_power;
+mod sle_dli;
 
 use kernel::{
     debugfs::{Dir, File},

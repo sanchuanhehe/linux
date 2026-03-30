@@ -258,22 +258,24 @@ impl SeqTracker {
 /// Maximum data payload per connection ioctl call.
 pub const CONN_DATA_MAX: usize = 255;
 
+/// Maximum number of concurrent connections per controller.
+pub const MAX_CONNECTIONS: usize = 8;
+
+/// Invalid connection handle sentinel.
+pub const INVALID_HANDLE: u16 = 0xFFFF;
+
 // ---------------------------------------------------------------------------
-// Connection manager
+// Per-connection state
 // ---------------------------------------------------------------------------
 
-/// Connection manager for a single SLE connection.
-///
-/// Each open fd on /dev/sparklink gets its own ConnInner instance.
-/// It manages the full connection lifecycle: Idle → Connecting →
-/// Connected → Idle, along with data transmit/receive queues.
-pub struct ConnInner {
+/// State for a single SLE connection, identified by a handle.
+pub struct ConnEntry {
+    /// Connection handle (assigned by ConnManager).
+    pub handle: u16,
     /// Current connection state.
     pub state: ConnState,
     /// Peer SLE address.
     pub peer_addr: [u8; 6],
-    /// Local SLE address.
-    pub local_addr: [u8; 6],
     /// Local GT role in this connection.
     pub local_role: GtRole,
     /// Local device capabilities.
@@ -282,9 +284,9 @@ pub struct ConnInner {
     pub params: NegotiatedParams,
     /// Sequence number tracker.
     pub seq: SeqTracker,
-    /// Transmit data queue (userspace → peer).
+    /// Transmit data queue (userspace -> peer).
     pub tx_queue: KVec<KVec<u8>>,
-    /// Receive data queue (peer → userspace).
+    /// Receive data queue (peer -> userspace).
     pub rx_queue: KVec<KVec<u8>>,
     /// Maximum queue depth.
     pub queue_max: usize,
@@ -294,13 +296,12 @@ pub struct ConnInner {
     pub rx_bytes: u64,
 }
 
-impl ConnInner {
-    /// Create a new idle connection manager.
-    pub fn new(local_addr: [u8; 6]) -> Self {
+impl ConnEntry {
+    fn new(handle: u16) -> Self {
         Self {
+            handle,
             state: ConnState::Idle,
             peer_addr: [0u8; 6],
-            local_addr,
             local_role: GtRole::TNode,
             local_cap: AccessCapability::default(),
             params: NegotiatedParams::default(),
@@ -312,60 +313,141 @@ impl ConnInner {
             rx_bytes: 0,
         }
     }
+}
 
-    /// Initiate a connection to the given peer address.
+// ---------------------------------------------------------------------------
+// Multi-connection manager
+// ---------------------------------------------------------------------------
+
+/// Manager for multiple concurrent SLE connections.
+///
+/// Each connection is identified by a unique 16-bit handle. The manager
+/// tracks up to MAX_CONNECTIONS simultaneous links and provides
+/// handle-based access to individual connection state machines.
+pub struct ConnManager {
+    /// Local SLE address shared by all connections.
+    pub local_addr: [u8; 6],
+    /// Active connections indexed by slot position.
+    connections: KVec<ConnEntry>,
+    /// Next handle to allocate.
+    next_handle: u16,
+    /// Total connections created (lifetime counter).
+    pub total_created: u64,
+    /// Total connections completed (lifetime counter).
+    pub total_completed: u64,
+}
+
+impl ConnManager {
+    /// Create a new multi-connection manager.
+    pub fn new(local_addr: [u8; 6]) -> Self {
+        Self {
+            local_addr,
+            connections: KVec::new(),
+            next_handle: 1,
+            total_created: 0,
+            total_completed: 0,
+        }
+    }
+
+    /// Allocate a handle and return it.
+    fn alloc_handle(&mut self) -> u16 {
+        let h = self.next_handle;
+        self.next_handle = self.next_handle.wrapping_add(1);
+        if self.next_handle == INVALID_HANDLE {
+            self.next_handle = 1;
+        }
+        h
+    }
+
+    /// Find a connection by handle, return mutable reference.
+    fn find_mut(&mut self, handle: u16) -> Result<&mut ConnEntry> {
+        for entry in self.connections.iter_mut() {
+            if entry.handle == handle {
+                return Ok(entry);
+            }
+        }
+        Err(ENOENT)
+    }
+
+    /// Find a connection by handle, return immutable reference.
+    fn find(&self, handle: u16) -> Result<&ConnEntry> {
+        for entry in self.connections.iter() {
+            if entry.handle == handle {
+                return Ok(entry);
+            }
+        }
+        Err(ENOENT)
+    }
+
+    /// Get current number of active connections (not Idle).
+    pub fn active_count(&self) -> usize {
+        self.connections
+            .iter()
+            .filter(|c| c.state != ConnState::Idle)
+            .count()
+    }
+
+    /// Get total number of connection slots in use (including Idle but not yet removed).
+    pub fn slot_count(&self) -> usize {
+        self.connections.len()
+    }
+
+    /// Initiate a new connection to the given peer address.
     ///
-    /// Transitions Idle → Connecting. In real hardware this would
-    /// trigger transmission of an Access Request PDU on the advertising
-    /// channel.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EBUSY` if not in Idle state.
-    pub fn connect(&mut self, peer_addr: [u8; 6], role: GtRole) -> Result {
-        if self.state != ConnState::Idle {
-            pr_err!("sparklink: cannot connect in state {:?}\n", self.state);
+    /// Allocates a new connection handle and transitions to Connecting.
+    /// Returns the assigned handle on success.
+    pub fn connect(&mut self, peer_addr: [u8; 6], role: GtRole) -> Result<u16> {
+        if self.connections.len() >= MAX_CONNECTIONS {
+            pr_err!("sparklink: max connections ({}) reached\n", MAX_CONNECTIONS);
             return Err(EBUSY);
         }
-        self.peer_addr = peer_addr;
-        self.local_role = role;
-        self.seq = SeqTracker::new_async();
-        self.tx_queue = KVec::new();
-        self.rx_queue = KVec::new();
-        self.tx_bytes = 0;
-        self.rx_bytes = 0;
-        self.state = ConnState::Connecting;
+        // Check for duplicate peer address among active connections
+        for entry in self.connections.iter() {
+            if entry.peer_addr == peer_addr && entry.state != ConnState::Idle {
+                pr_err!("sparklink: already connected/connecting to this peer\n");
+                return Err(EEXIST);
+            }
+        }
+        let handle = self.alloc_handle();
+        let mut entry = ConnEntry::new(handle);
+        entry.peer_addr = peer_addr;
+        entry.local_role = role;
+        entry.seq = SeqTracker::new_async();
+        entry.state = ConnState::Connecting;
+        self.connections.push(entry, GFP_KERNEL)?;
+        self.total_created += 1;
         pr_info!(
-            "sparklink: connecting to {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} as {:?}\n",
+            "sparklink: connecting to {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} as {:?} (handle={})\n",
             peer_addr[0],
             peer_addr[1],
             peer_addr[2],
             peer_addr[3],
             peer_addr[4],
             peer_addr[5],
-            self.local_role
+            role,
+            handle
         );
-        Ok(())
+        Ok(handle)
     }
 
-    /// Process a received access response.
-    ///
-    /// If accepted, transitions Connecting → Connected with the negotiated
-    /// parameters. If rejected, transitions back to Idle.
+    /// Process a received access response for a given handle.
     pub fn process_access_response(
         &mut self,
+        handle: u16,
         response_type: AccessResponseType,
         params: NegotiatedParams,
     ) -> Result {
-        if self.state != ConnState::Connecting {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connecting {
             return Err(EBUSY);
         }
         match response_type {
             AccessResponseType::Accepted => {
-                self.params = params;
-                self.state = ConnState::Connected;
+                entry.params = params;
+                entry.state = ConnState::Connected;
                 pr_info!(
-                    "sparklink: connected (bw={}MHz mcs={} timeout={}0ms)\n",
+                    "sparklink: handle {} connected (bw={}MHz mcs={} timeout={}0ms)\n",
+                    handle,
                     params.bandwidth_mhz,
                     params.mcs_index,
                     params.supervision_timeout
@@ -373,112 +455,145 @@ impl ConnInner {
                 Ok(())
             }
             other => {
-                self.state = ConnState::Idle;
-                pr_warn!("sparklink: connection rejected: {:?}\n", other);
-                // EACCES used in place of ECONNREFUSED (not declared in kernel Rust)
+                entry.state = ConnState::Idle;
+                pr_warn!("sparklink: handle {} connection rejected: {:?}\n", handle, other);
                 Err(EACCES)
             }
         }
     }
 
-    /// Disconnect from the peer.
+    /// Disconnect a connection by handle.
     ///
-    /// Valid from Connected or Connecting states. Resets all connection
-    /// state and returns to Idle.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EPIPE` if not currently connected or connecting.
-    pub fn disconnect(&mut self) -> Result {
-        match self.state {
-            ConnState::Connected | ConnState::Connecting => {
-                let old_state = self.state;
-                self.state = ConnState::Idle;
+    /// Removes the connection entry from the table.
+    pub fn disconnect(&mut self, handle: u16) -> Result {
+        let mut idx = None;
+        for (i, entry) in self.connections.iter().enumerate() {
+            if entry.handle == handle {
+                match entry.state {
+                    ConnState::Connected | ConnState::Connecting => {
+                        idx = Some(i);
+                        break;
+                    }
+                    _ => return Err(EPIPE),
+                }
+            }
+        }
+        match idx {
+            Some(i) => {
+                let entry = &self.connections[i];
                 pr_info!(
-                    "sparklink: disconnected from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} (was {:?})\n",
-                    self.peer_addr[0],
-                    self.peer_addr[1],
-                    self.peer_addr[2],
-                    self.peer_addr[3],
-                    self.peer_addr[4],
-                    self.peer_addr[5],
-                    old_state
+                    "sparklink: disconnected handle {} from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
+                    handle,
+                    entry.peer_addr[0],
+                    entry.peer_addr[1],
+                    entry.peer_addr[2],
+                    entry.peer_addr[3],
+                    entry.peer_addr[4],
+                    entry.peer_addr[5]
                 );
+                let _ = self.connections.remove(i);
+                self.total_completed += 1;
                 Ok(())
             }
-            // EPIPE used in place of ENOTCONN (not declared in kernel Rust)
-            _ => Err(EPIPE),
+            None => Err(ENOENT),
         }
     }
 
-    /// Queue data for transmission. Returns the number of bytes queued.
-    ///
-    /// Data is placed in the TX queue and will be transmitted as async
-    /// data PDUs by the radio driver. Sequence numbers are advanced
-    /// per the 1-bit ARQ scheme.
-    pub fn send(&mut self, data: &[u8]) -> Result<usize> {
-        if self.state != ConnState::Connected {
+    /// Send data on a connection identified by handle.
+    pub fn send(&mut self, handle: u16, data: &[u8]) -> Result<usize> {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
             return Err(EPIPE);
         }
         if data.is_empty() || data.len() > CONN_DATA_MAX {
             return Err(EINVAL);
         }
-        if self.tx_queue.len() >= self.queue_max {
+        if entry.tx_queue.len() >= entry.queue_max {
             return Err(EAGAIN);
         }
         let mut buf = KVec::new();
         buf.extend_from_slice(data, GFP_KERNEL)?;
-        self.tx_queue.push(buf, GFP_KERNEL)?;
-        self.seq.advance_tx();
-        self.tx_bytes += data.len() as u64;
+        entry.tx_queue.push(buf, GFP_KERNEL)?;
+        entry.seq.advance_tx();
+        entry.tx_bytes += data.len() as u64;
         Ok(data.len())
     }
 
-    /// Process received data from the peer (or loopback injection).
-    ///
-    /// The data is validated against the expected sequence number and
-    /// placed in the RX queue. Duplicate or out-of-order packets are
-    /// silently dropped (simplified ARQ).
-    pub fn receive_data(&mut self, data: &[u8], seq: u8) -> Result {
-        if self.state != ConnState::Connected {
+    /// Process received data for a connection by handle.
+    pub fn receive_data(&mut self, handle: u16, data: &[u8], seq: u8) -> Result {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
             return Err(EPIPE);
         }
-        if !self.seq.check_rx(seq) {
-            // Duplicate or out-of-order — drop silently
+        if !entry.seq.check_rx(seq) {
             return Ok(());
         }
-        if self.rx_queue.len() >= self.queue_max {
-            // Evict oldest entry
-            let _ = self.rx_queue.remove(0);
+        if entry.rx_queue.len() >= entry.queue_max {
+            let _ = entry.rx_queue.remove(0);
         }
         let mut buf = KVec::new();
         buf.extend_from_slice(data, GFP_KERNEL)?;
-        self.rx_queue.push(buf, GFP_KERNEL)?;
-        self.seq.advance_rx();
-        self.rx_bytes += data.len() as u64;
+        entry.rx_queue.push(buf, GFP_KERNEL)?;
+        entry.seq.advance_rx();
+        entry.rx_bytes += data.len() as u64;
         Ok(())
     }
 
-    /// Read received data from the RX queue.
-    ///
-    /// Returns the oldest buffered data or `EAGAIN` if the queue is empty.
-    pub fn recv(&mut self) -> Result<KVec<u8>> {
-        if self.state != ConnState::Connected {
+    /// Receive data from a connection by handle.
+    pub fn recv(&mut self, handle: u16) -> Result<KVec<u8>> {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
             return Err(EPIPE);
         }
-        if self.rx_queue.is_empty() {
+        if entry.rx_queue.is_empty() {
             return Err(EAGAIN);
         }
-        self.rx_queue.remove(0).map_err(|_| EINVAL)
+        entry.rx_queue.remove(0).map_err(|_| EINVAL)
     }
 
-    /// Get the number of pending receive buffers.
-    pub fn rx_pending(&self) -> usize {
-        self.rx_queue.len()
+    /// Get connection info by handle.
+    pub fn info(&self, handle: u16) -> Result<&ConnEntry> {
+        let entry = self.find(handle)?;
+        if entry.state == ConnState::Idle {
+            return Err(EPIPE);
+        }
+        Ok(entry)
     }
 
-    /// Get the number of pending transmit buffers.
-    pub fn tx_pending(&self) -> usize {
-        self.tx_queue.len()
+    /// Get a list of active connection handles.
+    pub fn active_handles(&self) -> KVec<u16> {
+        let mut handles = KVec::new();
+        for entry in self.connections.iter() {
+            if entry.state != ConnState::Idle {
+                let _ = handles.push(entry.handle, GFP_KERNEL);
+            }
+        }
+        handles
+    }
+
+    // --- Legacy single-connection compatibility layer ---
+    // These methods operate on the most recently created connection
+    // for backward compatibility with handle=0 (auto-select).
+
+    /// Find the first active connection (for legacy handle=0 usage).
+    fn find_first_active_mut(&mut self) -> Result<&mut ConnEntry> {
+        for entry in self.connections.iter_mut() {
+            if entry.state == ConnState::Connected || entry.state == ConnState::Connecting {
+                return Ok(entry);
+            }
+        }
+        Err(EPIPE)
+    }
+
+    /// Resolve a handle: 0 means "first active connection".
+    pub fn resolve_handle(&mut self, handle: u16) -> Result<u16> {
+        if handle == 0 {
+            let entry = self.find_first_active_mut()?;
+            Ok(entry.handle)
+        } else {
+            // Verify handle exists
+            let _ = self.find(handle)?;
+            Ok(handle)
+        }
     }
 }

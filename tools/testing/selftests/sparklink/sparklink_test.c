@@ -46,12 +46,14 @@
 
 /* Connection management */
 #define SL_IOCTL_CONNECT         _IOW(SL_MAGIC, 0x30, struct sle_connect_params)
-#define SL_IOCTL_DISCONNECT      _IO(SL_MAGIC, 0x31)
-#define SL_IOCTL_CONN_INFO       _IOR(SL_MAGIC, 0x32, struct sle_conn_info)
+#define SL_IOCTL_DISCONNECT      _IOW(SL_MAGIC, 0x31, uint16_t)
+#define SL_IOCTL_CONN_INFO       _IOW(SL_MAGIC, 0x32, struct sle_conn_info)
 #define SL_IOCTL_CONN_SEND       _IOW(SL_MAGIC, 0x33, struct sle_conn_data)
-#define SL_IOCTL_CONN_RECV       _IOR(SL_MAGIC, 0x34, struct sle_conn_data)
+#define SL_IOCTL_CONN_RECV       _IOW(SL_MAGIC, 0x34, struct sle_conn_data)
 #define SL_IOCTL_INJECT_CONN_RESP _IOW(SL_MAGIC, 0x35, struct sle_inject_conn_resp)
 #define SL_IOCTL_INJECT_CONN_DATA _IOW(SL_MAGIC, 0x36, struct sle_conn_data)
+#define SL_IOCTL_CONN_COUNT      _IO(SL_MAGIC, 0x37)
+#define SL_IOCTL_CONN_LIST       _IOR(SL_MAGIC, 0x38, struct sle_conn_list)
 
 /* Security management */
 #define SL_IOCTL_SEC_SET_PSK     _IOW(SL_MAGIC, 0x40, struct sle_psk_params)
@@ -129,6 +131,7 @@ struct sle_connect_params {
 struct sle_conn_info {
 	uint64_t tx_bytes;
 	uint64_t rx_bytes;
+	uint16_t handle;
 	uint16_t event_group_period;
 	uint16_t supervision_timeout;
 	uint16_t tx_pending;
@@ -140,22 +143,30 @@ struct sle_conn_info {
 	uint8_t  mcs_index;
 	uint8_t  tx_seq;
 	uint8_t  rx_seq;
-	uint8_t  _reserved[12];
+	uint8_t  _reserved[10];
 } __attribute__((packed));
 
 struct sle_conn_data {
+	uint16_t handle;
 	uint16_t length;
 	uint8_t  data[255];
 	uint8_t  _reserved;
 } __attribute__((packed));
 
 struct sle_inject_conn_resp {
+	uint16_t handle;
 	uint8_t  response_type;
 	uint8_t  bandwidth_mhz;
 	uint8_t  mcs_index;
 	uint8_t  _pad;
 	uint16_t supervision_timeout;
-	uint8_t  _reserved[2];
+} __attribute__((packed));
+
+struct sle_conn_list {
+	uint16_t count;
+	uint16_t _pad;
+	uint16_t handles[8];
+	uint8_t  _reserved[4];
 } __attribute__((packed));
 
 /* Security */
@@ -522,7 +533,7 @@ static void test_loopback_filter(int fd)
 
 static void test_connect(int fd)
 {
-	test_header("CONNECT / DISCONNECT");
+	test_header("CONNECT / DISCONNECT (multi-connection)");
 
 	struct sle_connect_params cp;
 	memset(&cp, 0, sizeof(cp));
@@ -534,42 +545,79 @@ static void test_connect(int fd)
 	cp.mcs_index = 4;
 	cp.timeout_10ms = 100;
 
-	/* Connect — should transition to Connecting */
+	/* Connect — should return handle > 0 */
 	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
-	check("CONNECT", ret);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT: expected handle > 0, got %d\n", ret);
+		return;
+	}
+	uint16_t handle = (uint16_t)ret;
+	printf("  OK:   CONNECT: handle=%u\n", handle);
 
 	/* Verify state via CONN_INFO */
 	struct sle_conn_info info;
 	memset(&info, 0, sizeof(info));
+	info.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
 	check("CONN_INFO (connecting)", ret);
 	if (ret == 0 && info.state == 1) {
-		printf("  OK:   state=Connecting (1)\n");
+		printf("  OK:   state=Connecting (1) handle=%u\n", info.handle);
 	} else {
 		printf("  WARN: expected state=1, got state=%u\n", info.state);
 	}
 
-	/* Connect again while connecting — should fail EBUSY */
+	/* Connect to same peer again — should fail EEXIST */
 	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
-	if (ret < 0 && errno == EBUSY) {
-		printf("  OK:   CONNECT (duplicate): correctly rejected (EBUSY)\n");
+	if (ret < 0 && errno == EEXIST) {
+		printf("  OK:   CONNECT (duplicate): correctly rejected (EEXIST)\n");
 	} else {
-		printf("  WARN: CONNECT (duplicate): expected EBUSY, got ret=%d errno=%d\n",
+		printf("  WARN: CONNECT (duplicate): expected EEXIST, got ret=%d errno=%d\n",
 		       ret, errno);
 	}
 
-	/* Disconnect from Connecting state */
-	ret = ioctl(fd, SL_IOCTL_DISCONNECT, NULL);
+	/* Connect to different peer — should succeed (multi-conn) */
+	struct sle_connect_params cp2;
+	memset(&cp2, 0, sizeof(cp2));
+	cp2.peer_addr[0] = 0x11;
+	cp2.peer_addr[5] = 0x02;
+	cp2.gt_role = 1;  /* G node */
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp2);
+	if (ret > 0) {
+		uint16_t handle2 = (uint16_t)ret;
+		printf("  OK:   CONNECT (2nd peer): handle=%u\n", handle2);
+
+		/* Check CONN_COUNT */
+		ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+		printf("  OK:   CONN_COUNT: %d active connections\n", ret);
+
+		/* Check CONN_LIST */
+		struct sle_conn_list list;
+		memset(&list, 0, sizeof(list));
+		ret = ioctl(fd, SL_IOCTL_CONN_LIST, &list);
+		if (ret == 0) {
+			printf("  OK:   CONN_LIST: %u handles:", list.count);
+			for (int i = 0; i < list.count; i++)
+				printf(" %u", list.handles[i]);
+			printf("\n");
+		}
+
+		/* Disconnect 2nd handle */
+		ret = ioctl(fd, SL_IOCTL_DISCONNECT, &handle2);
+		check("DISCONNECT (2nd handle)", ret);
+	} else {
+		printf("  WARN: CONNECT (2nd peer): expected handle>0, got ret=%d\n", ret);
+	}
+
+	/* Disconnect first handle */
+	ret = ioctl(fd, SL_IOCTL_DISCONNECT, &handle);
 	check("DISCONNECT", ret);
 
-	/* Verify state is Idle */
-	memset(&info, 0, sizeof(info));
-	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
-	check("CONN_INFO (idle)", ret);
-	if (ret == 0 && info.state == 0) {
-		printf("  OK:   state=Idle (0)\n");
+	/* Verify all disconnected */
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 0) {
+		printf("  OK:   CONN_COUNT=0 after all disconnected\n");
 	} else {
-		printf("  WARN: expected state=0, got state=%u\n", info.state);
+		printf("  WARN: expected CONN_COUNT=0, got %d\n", ret);
 	}
 }
 
@@ -584,11 +632,17 @@ static void test_conn_reject(int fd)
 	cp.gt_role = 1;  /* G node */
 
 	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
-	check("CONNECT", ret);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT: expected handle > 0, got %d\n", ret);
+		return;
+	}
+	uint16_t handle = (uint16_t)ret;
+	printf("  OK:   CONNECT: handle=%u\n", handle);
 
 	/* Inject rejection response */
 	struct sle_inject_conn_resp resp;
 	memset(&resp, 0, sizeof(resp));
+	resp.handle = handle;
 	resp.response_type = 3;  /* UserRejected */
 
 	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
@@ -599,15 +653,13 @@ static void test_conn_reject(int fd)
 		       ret, errno);
 	}
 
-	/* Verify state is back to Idle */
-	struct sle_conn_info info;
-	memset(&info, 0, sizeof(info));
-	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
-	check("CONN_INFO (after reject)", ret);
-	if (ret == 0 && info.state == 0) {
-		printf("  OK:   state=Idle after rejection\n");
+	/* Connection entry should be removed after rejection.
+	 * CONN_COUNT should be 0. */
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 0) {
+		printf("  OK:   CONN_COUNT=0 after rejection\n");
 	} else {
-		printf("  WARN: expected state=0, got state=%u\n", info.state);
+		printf("  WARN: expected CONN_COUNT=0, got %d\n", ret);
 	}
 }
 
@@ -623,11 +675,17 @@ static void test_conn_data_loopback(int fd)
 	cp.gt_role = 0;
 
 	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
-	check("CONNECT", ret);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT: expected handle > 0, got %d\n", ret);
+		return;
+	}
+	uint16_t handle = (uint16_t)ret;
+	printf("  OK:   CONNECT: handle=%u\n", handle);
 
 	/* Step 2: Accept connection via injected response */
 	struct sle_inject_conn_resp resp;
 	memset(&resp, 0, sizeof(resp));
+	resp.handle = handle;
 	resp.response_type = 0;  /* Accepted */
 	resp.bandwidth_mhz = 2;
 	resp.mcs_index = 6;
@@ -639,11 +697,12 @@ static void test_conn_data_loopback(int fd)
 	/* Step 3: Verify Connected state and negotiated params */
 	struct sle_conn_info info;
 	memset(&info, 0, sizeof(info));
+	info.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
 	check("CONN_INFO (connected)", ret);
 	if (ret == 0) {
-		printf("  state=%u role=%u bw=%u mcs=%u timeout=%u\n",
-		       info.state, info.local_role, info.bandwidth_mhz,
+		printf("  handle=%u state=%u role=%u bw=%u mcs=%u timeout=%u\n",
+		       info.handle, info.state, info.local_role, info.bandwidth_mhz,
 		       info.mcs_index, info.supervision_timeout);
 		if (info.state != 2)
 			printf("  WARN: expected state=2 (Connected)\n");
@@ -656,6 +715,7 @@ static void test_conn_data_loopback(int fd)
 	/* Step 4: Send data */
 	struct sle_conn_data sd;
 	memset(&sd, 0, sizeof(sd));
+	sd.handle = handle;
 	const char *msg = "Hello SparkLink!";
 	sd.length = strlen(msg);
 	memcpy(sd.data, msg, sd.length);
@@ -665,6 +725,7 @@ static void test_conn_data_loopback(int fd)
 	/* Step 5: Inject received data (simulating peer sending back) */
 	struct sle_conn_data rd;
 	memset(&rd, 0, sizeof(rd));
+	rd.handle = handle;
 	const char *reply = "ACK from peer";
 	rd.length = strlen(reply);
 	memcpy(rd.data, reply, rd.length);
@@ -674,6 +735,7 @@ static void test_conn_data_loopback(int fd)
 	/* Step 6: Receive the injected data */
 	struct sle_conn_data recv_buf;
 	memset(&recv_buf, 0, sizeof(recv_buf));
+	recv_buf.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &recv_buf);
 	check("CONN_RECV", ret);
 	if (ret == 0 && recv_buf.length == strlen(reply) &&
@@ -686,6 +748,7 @@ static void test_conn_data_loopback(int fd)
 
 	/* Step 7: Try to receive again — should fail EAGAIN */
 	memset(&recv_buf, 0, sizeof(recv_buf));
+	recv_buf.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &recv_buf);
 	if (ret < 0 && errno == EAGAIN) {
 		printf("  OK:   CONN_RECV (empty): correctly got EAGAIN\n");
@@ -695,6 +758,7 @@ static void test_conn_data_loopback(int fd)
 
 	/* Step 8: Check stats */
 	memset(&info, 0, sizeof(info));
+	info.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
 	if (ret == 0) {
 		printf("  stats: tx_bytes=%lu rx_bytes=%lu tx_pend=%u rx_pend=%u\n",
@@ -703,18 +767,19 @@ static void test_conn_data_loopback(int fd)
 	}
 
 	/* Step 9: Disconnect */
-	ret = ioctl(fd, SL_IOCTL_DISCONNECT, NULL);
+	ret = ioctl(fd, SL_IOCTL_DISCONNECT, &handle);
 	check("DISCONNECT", ret);
 
-	/* Step 10: Try to send after disconnect — should fail EPIPE */
+	/* Step 10: Try to send after disconnect — should fail ENOENT (handle gone) */
 	memset(&sd, 0, sizeof(sd));
+	sd.handle = handle;
 	sd.length = 5;
 	memcpy(sd.data, "bad", 3);
 	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
-	if (ret < 0 && errno == EPIPE) {
-		printf("  OK:   CONN_SEND (disconnected): correctly got EPIPE\n");
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   CONN_SEND (disconnected): correctly got ENOENT\n");
 	} else {
-		printf("  WARN: expected EPIPE, got ret=%d errno=%d\n", ret, errno);
+		printf("  WARN: expected ENOENT, got ret=%d errno=%d\n", ret, errno);
 	}
 }
 

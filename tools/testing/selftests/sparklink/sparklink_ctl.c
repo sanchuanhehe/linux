@@ -53,9 +53,11 @@
 #define SL_IOCTL_STOP_SCAN       _IO(SL_MAGIC, 0x13)
 #define SL_IOCTL_SCAN_RESULT_COUNT _IO(SL_MAGIC, 0x21)
 #define SL_IOCTL_CONNECT         _IOW(SL_MAGIC, 0x30, struct sle_connect_params)
-#define SL_IOCTL_DISCONNECT      _IO(SL_MAGIC, 0x31)
-#define SL_IOCTL_CONN_INFO       _IOR(SL_MAGIC, 0x32, struct sle_conn_info)
+#define SL_IOCTL_DISCONNECT      _IOW(SL_MAGIC, 0x31, uint16_t)
+#define SL_IOCTL_CONN_INFO       _IOW(SL_MAGIC, 0x32, struct sle_conn_info)
 #define SL_IOCTL_CONN_SEND       _IOW(SL_MAGIC, 0x33, struct sle_conn_data)
+#define SL_IOCTL_CONN_COUNT      _IO(SL_MAGIC, 0x37)
+#define SL_IOCTL_CONN_LIST       _IOR(SL_MAGIC, 0x38, struct sle_conn_list)
 #define SL_IOCTL_SEC_SET_PSK     _IOW(SL_MAGIC, 0x40, struct sle_psk_params)
 #define SL_IOCTL_SEC_PAIR        _IOW(SL_MAGIC, 0x41, struct sle_pair_params)
 #define SL_IOCTL_SEC_INFO        _IOR(SL_MAGIC, 0x42, struct sle_sec_info)
@@ -105,6 +107,7 @@ struct sle_connect_params {
 struct sle_conn_info {
 	uint64_t tx_bytes;
 	uint64_t rx_bytes;
+	uint16_t handle;
 	uint16_t event_group_period;
 	uint16_t supervision_timeout;
 	uint16_t tx_pending;
@@ -116,13 +119,21 @@ struct sle_conn_info {
 	uint8_t  mcs_index;
 	uint8_t  tx_seq;
 	uint8_t  rx_seq;
-	uint8_t  _reserved[12];
+	uint8_t  _reserved[10];
 } __attribute__((packed));
 
 struct sle_conn_data {
+	uint16_t handle;
 	uint16_t length;
 	uint8_t  data[255];
 	uint8_t  _reserved;
+} __attribute__((packed));
+
+struct sle_conn_list {
+	uint16_t count;
+	uint16_t _pad;
+	uint16_t handles[8];
+	uint8_t  _reserved[4];
 } __attribute__((packed));
 
 struct sle_psk_params {
@@ -310,17 +321,19 @@ static void cmd_scan(int fd, int argc, char **argv)
 static void cmd_conn(int fd, int argc, char **argv)
 {
 	if (argc < 1) {
-		fprintf(stderr, "Usage: sparklink_ctl conn <info|disconnect|<addr>|send <data>>\n");
+		fprintf(stderr, "Usage: sparklink_ctl conn <info [handle]|disconnect <handle>|list|count|<addr>|send <handle> <data>>\n");
 		return;
 	}
 	if (strcmp(argv[0], "info") == 0) {
 		struct sle_conn_info ci;
 		memset(&ci, 0, sizeof(ci));
+		if (argc >= 2)
+			ci.handle = (uint16_t)atoi(argv[1]);
 		if (ioctl(fd, SL_IOCTL_CONN_INFO, &ci) < 0) {
 			perror("CONN_INFO");
 			return;
 		}
-		printf("Connection Info:\n");
+		printf("Connection Info (handle=%u):\n", ci.handle);
 		printf("  State:      %s (%u)\n", conn_state_str(ci.state), ci.state);
 		printf("  Peer:       %02x:%02x:%02x:%02x:%02x:%02x\n",
 		       ci.peer_addr[0], ci.peer_addr[1], ci.peer_addr[2],
@@ -332,21 +345,41 @@ static void cmd_conn(int fd, int argc, char **argv)
 		       (unsigned long)ci.tx_bytes, (unsigned long)ci.rx_bytes);
 		printf("  Pending:    TX=%u RX=%u\n", ci.tx_pending, ci.rx_pending);
 	} else if (strcmp(argv[0], "disconnect") == 0) {
-		if (ioctl(fd, SL_IOCTL_DISCONNECT, NULL) < 0)
+		uint16_t handle = 0;
+		if (argc >= 2)
+			handle = (uint16_t)atoi(argv[1]);
+		if (ioctl(fd, SL_IOCTL_DISCONNECT, &handle) < 0)
 			perror("DISCONNECT");
 		else
-			printf("Disconnected\n");
-	} else if (strcmp(argv[0], "send") == 0 && argc >= 2) {
+			printf("Disconnected handle=%u\n", handle);
+	} else if (strcmp(argv[0], "count") == 0) {
+		int ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+		if (ret < 0)
+			perror("CONN_COUNT");
+		else
+			printf("Active connections: %d\n", ret);
+	} else if (strcmp(argv[0], "list") == 0) {
+		struct sle_conn_list list;
+		memset(&list, 0, sizeof(list));
+		if (ioctl(fd, SL_IOCTL_CONN_LIST, &list) < 0) {
+			perror("CONN_LIST");
+			return;
+		}
+		printf("Active connections (%u):\n", list.count);
+		for (int i = 0; i < list.count && i < 8; i++)
+			printf("  handle=%u\n", list.handles[i]);
+	} else if (strcmp(argv[0], "send") == 0 && argc >= 3) {
 		struct sle_conn_data cd;
 		memset(&cd, 0, sizeof(cd));
-		size_t len = strlen(argv[1]);
+		cd.handle = (uint16_t)atoi(argv[1]);
+		size_t len = strlen(argv[2]);
 		if (len > 255) len = 255;
 		cd.length = (uint16_t)len;
-		memcpy(cd.data, argv[1], len);
+		memcpy(cd.data, argv[2], len);
 		if (ioctl(fd, SL_IOCTL_CONN_SEND, &cd) < 0)
 			perror("CONN_SEND");
 		else
-			printf("Sent %u bytes\n", cd.length);
+			printf("Sent %u bytes on handle=%u\n", cd.length, cd.handle);
 	} else {
 		/* Treat as address to connect to */
 		struct sle_connect_params cp;
@@ -355,10 +388,12 @@ static void cmd_conn(int fd, int argc, char **argv)
 		cp.bandwidth = 1;
 		cp.mcs_index = 4;
 		cp.timeout_10ms = 100;
-		if (ioctl(fd, SL_IOCTL_CONNECT, &cp) < 0)
+		int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+		if (ret < 0)
 			perror("CONNECT");
 		else
-			printf("Connection initiated to %02x:%02x:%02x:%02x:%02x:%02x\n",
+			printf("Connection handle=%d to %02x:%02x:%02x:%02x:%02x:%02x\n",
+			       ret,
 			       cp.peer_addr[0], cp.peer_addr[1], cp.peer_addr[2],
 			       cp.peer_addr[3], cp.peer_addr[4], cp.peer_addr[5]);
 	}

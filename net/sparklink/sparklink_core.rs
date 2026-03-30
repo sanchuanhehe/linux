@@ -18,13 +18,19 @@ mod sle_pdu;
 mod sle_adv;
 
 use kernel::{
+    debugfs::{Dir, File},
     device::Device,
-    fs::File,
+    fs::File as FsFile,
     ioctl::{_IO, _IOR, _IOW},
     miscdevice::{MiscDevice, MiscDeviceOptions, MiscDeviceRegistration},
     new_mutex,
     prelude::*,
-    sync::{aref::ARef, Arc, Mutex},
+    str::CString,
+    sync::{
+        aref::ARef,
+        atomic::Atomic,
+        Arc, Mutex,
+    },
     transmute::FromBytes,
     uaccess::{UserPtr, UserSlice},
 };
@@ -306,6 +312,14 @@ struct SparkLinkModule {
     _miscdev: MiscDeviceRegistration<SparkLinkCtl>,
     #[pin]
     state: Arc<Mutex<SparkLinkState>>,
+    // debugfs: /sys/kernel/debug/sparklink/
+    _debugfs: Dir,
+    #[pin]
+    _version: File<CString>,
+    #[pin]
+    adv_count: File<Atomic<usize>>,
+    #[pin]
+    scan_count: File<Atomic<usize>>,
 }
 
 impl kernel::InPlaceModule for SparkLinkModule {
@@ -324,9 +338,24 @@ impl kernel::InPlaceModule for SparkLinkModule {
             name: c"sparklink",
         };
 
+        let debugfs = Dir::new(c"sparklink");
+
         try_pin_init!(Self {
             _miscdev <- MiscDeviceRegistration::register(options),
             state <- state,
+            _version <- debugfs.read_only_file(
+                c"version",
+                CString::try_from_fmt(fmt!("sparklink 0.2.0"))?,
+            ),
+            adv_count <- debugfs.read_write_file(
+                c"adv_count",
+                Atomic::<usize>::new(0),
+            ),
+            scan_count <- debugfs.read_write_file(
+                c"scan_count",
+                Atomic::<usize>::new(0),
+            ),
+            _debugfs: debugfs,
         })
     }
 }
@@ -356,7 +385,7 @@ struct SparkLinkCtl {
 impl MiscDevice for SparkLinkCtl {
     type Ptr = Pin<KBox<Self>>;
 
-    fn open(_file: &File, misc: &MiscDeviceRegistration<Self>) -> Result<Pin<KBox<Self>>> {
+    fn open(_file: &FsFile, misc: &MiscDeviceRegistration<Self>) -> Result<Pin<KBox<Self>>> {
         let dev = ARef::from(misc.device());
         dev_info!(dev, "sparklink: control interface opened\n");
 
@@ -374,7 +403,7 @@ impl MiscDevice for SparkLinkCtl {
         )
     }
 
-    fn ioctl(me: Pin<&SparkLinkCtl>, _file: &File, cmd: u32, arg: usize) -> Result<isize> {
+    fn ioctl(me: Pin<&SparkLinkCtl>, _file: &FsFile, cmd: u32, arg: usize) -> Result<isize> {
         match cmd {
             SL_IOCTL_START_ADV => {
                 let slice = UserSlice::new(

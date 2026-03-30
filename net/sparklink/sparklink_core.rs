@@ -19,6 +19,7 @@ mod sle_adv;
 mod sle_conn;
 mod sle_crypto;
 mod sle_security;
+mod sle_ssap;
 
 use kernel::{
     debugfs::{Dir, File},
@@ -41,6 +42,7 @@ use kernel::{
 use sle_adv::{AdvParams, AdvScanInner, ScanParams};
 use sle_conn::{AccessResponseType, ConnInner, GtRole, NegotiatedParams, CONN_DATA_MAX};
 use sle_security::SecurityInner;
+use sle_ssap::SsapInner;
 
 // ---------------------------------------------------------------------------
 // IOCTL definitions for the /dev/sparklink control interface
@@ -126,6 +128,29 @@ const SL_IOCTL_SEC_SM4_ENC_TEST: u32 = _IOW::<SleConnData>(SL_MAGIC, 0x45);
 
 /// SM4 decrypt test: decrypt data in-place using session key.
 const SL_IOCTL_SEC_SM4_DEC_TEST: u32 = _IOW::<SleConnData>(SL_MAGIC, 0x46);
+
+// --- SSAP service layer ioctls ---
+
+/// Register the built-in device info service.
+const SL_IOCTL_SSAP_REGISTER_SVC: u32 = _IO(SL_MAGIC, 0x50);
+
+/// Get SSAP service/property count summary.
+const SL_IOCTL_SSAP_INFO: u32 = _IOR::<SsapSummary>(SL_MAGIC, 0x51);
+
+/// Read a property by handle.
+const SL_IOCTL_SSAP_READ: u32 = _IOW::<SsapReadWrite>(SL_MAGIC, 0x52);
+
+/// Write a property by handle.
+const SL_IOCTL_SSAP_WRITE: u32 = _IOW::<SsapReadWrite>(SL_MAGIC, 0x53);
+
+/// Find primary services.
+const SL_IOCTL_SSAP_FIND_SVC: u32 = _IOR::<SsapServiceList>(SL_MAGIC, 0x54);
+
+/// Send a notification for a property handle.
+const SL_IOCTL_SSAP_NOTIFY: u32 = _IOW::<u16>(SL_MAGIC, 0x55);
+
+/// Dequeue one pending notification.
+const SL_IOCTL_SSAP_DEQUEUE_NTF: u32 = _IOR::<SsapNotification>(SL_MAGIC, 0x56);
 
 // ---------------------------------------------------------------------------
 // SparkLink address (6 bytes, same as SLE MAC layer identifier)
@@ -462,6 +487,82 @@ pub struct SleHashTest {
 unsafe impl FromBytes for SleHashTest {}
 
 // ---------------------------------------------------------------------------
+// SSAP service layer userspace data structures
+// ---------------------------------------------------------------------------
+
+/// SSAP summary info returned to userspace.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SsapSummary {
+    /// Number of registered services.
+    pub service_count: u16,
+    /// Total number of properties across all services.
+    pub property_count: u16,
+    /// Total SSAP entries (services + properties + methods + events).
+    pub total_entries: u16,
+    /// Negotiated MTU.
+    pub mtu: u16,
+    /// Pending notification count.
+    pub notification_count: u16,
+    _reserved: [u8; 6],
+}
+
+/// SSAP read/write payload for property access.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SsapReadWrite {
+    /// Property handle.
+    pub handle: u16,
+    /// Data length in bytes.
+    pub length: u16,
+    /// Data buffer (max 252 bytes).
+    pub data: [u8; 252],
+}
+
+// SAFETY: SsapReadWrite is repr(C) with only primitive fields.
+unsafe impl FromBytes for SsapReadWrite {}
+
+/// Service entry in the discovery result list.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SsapServiceEntry {
+    /// Service start handle.
+    pub start_handle: u16,
+    /// Service end handle.
+    pub end_handle: u16,
+    /// Service UUID (16-bit; 0 if 128-bit).
+    pub uuid16: u16,
+    /// Whether primary service.
+    pub primary: u8,
+    _pad: u8,
+}
+
+/// Service list returned from FIND_SVC.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SsapServiceList {
+    /// Number of services in the list.
+    pub count: u16,
+    _pad: [u8; 2],
+    /// Up to 15 services.
+    pub services: [SsapServiceEntry; 15],
+}
+
+/// Dequeued notification/indication payload.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SsapNotification {
+    /// Property handle that generated the notification.
+    pub handle: u16,
+    /// 1 = indication, 0 = notification.
+    pub indication: u8,
+    /// Data length.
+    pub length: u8,
+    /// Notification data (max 252 bytes).
+    pub data: [u8; 252],
+}
+
+// ---------------------------------------------------------------------------
 // SCI bus types
 // ---------------------------------------------------------------------------
 
@@ -668,6 +769,8 @@ struct SparkLinkCtl {
     conn: Mutex<ConnInner>,
     #[pin]
     security: Mutex<SecurityInner>,
+    #[pin]
+    ssap: Mutex<SsapInner>,
     dev: ARef<Device>,
 }
 
@@ -688,6 +791,7 @@ impl MiscDevice for SparkLinkCtl {
                     adv_scan <- new_mutex!(AdvScanInner::new(addr, name)),
                     conn <- new_mutex!(ConnInner::new(addr)),
                     security <- new_mutex!(SecurityInner::new()),
+                    ssap <- new_mutex!(SsapInner::new()),
                     dev: dev,
                 }
             },
@@ -1056,6 +1160,147 @@ impl MiscDevice for SparkLinkCtl {
                 let mut writer = out.writer();
                 writer.write_slice(bytes)?;
                 Ok(0)
+            }
+            // --- SSAP service layer ---
+            SL_IOCTL_SSAP_REGISTER_SVC => {
+                me.ssap.lock().register_device_info_service()?;
+                Ok(0)
+            }
+            SL_IOCTL_SSAP_INFO => {
+                let info = {
+                    let guard = me.ssap.lock();
+                    // SAFETY: SsapSummary is repr(C) with primitive fields.
+                    let mut info: SsapSummary = unsafe { core::mem::zeroed() };
+                    info.service_count = guard.service_count() as u16;
+                    info.property_count = guard.property_count() as u16;
+                    info.total_entries = guard.total_entries() as u16;
+                    info.mtu = guard.negotiated.mtu;
+                    info.notification_count = guard.notification_count() as u16;
+                    info
+                };
+                // SAFETY: SsapSummary is repr(C) and fully initialized.
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &info as *const SsapSummary as *const u8,
+                        core::mem::size_of::<SsapSummary>(),
+                    )
+                };
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SsapSummary>(),
+                );
+                let mut writer = slice.writer();
+                writer.write_slice(bytes)?;
+                Ok(0)
+            }
+            SL_IOCTL_SSAP_READ => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SsapReadWrite>(),
+                );
+                let mut reader = slice.reader();
+                let rw: SsapReadWrite = reader.read()?;
+
+                let data = me.ssap.lock().read_property(rw.handle)?;
+
+                // SAFETY: SsapReadWrite is repr(C).
+                let mut out: SsapReadWrite = unsafe { core::mem::zeroed() };
+                out.handle = rw.handle;
+                let copy_len = data.len().min(252);
+                out.length = copy_len as u16;
+                out.data[..copy_len].copy_from_slice(&data[..copy_len]);
+
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &out as *const SsapReadWrite as *const u8,
+                        core::mem::size_of::<SsapReadWrite>(),
+                    )
+                };
+                let wslice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SsapReadWrite>(),
+                );
+                let mut writer = wslice.writer();
+                writer.write_slice(bytes)?;
+                Ok(0)
+            }
+            SL_IOCTL_SSAP_WRITE => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SsapReadWrite>(),
+                );
+                let mut reader = slice.reader();
+                let rw: SsapReadWrite = reader.read()?;
+                let len = (rw.length as usize).min(252);
+                me.ssap.lock().write_property(rw.handle, &rw.data[..len])?;
+                Ok(0)
+            }
+            SL_IOCTL_SSAP_FIND_SVC => {
+                let services = me.ssap.lock().find_primary_services();
+
+                // SAFETY: SsapServiceList is repr(C).
+                let mut list: SsapServiceList = unsafe { core::mem::zeroed() };
+                let count = services.len().min(15);
+                list.count = count as u16;
+                for (i, (start, end, uuid)) in services.iter().take(15).enumerate() {
+                    list.services[i].start_handle = *start;
+                    list.services[i].end_handle = *end;
+                    list.services[i].uuid16 = uuid.as_u16().unwrap_or(0);
+                    list.services[i].primary = 1;
+                }
+
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &list as *const SsapServiceList as *const u8,
+                        core::mem::size_of::<SsapServiceList>(),
+                    )
+                };
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SsapServiceList>(),
+                );
+                let mut writer = slice.writer();
+                writer.write_slice(bytes)?;
+                Ok(0)
+            }
+            SL_IOCTL_SSAP_NOTIFY => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<u16>(),
+                );
+                let mut reader = slice.reader();
+                let handle: u16 = reader.read()?;
+                me.ssap.lock().notify(handle)?;
+                Ok(0)
+            }
+            SL_IOCTL_SSAP_DEQUEUE_NTF => {
+                let ntf = me.ssap.lock().dequeue_notification();
+                match ntf {
+                    Some(n) => {
+                        // SAFETY: SsapNotification is repr(C).
+                        let mut out: SsapNotification = unsafe { core::mem::zeroed() };
+                        out.handle = n.handle;
+                        out.indication = if n.indication { 1 } else { 0 };
+                        let copy_len = n.data.len().min(252);
+                        out.length = copy_len as u8;
+                        out.data[..copy_len].copy_from_slice(&n.data[..copy_len]);
+
+                        let bytes = unsafe {
+                            core::slice::from_raw_parts(
+                                &out as *const SsapNotification as *const u8,
+                                core::mem::size_of::<SsapNotification>(),
+                            )
+                        };
+                        let slice = UserSlice::new(
+                            UserPtr::from_addr(arg),
+                            core::mem::size_of::<SsapNotification>(),
+                        );
+                        let mut writer = slice.writer();
+                        writer.write_slice(bytes)?;
+                        Ok(0)
+                    }
+                    None => Err(EAGAIN),
+                }
             }
             _ => {
                 dev_err!(me.dev, "sparklink: unknown ioctl 0x{:x}\n", cmd);

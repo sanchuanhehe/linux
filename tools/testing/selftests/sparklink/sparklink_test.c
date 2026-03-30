@@ -61,6 +61,15 @@
 #define SL_IOCTL_SEC_SM4_ENC_TEST _IOW(SL_MAGIC, 0x45, struct sle_conn_data)
 #define SL_IOCTL_SEC_SM4_DEC_TEST _IOW(SL_MAGIC, 0x46, struct sle_conn_data)
 
+/* SSAP service layer */
+#define SL_IOCTL_SSAP_REGISTER_SVC _IO(SL_MAGIC, 0x50)
+#define SL_IOCTL_SSAP_INFO        _IOR(SL_MAGIC, 0x51, struct ssap_summary)
+#define SL_IOCTL_SSAP_READ        _IOW(SL_MAGIC, 0x52, struct ssap_read_write)
+#define SL_IOCTL_SSAP_WRITE       _IOW(SL_MAGIC, 0x53, struct ssap_read_write)
+#define SL_IOCTL_SSAP_FIND_SVC    _IOR(SL_MAGIC, 0x54, struct ssap_service_list)
+#define SL_IOCTL_SSAP_NOTIFY      _IOW(SL_MAGIC, 0x55, uint16_t)
+#define SL_IOCTL_SSAP_DEQUEUE_NTF _IOR(SL_MAGIC, 0x56, struct ssap_notification)
+
 /* ------------------------------------------------------------------ */
 /* Userspace data structures — must match repr(C) in sparklink_core   */
 /* ------------------------------------------------------------------ */
@@ -155,6 +164,43 @@ struct sle_hash_test {
 	uint16_t _pad;
 	uint8_t  data[220];
 	uint8_t  digest[32];
+} __attribute__((packed));
+
+/* SSAP */
+struct ssap_summary {
+	uint16_t service_count;
+	uint16_t property_count;
+	uint16_t total_entries;
+	uint16_t mtu;
+	uint16_t notification_count;
+	uint8_t  _reserved[6];
+} __attribute__((packed));
+
+struct ssap_read_write {
+	uint16_t handle;
+	uint16_t length;
+	uint8_t  data[252];
+} __attribute__((packed));
+
+struct ssap_service_entry {
+	uint16_t start_handle;
+	uint16_t end_handle;
+	uint16_t uuid16;
+	uint8_t  primary;
+	uint8_t  _pad;
+} __attribute__((packed));
+
+struct ssap_service_list {
+	uint16_t count;
+	uint8_t  _pad[2];
+	struct ssap_service_entry services[15];
+} __attribute__((packed));
+
+struct ssap_notification {
+	uint16_t handle;
+	uint8_t  indication;
+	uint8_t  length;
+	uint8_t  data[252];
 } __attribute__((packed));
 
 /* ------------------------------------------------------------------ */
@@ -722,6 +768,117 @@ static void test_security_pairing(int fd)
 	}
 }
 
+static void test_ssap_service(int fd)
+{
+	test_header("SSAP: service registration and property access");
+
+	/* Step 1: Register built-in device info service */
+	int ret = ioctl(fd, SL_IOCTL_SSAP_REGISTER_SVC, NULL);
+	check("SSAP_REGISTER_SVC", ret);
+
+	/* Step 2: Get SSAP summary info */
+	struct ssap_summary info;
+	memset(&info, 0, sizeof(info));
+	ret = ioctl(fd, SL_IOCTL_SSAP_INFO, &info);
+	check("SSAP_INFO", ret);
+	if (ret == 0) {
+		printf("  services=%u properties=%u total_entries=%u mtu=%u notifications=%u\n",
+		       info.service_count, info.property_count, info.total_entries,
+		       info.mtu, info.notification_count);
+		if (info.service_count != 1)
+			printf("  WARN: expected 1 service\n");
+		if (info.property_count != 3)
+			printf("  WARN: expected 3 properties\n");
+	}
+
+	/* Step 3: Find primary services */
+	struct ssap_service_list slist;
+	memset(&slist, 0, sizeof(slist));
+	ret = ioctl(fd, SL_IOCTL_SSAP_FIND_SVC, &slist);
+	check("SSAP_FIND_SVC", ret);
+	if (ret == 0) {
+		printf("  found %u primary services\n", slist.count);
+		for (int i = 0; i < slist.count && i < 15; i++) {
+			printf("    svc[%d]: handle=%u-%u uuid=0x%04x primary=%u\n",
+			       i, slist.services[i].start_handle,
+			       slist.services[i].end_handle,
+			       slist.services[i].uuid16,
+			       slist.services[i].primary);
+		}
+	}
+
+	/* Step 4: Read device name property (handle 0x0011) */
+	struct ssap_read_write rw;
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = 0x0011;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	check("SSAP_READ (device_name)", ret);
+	if (ret == 0) {
+		printf("  device_name[%u]: \"%.*s\"\n", rw.length, rw.length, rw.data);
+	}
+
+	/* Step 5: Read firmware version (handle 0x0012) */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = 0x0012;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	check("SSAP_READ (fw_version)", ret);
+	if (ret == 0) {
+		printf("  fw_version[%u]: \"%.*s\"\n", rw.length, rw.length, rw.data);
+	}
+
+	/* Step 6: Write status property (handle 0x0013) */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = 0x0013;
+	rw.length = 1;
+	rw.data[0] = 0x42;
+	ret = ioctl(fd, SL_IOCTL_SSAP_WRITE, &rw);
+	check("SSAP_WRITE (status)", ret);
+
+	/* Step 7: Read back the written value */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = 0x0013;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	check("SSAP_READ (status readback)", ret);
+	if (ret == 0 && rw.length == 1 && rw.data[0] == 0x42) {
+		printf("  OK:   Status readback matches: 0x%02x\n", rw.data[0]);
+	} else if (ret == 0) {
+		printf("  FAIL: Status readback mismatch: len=%u data[0]=0x%02x\n",
+		       rw.length, rw.data[0]);
+	}
+
+	/* Step 8: Check notification was generated from the write */
+	struct ssap_summary info2;
+	memset(&info2, 0, sizeof(info2));
+	ret = ioctl(fd, SL_IOCTL_SSAP_INFO, &info2);
+	if (ret == 0 && info2.notification_count > 0) {
+		printf("  OK:   %u notification(s) pending after write\n",
+		       info2.notification_count);
+
+		/* Dequeue the notification */
+		struct ssap_notification ntf;
+		memset(&ntf, 0, sizeof(ntf));
+		ret = ioctl(fd, SL_IOCTL_SSAP_DEQUEUE_NTF, &ntf);
+		check("SSAP_DEQUEUE_NTF", ret);
+		if (ret == 0) {
+			printf("  notification: handle=0x%04x ind=%u len=%u data[0]=0x%02x\n",
+			       ntf.handle, ntf.indication, ntf.length,
+			       ntf.length > 0 ? ntf.data[0] : 0);
+		}
+	} else {
+		printf("  INFO: no notifications pending\n");
+	}
+
+	/* Step 9: Try reading non-existent handle */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = 0xFFFF;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	if (ret < 0) {
+		printf("  OK:   Read invalid handle: correctly rejected (errno=%d)\n", errno);
+	} else {
+		printf("  WARN: expected error for invalid handle\n");
+	}
+}
+
 /* ------------------------------------------------------------------ */
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
@@ -752,6 +909,7 @@ int main(void)
 	test_conn_data_loopback(fd);
 	test_sm3_hash(fd);
 	test_security_pairing(fd);
+	test_ssap_service(fd);
 	test_unknown_ioctl(fd);
 
 	printf("\n=== All tests completed ===\n");

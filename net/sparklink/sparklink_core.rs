@@ -27,18 +27,20 @@ mod sle_event;
 use sle_dli::SleController;
 
 use kernel::{
+    bindings,
     debugfs::{Dir, File},
     device::Device,
     fs::{File as FsFile, Kiocb},
     ioctl::{_IO, _IOR, _IOW, _IOWR},
     iov::IovIterDest,
     miscdevice::{MiscDevice, MiscDeviceOptions, MiscDeviceRegistration},
-    new_mutex,
+    new_mutex, new_poll_condvar,
     prelude::*,
     str::CString,
     sync::{
         aref::ARef,
         atomic::Atomic,
+        poll::{PollCondVar, PollTable},
         Arc, Mutex,
     },
     transmute::FromBytes,
@@ -931,6 +933,8 @@ struct SparkLinkCtl {
     power: Mutex<PowerInner>,
     #[pin]
     events: Mutex<EventQueue>,
+    #[pin]
+    event_poll: PollCondVar,
     dev: ARef<Device>,
 }
 
@@ -954,6 +958,7 @@ impl MiscDevice for SparkLinkCtl {
                     ssap <- new_mutex!(SsapInner::new()),
                     power <- new_mutex!(PowerInner::new()),
                     events <- new_mutex!(EventQueue::new()),
+                    event_poll <- new_poll_condvar!("sparklink_event"),
                     dev: dev,
                 }
             },
@@ -980,6 +985,16 @@ impl MiscDevice for SparkLinkCtl {
             }
         }
         Ok(total)
+    }
+
+    fn poll(me: Pin<&SparkLinkCtl>, file: &FsFile, table: &PollTable<'_>) -> u32 {
+        table.register_wait(file, &me.event_poll);
+        let guard = me.events.lock();
+        let mut mask = 0u32;
+        if guard.has_events() {
+            mask |= bindings::POLLIN | bindings::POLLRDNORM;
+        }
+        mask
     }
 
     fn ioctl(me: Pin<&SparkLinkCtl>, _file: &FsFile, cmd: u32, arg: usize) -> Result<isize> {
@@ -1082,6 +1097,7 @@ impl MiscDevice for SparkLinkCtl {
                     inject.discovery_level,
                     &inject.name[..name_len],
                 );
+                me.event_poll.notify_all();
                 dev_info!(
                     me.dev,
                     "sparklink: injected ADV from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} rssi={}\n",
@@ -1105,6 +1121,7 @@ impl MiscDevice for SparkLinkCtl {
                 };
                 let handle = me.conn.lock().connect(cp.peer_addr, role)?;
                 me.events.lock().push_conn_state(handle, 0, 1, cp.peer_addr, 0);
+                me.event_poll.notify_all();
                 Ok(handle as isize)
             }
             SL_IOCTL_DISCONNECT => {
@@ -1116,6 +1133,7 @@ impl MiscDevice for SparkLinkCtl {
                 guard.disconnect(handle)?;
                 drop(guard);
                 me.events.lock().push_conn_state(handle, old_state, 0, peer_addr, 0);
+                me.event_poll.notify_all();
                 Ok(0)
             }
             SL_IOCTL_CONN_INFO => {
@@ -1192,9 +1210,11 @@ impl MiscDevice for SparkLinkCtl {
                 match &result {
                     Ok(()) => {
                         me.events.lock().push_conn_state(handle, 1, 2, peer_addr, 0);
+                        me.event_poll.notify_all();
                     }
                     Err(_) => {
                         me.events.lock().push_conn_state(handle, 1, 0, peer_addr, resp.response_type);
+                        me.event_poll.notify_all();
                     }
                 }
                 result.map(|()| 0isize)
@@ -1211,6 +1231,7 @@ impl MiscDevice for SparkLinkCtl {
                 guard.receive_data(handle, &cd.data[..len], seq)?;
                 drop(guard);
                 me.events.lock().push_data_received(handle, len as u16);
+                me.event_poll.notify_all();
                 dev_info!(
                     me.dev,
                     "sparklink: injected {} bytes connection data (handle={})\n",

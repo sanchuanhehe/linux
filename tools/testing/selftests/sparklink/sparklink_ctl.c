@@ -41,6 +41,7 @@
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <stdint.h>
+#include <poll.h>
 
 #define SL_MAGIC 'S'
 #define DEVICE "/dev/sparklink"
@@ -618,7 +619,7 @@ static const char *event_type_str(uint8_t t)
 static void cmd_event(int fd, int argc, char **argv)
 {
 	if (argc < 1) {
-		fprintf(stderr, "Usage: sparklink_ctl event <count|read>\n");
+		fprintf(stderr, "Usage: sparklink_ctl event <count|read|wait>\n");
 		return;
 	}
 	if (strcmp(argv[0], "count") == 0) {
@@ -653,6 +654,29 @@ static void cmd_event(int fd, int argc, char **argv)
 			printf("No pending events\n");
 		else
 			printf("Total: %d event(s)\n", total);
+	} else if (strcmp(argv[0], "wait") == 0) {
+		int timeout_ms = 5000;
+		if (argc >= 2)
+			timeout_ms = atoi(argv[1]);
+		printf("Waiting for events (timeout=%dms)...\n", timeout_ms);
+		struct pollfd pfd = { .fd = fd, .events = POLLIN };
+		int ret = poll(&pfd, 1, timeout_ms);
+		if (ret < 0) {
+			perror("poll");
+		} else if (ret == 0) {
+			printf("Timeout, no events\n");
+		} else {
+			printf("Events available, reading...\n");
+			struct sle_wire_event evt;
+			int total = 0;
+			while (read(fd, &evt, sizeof(evt)) > 0 && total < 64) {
+				total++;
+				printf("  [%d] %s (type=0x%02x)\n",
+				       total, event_type_str(evt.event_type),
+				       evt.event_type);
+			}
+			printf("Total: %d event(s)\n", total);
+		}
 	} else {
 		fprintf(stderr, "Unknown event command: %s\n", argv[0]);
 	}
@@ -713,7 +737,7 @@ static void usage(void)
 	fprintf(stderr, "  ssap <register|info|read <h>|write <h> <v>>\n");
 	fprintf(stderr, "                             SSAP service layer\n");
 	fprintf(stderr, "  pm   <info|suspend|resume> Power management\n");
-	fprintf(stderr, "  event <count|read>         Event notification\n");
+	fprintf(stderr, "  event <count|read|wait [ms]> Event notification\n");
 	fprintf(stderr, "  dli  <info|stats>          DLI controller / stats\n");
 }
 

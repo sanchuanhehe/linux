@@ -18,6 +18,7 @@ use crate::{
     mm::virt::VmaNew,
     prelude::*,
     seq_file::SeqFile,
+    sync::poll::PollTable,
     types::{ForeignOwnable, Opaque},
 };
 use core::{marker::PhantomData, pin::Pin};
@@ -188,6 +189,19 @@ pub trait MiscDevice: Sized {
         _m: &SeqFile,
         _file: &File,
     ) {
+        build_error!(VTABLE_DEFAULT_ERROR)
+    }
+
+    /// Handler for poll.
+    ///
+    /// Returns a bitmask of poll flags (e.g. `POLLIN | POLLRDNORM`).
+    /// The implementation should call `table.register_wait()` to register
+    /// the poll table with the appropriate `PollCondVar`.
+    fn poll(
+        _device: <Self::Ptr as ForeignOwnable>::Borrowed<'_>,
+        _file: &File,
+        _table: &PollTable<'_>,
+    ) -> u32 {
         build_error!(VTABLE_DEFAULT_ERROR)
     }
 }
@@ -387,6 +401,29 @@ impl<T: MiscDevice> MiscdeviceVTable<T> {
         T::show_fdinfo(device, m, file);
     }
 
+    /// # Safety
+    ///
+    /// `file` must be a valid file that is associated with a `MiscDeviceRegistration<T>`.
+    unsafe extern "C" fn poll(
+        file: *mut bindings::file,
+        wait: *mut bindings::poll_table_struct,
+    ) -> bindings::__poll_t {
+        // SAFETY: The poll call of a file can access the private data.
+        let private = unsafe { (*file).private_data };
+        // SAFETY: Poll calls can borrow the private data of the file.
+        let device = unsafe { <T::Ptr as ForeignOwnable>::borrow(private) };
+
+        // SAFETY:
+        // * The file is valid for the duration of this call.
+        // * There is no active fdget_pos region on the file on this thread.
+        let file = unsafe { File::from_raw_file(file) };
+
+        // SAFETY: `wait` is null or references a valid poll_table for this call.
+        let table = unsafe { PollTable::from_raw(wait) };
+
+        T::poll(device, file, &table)
+    }
+
     const VTABLE: bindings::file_operations = bindings::file_operations {
         open: Some(Self::open),
         release: Some(Self::release),
@@ -416,6 +453,11 @@ impl<T: MiscDevice> MiscdeviceVTable<T> {
         },
         show_fdinfo: if T::HAS_SHOW_FDINFO {
             Some(Self::show_fdinfo)
+        } else {
+            None
+        },
+        poll: if T::HAS_POLL {
+            Some(Self::poll)
         } else {
             None
         },

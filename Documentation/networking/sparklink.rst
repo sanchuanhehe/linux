@@ -525,7 +525,8 @@ Event types:
 
 The event queue holds up to 64 events. When full, the oldest event is
 dropped (LRU eviction). ``read()`` returns ``EAGAIN`` when no events
-are pending; callers should use non-blocking I/O or poll for readability.
+are pending. Callers can use ``poll()``/``epoll()`` to wait for events
+with ``POLLIN | POLLRDNORM`` readiness indication.
 
 Multiple events are returned in a single ``read()`` call if the
 userspace buffer is large enough.
@@ -675,7 +676,7 @@ sparklink_test
 
 Integration test program at
 ``tools/testing/selftests/sparklink/sparklink_test.c``.
-Covers all subsystem ioctl interfaces with 19 test cases:
+Covers all subsystem ioctl interfaces with 20 test cases:
 
 - Device management: count, info, register
 - Advertising: start/stop, duplicate detection
@@ -688,6 +689,7 @@ Covers all subsystem ioctl interfaces with 19 test cases:
 - Event notification: read events after connect/inject
 - Event statistics: EVENT_STATS ioctl verification
 - DLI controller info: DLI_INFO ioctl verification
+- poll/epoll: poll readiness with event trigger and drain
 - SM3 hash: test vector verification
 - Security: PSK pairing, encryption, SM4 roundtrip
 - SSAP: service registration, property read/write, notifications
@@ -743,6 +745,7 @@ CLI control tool at ``tools/testing/selftests/sparklink/sparklink_ctl.c``.
 
     event count                       Show pending event count
     event read                        Read and display pending events
+    event wait [ms]                   Wait for events with poll (default 5000ms)
 
     dli info                          Show DLI controller information
     dli stats                         Show event queue statistics
@@ -868,16 +871,11 @@ Current limitations:
 3. **Pure Rust crypto** -- SM3/SM4 are implemented in pure Rust
    without kernel crypto API hardware acceleration.
 
-4. **No poll/epoll** -- The kernel MiscDevice vtable does not
-   expose a ``poll`` callback in the current Rust binding; event
-   notification uses non-blocking ``read()`` only.
-
 Planned work:
 
 - USB DLI driver for physical SLE radio controllers
 - Generic Netlink control plane migration when Rust bindings mature
 - Kernel crypto API integration for hardware-accelerated SM3/SM4
-- poll/epoll support when the Rust MiscDevice binding adds it
 - sysfs/configfs runtime configuration interface
 
 References

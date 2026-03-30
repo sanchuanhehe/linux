@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <stdint.h>
+#include <poll.h>
 
 /* ------------------------------------------------------------------ */
 /* IOCTL definitions — must match sparklink_core.rs                   */
@@ -1328,6 +1329,61 @@ static void test_dli_info(int fd)
 		printf("  FAIL: max_connections=0\n");
 }
 
+static void test_poll_epoll(int fd)
+{
+	test_header("poll/epoll event notification");
+
+	/* Step 1: poll on empty queue — should timeout immediately */
+	struct pollfd pfd = { .fd = fd, .events = POLLIN };
+	int ret = poll(&pfd, 1, 0);
+	if (ret == 0) {
+		printf("  OK:   poll() returns 0 on empty queue\n");
+	} else {
+		printf("  WARN: poll() returned %d on empty queue (expected 0)\n", ret);
+	}
+
+	/* Step 2: Trigger an event (connect) */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xBB;
+	cp.peer_addr[5] = 0xBB;
+	uint16_t handle = 0;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret > 0) {
+		handle = (uint16_t)ret;
+		printf("  OK:   connected handle=%u\n", handle);
+	} else {
+		printf("  FAIL: connect failed (%d)\n", ret);
+		return;
+	}
+
+	/* Step 3: poll should now return POLLIN */
+	pfd.revents = 0;
+	ret = poll(&pfd, 1, 0);
+	if (ret == 1 && (pfd.revents & POLLIN)) {
+		printf("  OK:   poll() returns POLLIN after event\n");
+	} else {
+		printf("  WARN: poll() returned %d, revents=0x%x\n", ret, pfd.revents);
+	}
+
+	/* Step 4: Drain events via read() */
+	struct sle_wire_event evt;
+	while (read(fd, &evt, sizeof(evt)) > 0)
+		;
+
+	/* Step 5: poll should return 0 after drain */
+	pfd.revents = 0;
+	ret = poll(&pfd, 1, 0);
+	if (ret == 0) {
+		printf("  OK:   poll() returns 0 after drain\n");
+	} else {
+		printf("  WARN: poll() returned %d after drain\n", ret);
+	}
+
+	/* Cleanup */
+	ioctl(fd, SL_IOCTL_DISCONNECT, &handle);
+}
+
 static void test_multi_conn_concurrent(int fd)
 {
 	test_header("Multi-connection: concurrent data exchange");
@@ -1497,6 +1553,7 @@ int main(void)
 	test_event_notification(fd);
 	test_event_stats(fd);
 	test_dli_info(fd);
+	test_poll_epoll(fd);
 	test_multi_conn_concurrent(fd);
 
 	printf("\n=== All tests completed ===\n");

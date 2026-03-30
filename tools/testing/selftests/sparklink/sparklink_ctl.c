@@ -46,6 +46,7 @@
 #define DEVICE "/dev/sparklink"
 
 /* ioctl definitions */
+#define SL_IOCTL_DEV_INFO        _IOR(SL_MAGIC, 0x04, struct sci_dev_info)
 #define SL_IOCTL_START_ADV       _IOW(SL_MAGIC, 0x10, struct sle_adv_params)
 #define SL_IOCTL_STOP_ADV        _IO(SL_MAGIC, 0x11)
 #define SL_IOCTL_START_SCAN      _IOW(SL_MAGIC, 0x12, struct sle_scan_params)
@@ -67,6 +68,15 @@
 #define SL_IOCTL_PM_SET_STATE    _IOW(SL_MAGIC, 0x61, struct sle_pm_state_cmd)
 
 /* Data structures */
+struct sci_dev_info {
+	uint16_t index;
+	uint8_t  state;
+	uint8_t  bus;
+	uint8_t  addr[6];
+	uint8_t  name[32];
+	uint8_t  _reserved[24];
+} __attribute__((packed));
+
 struct sle_adv_params {
 	uint16_t dev_index;
 	uint8_t  discovery_level;
@@ -215,13 +225,29 @@ static int parse_hex(const char *str, uint8_t *out, int max_len)
 	return len;
 }
 
-static void cmd_info(void)
+static void cmd_info(int fd)
 {
+	static const char *state_names[] = {"idle", "advertising", "scanning", "connected"};
+	static const char *bus_names[]   = {"virtual", "uart", "spi", "sdio", "usb"};
+
 	printf("SparkLink Control Utility\n");
 	printf("Device: %s\n", DEVICE);
 	printf("Standard: T/XS 10002-2025, T/XS 20001-2025\n");
 	printf("Modules: core pdu adv conn crypto security ssap power\n");
-	printf("Interface: ioctl (netlink planned)\n");
+
+	struct sci_dev_info info;
+	memset(&info, 0, sizeof(info));
+	if (ioctl(fd, SL_IOCTL_DEV_INFO, &info) == 0) {
+		const char *state = info.state < 4 ? state_names[info.state] : "unknown";
+		const char *bus   = info.bus < 5 ? bus_names[info.bus] : "unknown";
+		printf("Controller #%u: state=%s bus=%s addr=%02x:%02x:%02x:%02x:%02x:%02x name=%.32s\n",
+		       info.index, state, bus,
+		       info.addr[0], info.addr[1], info.addr[2],
+		       info.addr[3], info.addr[4], info.addr[5],
+		       info.name);
+	} else {
+		printf("Interface: ioctl (DEV_INFO unavailable)\n");
+	}
 }
 
 static void cmd_adv(int fd, int argc, char **argv)
@@ -518,18 +544,15 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	if (strcmp(argv[1], "info") == 0) {
-		cmd_info();
-		return 0;
-	}
-
 	int fd = open(DEVICE, O_RDWR);
 	if (fd < 0) {
 		perror("open " DEVICE);
 		return 1;
 	}
 
-	if (strcmp(argv[1], "adv") == 0)
+	if (strcmp(argv[1], "info") == 0)
+		cmd_info(fd);
+	else if (strcmp(argv[1], "adv") == 0)
 		cmd_adv(fd, argc - 2, argv + 2);
 	else if (strcmp(argv[1], "scan") == 0)
 		cmd_scan(fd, argc - 2, argv + 2);

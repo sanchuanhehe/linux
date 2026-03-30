@@ -47,6 +47,40 @@ use sle_ssap::SsapInner;
 use sle_power::PowerInner;
 
 // ---------------------------------------------------------------------------
+// Userspace read/write helpers for repr(C) ioctl structures
+// ---------------------------------------------------------------------------
+
+/// Read a repr(C) struct from userspace.
+///
+/// # Safety requirement on T
+///
+/// `T` must be `repr(C)` with only primitive fields so that every bit
+/// pattern produced by FromBytes is valid.
+fn read_user_struct<T: FromBytes + Sized>(arg: usize) -> Result<T> {
+    let slice = UserSlice::new(UserPtr::from_addr(arg), core::mem::size_of::<T>());
+    let mut reader = slice.reader();
+    reader.read()
+}
+
+/// Write a repr(C) struct to userspace.
+///
+/// # Safety
+///
+/// `T` must be `repr(C)` with only primitive fields and fully initialized
+/// (typically via `core::mem::zeroed()` followed by field assignments) so
+/// that converting it to a byte slice is defined behaviour.
+fn write_user_struct<T: Sized>(arg: usize, val: &T) -> Result {
+    // SAFETY: T is repr(C) with only primitive fields, caller guarantees
+    // the value is fully initialized.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(val as *const T as *const u8, core::mem::size_of::<T>())
+    };
+    let slice = UserSlice::new(UserPtr::from_addr(arg), core::mem::size_of::<T>());
+    slice.writer().write_slice(bytes)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // IOCTL definitions for the /dev/sparklink control interface
 // ---------------------------------------------------------------------------
 
@@ -62,7 +96,6 @@ const SL_IOCTL_DEV_UNREGISTER: u32 = _IOW::<u16>(SL_MAGIC, 0x02);
 const SL_IOCTL_DEV_COUNT: u32 = _IOR::<u32>(SL_MAGIC, 0x03);
 
 /// Get device info by index.
-#[allow(dead_code)]
 const SL_IOCTL_DEV_INFO: u32 = _IOR::<SciDevInfo>(SL_MAGIC, 0x04);
 
 /// Start SLE advertising (device discovery - discoverable side).
@@ -667,103 +700,15 @@ pub enum SciBus {
 }
 
 // ---------------------------------------------------------------------------
-// SCI device: the core representation of a SparkLink controller
+// Global device registry (placeholder for future multi-device support)
 // ---------------------------------------------------------------------------
 
-/// Internal mutable state of an SCI device.
-#[allow(dead_code)]
-struct SciDevInner {
-    state: SciState,
-    adv_scan: AdvScanInner,
-}
-
-/// An SCI device represents a single SparkLink controller.
-#[allow(dead_code)]
-#[pin_data]
-pub struct SciDevEntry {
-    /// SCI device index.
-    pub index: u16,
-    /// Transport bus type.
-    pub bus: SciBus,
-    /// SLE address.
-    pub addr: SleAddr,
-    /// Device name (UTF-8, null-padded).
-    pub name: [u8; 32],
-    #[pin]
-    inner: Mutex<SciDevInner>,
-}
-
-impl SciDevEntry {
-    /// Create a new SCI device entry.
-    #[allow(dead_code)]
-    fn new(index: u16, bus: SciBus, addr: SleAddr, name: [u8; 32]) -> impl PinInit<Self, Error> {
-        let adv_scan = AdvScanInner::new(addr.b, &name);
-        try_pin_init!(Self {
-            index,
-            bus,
-            addr,
-            name,
-            inner <- new_mutex!(SciDevInner {
-                state: SciState::Idle,
-                adv_scan,
-            }),
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Global device registry
-// ---------------------------------------------------------------------------
-
-/// Global state: the list of all registered SCI devices.
-#[allow(dead_code)]
+/// Global state: placeholder for future multi-device support.
+/// Multi-device registry will be integrated when the kernel MiscDevice API
+/// supports passing user data from module init to the open() callback.
 struct SparkLinkState {
-    devices: KVec<Pin<KBox<SciDevEntry>>>,
+    #[allow(dead_code)]
     next_index: u16,
-}
-
-#[allow(dead_code)]
-impl SparkLinkState {
-    /// Register a new virtual SCI device for testing.
-    fn register_virtual_device(&mut self) -> Result<u16> {
-        let idx = self.next_index;
-        let addr = SleAddr {
-            b: [0x5E, 0x00, 0x00, 0x00, (idx >> 8) as u8, idx as u8],
-        };
-        let mut name = [0u8; 32];
-        // "sparklink0", "sparklink1", ...
-        let prefix = b"sparklink";
-        name[..prefix.len()].copy_from_slice(prefix);
-        // Append index digit(s) — simple single-digit for now
-        let digit = b'0' + (idx % 10) as u8;
-        name[prefix.len()] = digit;
-
-        let dev = KBox::try_pin_init(
-            SciDevEntry::new(idx, SciBus::Virtual, addr, name),
-            GFP_KERNEL,
-        )?;
-        self.devices.push(dev, GFP_KERNEL)?;
-        self.next_index = idx.checked_add(1).ok_or(EOVERFLOW)?;
-        pr_info!("sparklink: registered device sci{}\n", idx);
-        Ok(idx)
-    }
-
-    /// Unregister a device by index.
-    fn unregister_device(&mut self, index: u16) -> Result {
-        let pos = self
-            .devices
-            .iter()
-            .position(|d| d.index == index)
-            .ok_or(ENODEV)?;
-        let _ = self.devices.remove(pos);
-        pr_info!("sparklink: unregistered device sci{}\n", index);
-        Ok(())
-    }
-
-    /// Find device by index.
-    fn find_device(&self, index: u16) -> Option<&Pin<KBox<SciDevEntry>>> {
-        self.devices.iter().find(|d| d.index == index)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -808,7 +753,6 @@ impl kernel::InPlaceModule for SparkLinkModule {
 
         let state = Arc::pin_init(
             new_mutex!(SparkLinkState {
-                devices: KVec::new(),
                 next_index: 0,
             }),
             GFP_KERNEL,
@@ -914,12 +858,7 @@ impl MiscDevice for SparkLinkCtl {
     fn ioctl(me: Pin<&SparkLinkCtl>, _file: &FsFile, cmd: u32, arg: usize) -> Result<isize> {
         match cmd {
             SL_IOCTL_START_ADV => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleAdvParams>(),
-                );
-                let mut reader = slice.reader();
-                let uparams: SleAdvParams = reader.read()?;
+                let uparams: SleAdvParams = read_user_struct(arg)?;
                 let params = AdvParams {
                     discovery_level: uparams.discovery_level,
                     interval_slots: (uparams.interval_ms as u32) * 8, // ms to 125us slots
@@ -944,12 +883,7 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             SL_IOCTL_START_SCAN => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleScanParams>(),
-                );
-                let mut reader = slice.reader();
-                let uparams: SleScanParams = reader.read()?;
+                let uparams: SleScanParams = read_user_struct(arg)?;
                 let params = ScanParams {
                     window_slots: (uparams.window_ms as u32) * 8,
                     interval_slots: (uparams.interval_ms as u32) * 8,
@@ -964,9 +898,26 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             SL_IOCTL_DEV_COUNT => {
-                // Return scan result count when scanning, 0 otherwise
-                let count = me.adv_scan.lock().scan_result_count();
-                Ok(count as isize)
+                // Per-fd design: each open fd has exactly one virtual controller.
+                Ok(1)
+            }
+            SL_IOCTL_DEV_INFO => {
+                let guard = me.adv_scan.lock();
+                // SAFETY: SciDevInfo is repr(C) with only primitive fields.
+                let mut info: SciDevInfo = unsafe { core::mem::zeroed() };
+                info.index = 0;
+                info.state = match (guard.is_advertising(), guard.is_scanning()) {
+                    (true, _) => SciState::Advertising as u8,
+                    (_, true) => SciState::Scanning as u8,
+                    _ => SciState::Idle as u8,
+                };
+                info.bus = SciBus::Virtual as u8;
+                info.addr = SleAddr { b: [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01] };
+                let name = b"sparklink-ctl";
+                info.name[..name.len()].copy_from_slice(name);
+                drop(guard);
+                write_user_struct(arg, &info)?;
+                Ok(0)
             }
             SL_IOCTL_DEV_REGISTER => {
                 dev_info!(me.dev, "sparklink: DEV_REGISTER (stub)\n");
@@ -977,12 +928,7 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             SL_IOCTL_INJECT_ADV => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleInjectAdv>(),
-                );
-                let mut reader = slice.reader();
-                let inject: SleInjectAdv = reader.read()?;
+                let inject: SleInjectAdv = read_user_struct(arg)?;
 
                 // Build a fake AdvPdu from the injected data
                 let mut builder = sle_pdu::AdvDataBuilder::new();
@@ -1016,12 +962,7 @@ impl MiscDevice for SparkLinkCtl {
             }
             // --- Connection management ---
             SL_IOCTL_CONNECT => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleConnectParams>(),
-                );
-                let mut reader = slice.reader();
-                let cp: SleConnectParams = reader.read()?;
+                let cp: SleConnectParams = read_user_struct(arg)?;
                 let role = if cp.gt_role == 1 {
                     GtRole::GNode
                 } else {
@@ -1056,29 +997,11 @@ impl MiscDevice for SparkLinkCtl {
                     info.rx_bytes = guard.rx_bytes;
                     info
                 };
-                // Write back to userspace (lock released)
-                // SAFETY: SleConnInfo is repr(C) and fully initialized via zeroed().
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &info as *const SleConnInfo as *const u8,
-                        core::mem::size_of::<SleConnInfo>(),
-                    )
-                };
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleConnInfo>(),
-                );
-                let mut writer = slice.writer();
-                writer.write_slice(bytes)?;
+                write_user_struct(arg, &info)?;
                 Ok(0)
             }
             SL_IOCTL_CONN_SEND => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleConnData>(),
-                );
-                let mut reader = slice.reader();
-                let cd: SleConnData = reader.read()?;
+                let cd: SleConnData = read_user_struct(arg)?;
                 let len = (cd.length as usize).min(CONN_DATA_MAX);
                 let sent = me.conn.lock().send(&cd.data[..len])?;
                 Ok(sent as isize)
@@ -1091,29 +1014,11 @@ impl MiscDevice for SparkLinkCtl {
                 let copy_len = data_vec.len().min(CONN_DATA_MAX);
                 cd.length = copy_len as u16;
                 cd.data[..copy_len].copy_from_slice(&data_vec[..copy_len]);
-                // Write to userspace
-                // SAFETY: SleConnData is repr(C) and fully initialized via zeroed().
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &cd as *const SleConnData as *const u8,
-                        core::mem::size_of::<SleConnData>(),
-                    )
-                };
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleConnData>(),
-                );
-                let mut writer = slice.writer();
-                writer.write_slice(bytes)?;
+                write_user_struct(arg, &cd)?;
                 Ok(0)
             }
             SL_IOCTL_INJECT_CONN_RESP => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleInjectConnResp>(),
-                );
-                let mut reader = slice.reader();
-                let resp: SleInjectConnResp = reader.read()?;
+                let resp: SleInjectConnResp = read_user_struct(arg)?;
                 let resp_type = AccessResponseType::from_raw(resp.response_type)
                     .ok_or(EINVAL)?;
                 let mut params = NegotiatedParams::default();
@@ -1124,12 +1029,7 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             SL_IOCTL_INJECT_CONN_DATA => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleConnData>(),
-                );
-                let mut reader = slice.reader();
-                let cd: SleConnData = reader.read()?;
+                let cd: SleConnData = read_user_struct(arg)?;
                 let len = (cd.length as usize).min(CONN_DATA_MAX);
                 let mut guard = me.conn.lock();
                 let seq = guard.seq.rx_seq; // Use expected seq for loopback
@@ -1143,22 +1043,12 @@ impl MiscDevice for SparkLinkCtl {
             }
             // --- Security management ---
             SL_IOCTL_SEC_SET_PSK => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SlePskParams>(),
-                );
-                let mut reader = slice.reader();
-                let params: SlePskParams = reader.read()?;
+                let params: SlePskParams = read_user_struct(arg)?;
                 me.security.lock().set_psk(params.psk);
                 Ok(0)
             }
             SL_IOCTL_SEC_PAIR => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SlePairParams>(),
-                );
-                let mut reader = slice.reader();
-                let params: SlePairParams = reader.read()?;
+                let params: SlePairParams = read_user_struct(arg)?;
                 let mut guard = me.security.lock();
                 match params.method {
                     1 => guard.pair_just_works()?,
@@ -1179,19 +1069,7 @@ impl MiscDevice for SparkLinkCtl {
                     info.enc_key_fingerprint = guard.enc_key_fingerprint();
                     info
                 };
-                // SAFETY: SleSecInfo is repr(C) and fully initialized via zeroed().
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &info as *const SleSecInfo as *const u8,
-                        core::mem::size_of::<SleSecInfo>(),
-                    )
-                };
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleSecInfo>(),
-                );
-                let mut writer = slice.writer();
-                writer.write_slice(bytes)?;
+                write_user_struct(arg, &info)?;
                 Ok(0)
             }
             SL_IOCTL_SEC_ENCRYPT_ON => {
@@ -1199,78 +1077,25 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             SL_IOCTL_SEC_SM3_TEST => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleHashTest>(),
-                );
-                let mut reader = slice.reader();
-                let mut ht: SleHashTest = reader.read()?;
+                let mut ht: SleHashTest = read_user_struct(arg)?;
                 let in_len = (ht.in_len as usize).min(220);
                 let digest = SecurityInner::sm3_hash(&ht.data[..in_len]);
                 ht.digest = digest;
-                // Write back with digest filled in
-                // SAFETY: SleHashTest is repr(C) and fully initialized.
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &ht as *const SleHashTest as *const u8,
-                        core::mem::size_of::<SleHashTest>(),
-                    )
-                };
-                let out = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleHashTest>(),
-                );
-                let mut writer = out.writer();
-                writer.write_slice(bytes)?;
+                write_user_struct(arg, &ht)?;
                 Ok(0)
             }
             SL_IOCTL_SEC_SM4_ENC_TEST => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleConnData>(),
-                );
-                let mut reader = slice.reader();
-                let mut cd: SleConnData = reader.read()?;
+                let mut cd: SleConnData = read_user_struct(arg)?;
                 let len = (cd.length as usize).min(CONN_DATA_MAX);
                 me.security.lock().encrypt_test(&mut cd.data[..len])?;
-                // Write the encrypted data back
-                // SAFETY: SleConnData is repr(C) and fully initialized.
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &cd as *const SleConnData as *const u8,
-                        core::mem::size_of::<SleConnData>(),
-                    )
-                };
-                let out = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleConnData>(),
-                );
-                let mut writer = out.writer();
-                writer.write_slice(bytes)?;
+                write_user_struct(arg, &cd)?;
                 Ok(0)
             }
             SL_IOCTL_SEC_SM4_DEC_TEST => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleConnData>(),
-                );
-                let mut reader = slice.reader();
-                let mut cd: SleConnData = reader.read()?;
+                let mut cd: SleConnData = read_user_struct(arg)?;
                 let len = (cd.length as usize).min(CONN_DATA_MAX);
                 me.security.lock().decrypt_test(&mut cd.data[..len])?;
-                // SAFETY: SleConnData is repr(C) and fully initialized.
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &cd as *const SleConnData as *const u8,
-                        core::mem::size_of::<SleConnData>(),
-                    )
-                };
-                let out = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SleConnData>(),
-                );
-                let mut writer = out.writer();
-                writer.write_slice(bytes)?;
+                write_user_struct(arg, &cd)?;
                 Ok(0)
             }
             // --- SSAP service layer ---
@@ -1290,29 +1115,11 @@ impl MiscDevice for SparkLinkCtl {
                     info.notification_count = guard.notification_count() as u16;
                     info
                 };
-                // SAFETY: SsapSummary is repr(C) and fully initialized.
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &info as *const SsapSummary as *const u8,
-                        core::mem::size_of::<SsapSummary>(),
-                    )
-                };
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SsapSummary>(),
-                );
-                let mut writer = slice.writer();
-                writer.write_slice(bytes)?;
+                write_user_struct(arg, &info)?;
                 Ok(0)
             }
             SL_IOCTL_SSAP_READ => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SsapReadWrite>(),
-                );
-                let mut reader = slice.reader();
-                let rw: SsapReadWrite = reader.read()?;
-
+                let rw: SsapReadWrite = read_user_struct(arg)?;
                 let data = me.ssap.lock().read_property(rw.handle)?;
 
                 // SAFETY: SsapReadWrite is repr(C).
@@ -1321,28 +1128,11 @@ impl MiscDevice for SparkLinkCtl {
                 let copy_len = data.len().min(252);
                 out.length = copy_len as u16;
                 out.data[..copy_len].copy_from_slice(&data[..copy_len]);
-
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &out as *const SsapReadWrite as *const u8,
-                        core::mem::size_of::<SsapReadWrite>(),
-                    )
-                };
-                let wslice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SsapReadWrite>(),
-                );
-                let mut writer = wslice.writer();
-                writer.write_slice(bytes)?;
+                write_user_struct(arg, &out)?;
                 Ok(0)
             }
             SL_IOCTL_SSAP_WRITE => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SsapReadWrite>(),
-                );
-                let mut reader = slice.reader();
-                let rw: SsapReadWrite = reader.read()?;
+                let rw: SsapReadWrite = read_user_struct(arg)?;
                 let len = (rw.length as usize).min(252);
                 me.ssap.lock().write_property(rw.handle, &rw.data[..len])?;
                 Ok(0)
@@ -1361,27 +1151,11 @@ impl MiscDevice for SparkLinkCtl {
                     list.services[i].primary = 1;
                 }
 
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &list as *const SsapServiceList as *const u8,
-                        core::mem::size_of::<SsapServiceList>(),
-                    )
-                };
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SsapServiceList>(),
-                );
-                let mut writer = slice.writer();
-                writer.write_slice(bytes)?;
+                write_user_struct(arg, &list)?;
                 Ok(0)
             }
             SL_IOCTL_SSAP_NOTIFY => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<u16>(),
-                );
-                let mut reader = slice.reader();
-                let handle: u16 = reader.read()?;
+                let handle: u16 = read_user_struct(arg)?;
                 me.ssap.lock().notify(handle)?;
                 Ok(0)
             }
@@ -1396,19 +1170,7 @@ impl MiscDevice for SparkLinkCtl {
                         let copy_len = n.data.len().min(252);
                         out.length = copy_len as u8;
                         out.data[..copy_len].copy_from_slice(&n.data[..copy_len]);
-
-                        let bytes = unsafe {
-                            core::slice::from_raw_parts(
-                                &out as *const SsapNotification as *const u8,
-                                core::mem::size_of::<SsapNotification>(),
-                            )
-                        };
-                        let slice = UserSlice::new(
-                            UserPtr::from_addr(arg),
-                            core::mem::size_of::<SsapNotification>(),
-                        );
-                        let mut writer = slice.writer();
-                        writer.write_slice(bytes)?;
+                        write_user_struct(arg, &out)?;
                         Ok(0)
                     }
                     None => Err(EAGAIN),
@@ -1433,27 +1195,11 @@ impl MiscDevice for SparkLinkCtl {
                     info.idle_events = guard.stats.idle_events;
                     info
                 };
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &info as *const SlePmInfo as *const u8,
-                        core::mem::size_of::<SlePmInfo>(),
-                    )
-                };
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SlePmInfo>(),
-                );
-                let mut writer = slice.writer();
-                writer.write_slice(bytes)?;
+                write_user_struct(arg, &info)?;
                 Ok(0)
             }
             SL_IOCTL_PM_SET_STATE => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SlePmStateCmd>(),
-                );
-                let mut reader = slice.reader();
-                let cmd_data: SlePmStateCmd = reader.read()?;
+                let cmd_data: SlePmStateCmd = read_user_struct(arg)?;
                 let mut guard = me.power.lock();
                 match cmd_data.target_state {
                     0 => { guard.resume(); Ok(0) }
@@ -1463,12 +1209,7 @@ impl MiscDevice for SparkLinkCtl {
                 }
             }
             SL_IOCTL_PM_SET_INTERVAL => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<SlePmInterval>(),
-                );
-                let mut reader = slice.reader();
-                let params: SlePmInterval = reader.read()?;
+                let params: SlePmInterval = read_user_struct(arg)?;
                 let interval = sle_power::ConnInterval {
                     min_interval: params.min_interval,
                     max_interval: params.max_interval,
@@ -1480,12 +1221,7 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             SL_IOCTL_PM_FORCE_ACTIVE => {
-                let slice = UserSlice::new(
-                    UserPtr::from_addr(arg),
-                    core::mem::size_of::<u8>(),
-                );
-                let mut reader = slice.reader();
-                let enable: u8 = reader.read()?;
+                let enable: u8 = read_user_struct(arg)?;
                 me.power.lock().force_active(enable != 0);
                 Ok(0)
             }

@@ -217,6 +217,16 @@ impl AdvScanInner {
         Ok(())
     }
 
+    /// Check if currently advertising.
+    pub fn is_advertising(&self) -> bool {
+        self.state == AdvScanState::Advertising
+    }
+
+    /// Check if currently scanning.
+    pub fn is_scanning(&self) -> bool {
+        self.state == AdvScanState::Scanning
+    }
+
     /// Build the advertising PDU for the current configuration.
     ///
     /// Called by the driver/timer to generate the next advertising frame.

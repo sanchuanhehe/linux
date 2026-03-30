@@ -646,27 +646,33 @@ impl SsapInner {
         // Queue notifications outside the services borrow
         if do_notify {
             let mut nd = KVec::new();
-            let _ = nd.extend_from_slice(data, GFP_KERNEL);
-            let _ = self.notifications.push(
+            if nd.extend_from_slice(data, GFP_KERNEL).is_err() {
+                pr_warn!("sparklink: SSAP notification dropped (OOM) handle=0x{:04x}\n", handle);
+            } else if self.notifications.push(
                 PendingNotification {
                     handle,
                     indication: false,
                     data: nd,
                 },
                 GFP_KERNEL,
-            );
+            ).is_err() {
+                pr_warn!("sparklink: SSAP notification queue full handle=0x{:04x}\n", handle);
+            }
         }
         if do_indicate {
             let mut nd = KVec::new();
-            let _ = nd.extend_from_slice(data, GFP_KERNEL);
-            let _ = self.notifications.push(
+            if nd.extend_from_slice(data, GFP_KERNEL).is_err() {
+                pr_warn!("sparklink: SSAP indication dropped (OOM) handle=0x{:04x}\n", handle);
+            } else if self.notifications.push(
                 PendingNotification {
                     handle,
                     indication: true,
                     data: nd,
                 },
                 GFP_KERNEL,
-            );
+            ).is_err() {
+                pr_warn!("sparklink: SSAP indication queue full handle=0x{:04x}\n", handle);
+            }
         }
 
         Ok(())

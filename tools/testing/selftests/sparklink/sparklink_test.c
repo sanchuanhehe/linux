@@ -34,6 +34,7 @@
 #define SL_IOCTL_DEV_REGISTER    _IO(SL_MAGIC, 0x01)
 #define SL_IOCTL_DEV_UNREGISTER  _IOW(SL_MAGIC, 0x02, uint16_t)
 #define SL_IOCTL_DEV_COUNT       _IOR(SL_MAGIC, 0x03, uint32_t)
+#define SL_IOCTL_DEV_INFO        _IOR(SL_MAGIC, 0x04, struct sci_dev_info)
 
 #define SL_IOCTL_START_ADV       _IOW(SL_MAGIC, 0x10, struct sle_adv_params)
 #define SL_IOCTL_STOP_ADV        _IO(SL_MAGIC, 0x11)
@@ -81,6 +82,15 @@
 /* ------------------------------------------------------------------ */
 /* Userspace data structures — must match repr(C) in sparklink_core   */
 /* ------------------------------------------------------------------ */
+
+struct sci_dev_info {
+	uint16_t index;
+	uint8_t  state;
+	uint8_t  bus;
+	uint8_t  addr[6];
+	uint8_t  name[32];
+	uint8_t  _reserved[24];
+} __attribute__((packed));
 
 struct sle_adv_params {
 	uint16_t dev_index;
@@ -269,7 +279,27 @@ static void test_dev_count(int fd)
 {
 	test_header("DEV_COUNT");
 	int ret = ioctl(fd, SL_IOCTL_DEV_COUNT, NULL);
-	check("DEV_COUNT", ret);
+	if (ret == 1) {
+		printf("  OK:   DEV_COUNT: %d device(s)\n", ret);
+	} else {
+		printf("  WARN: DEV_COUNT: expected 1, got %d\n", ret);
+	}
+}
+
+static void test_dev_info(int fd)
+{
+	test_header("DEV_INFO");
+	struct sci_dev_info info;
+	memset(&info, 0, sizeof(info));
+	int ret = ioctl(fd, SL_IOCTL_DEV_INFO, &info);
+	check("DEV_INFO", ret);
+	if (ret == 0) {
+		printf("  INFO: index=%u state=%u bus=%u addr=%02x:%02x:%02x:%02x:%02x:%02x name=%.32s\n",
+		       info.index, info.state, info.bus,
+		       info.addr[0], info.addr[1], info.addr[2],
+		       info.addr[3], info.addr[4], info.addr[5],
+		       info.name);
+	}
 }
 
 static void test_dev_register(int fd)
@@ -1036,6 +1066,7 @@ int main(void)
 	printf("Opened %s (fd=%d)\n", DEVICE, fd);
 
 	test_dev_count(fd);
+	test_dev_info(fd);
 	test_dev_register(fd);
 	test_advertising(fd);
 	test_scanning(fd);

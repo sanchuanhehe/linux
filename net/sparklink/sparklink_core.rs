@@ -16,6 +16,7 @@
 
 mod sle_pdu;
 mod sle_adv;
+mod sle_conn;
 
 use kernel::{
     debugfs::{Dir, File},
@@ -36,6 +37,7 @@ use kernel::{
 };
 
 use sle_adv::{AdvParams, AdvScanInner, ScanParams};
+use sle_conn::{AccessResponseType, ConnInner, GtRole, NegotiatedParams, CONN_DATA_MAX};
 
 // ---------------------------------------------------------------------------
 // IOCTL definitions for the /dev/sparklink control interface
@@ -75,6 +77,29 @@ const SL_IOCTL_INJECT_ADV: u32 = _IOW::<SleInjectAdv>(SL_MAGIC, 0x20);
 
 /// Get the current scan result count.
 const SL_IOCTL_SCAN_RESULT_COUNT: u32 = _IO(SL_MAGIC, 0x21);
+
+// --- Connection management ioctls ---
+
+/// Initiate an SLE connection to a peer device.
+const SL_IOCTL_CONNECT: u32 = _IOW::<SleConnectParams>(SL_MAGIC, 0x30);
+
+/// Disconnect from the currently connected peer.
+const SL_IOCTL_DISCONNECT: u32 = _IO(SL_MAGIC, 0x31);
+
+/// Get connection status and statistics.
+const SL_IOCTL_CONN_INFO: u32 = _IOR::<SleConnInfo>(SL_MAGIC, 0x32);
+
+/// Send data on an established connection.
+const SL_IOCTL_CONN_SEND: u32 = _IOW::<SleConnData>(SL_MAGIC, 0x33);
+
+/// Receive data from an established connection.
+const SL_IOCTL_CONN_RECV: u32 = _IOR::<SleConnData>(SL_MAGIC, 0x34);
+
+/// Inject a simulated access response for loopback testing.
+const SL_IOCTL_INJECT_CONN_RESP: u32 = _IOW::<SleInjectConnResp>(SL_MAGIC, 0x35);
+
+/// Inject simulated received data for loopback testing.
+const SL_IOCTL_INJECT_CONN_DATA: u32 = _IOW::<SleConnData>(SL_MAGIC, 0x36);
 
 // ---------------------------------------------------------------------------
 // SparkLink address (6 bytes, same as SLE MAC layer identifier)
@@ -215,6 +240,137 @@ impl Default for SleInjectAdv {
 
 // SAFETY: SleInjectAdv is repr(C) with only primitive fields, all bit patterns valid.
 unsafe impl FromBytes for SleInjectAdv {}
+
+// ---------------------------------------------------------------------------
+// Connection management userspace data structures
+// ---------------------------------------------------------------------------
+
+/// Connection request parameters from userspace.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleConnectParams {
+    /// Target peer SLE address (6 bytes).
+    pub peer_addr: [u8; 6],
+    /// Desired GT role: 0=T node, 1=G node.
+    pub gt_role: u8,
+    /// Preferred bandwidth in MHz (1, 2, or 4).
+    pub bandwidth: u8,
+    /// Preferred MCS index (0-12).
+    pub mcs_index: u8,
+    _pad: u8,
+    /// Supervision timeout in 10 ms units.
+    pub timeout_10ms: u16,
+    _reserved: [u8; 4],
+}
+
+impl Default for SleConnectParams {
+    fn default() -> Self {
+        Self {
+            peer_addr: [0u8; 6],
+            gt_role: 0,
+            bandwidth: 1,
+            mcs_index: 4,
+            _pad: 0,
+            timeout_10ms: 100,
+            _reserved: [0u8; 4],
+        }
+    }
+}
+
+// SAFETY: SleConnectParams is repr(C) with only primitive fields, all bit patterns valid.
+unsafe impl FromBytes for SleConnectParams {}
+
+/// Connection status and statistics returned to userspace.
+///
+/// Layout is ordered to avoid implicit padding: u64 fields first,
+/// then u16, then u8 — no gaps between fields.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleConnInfo {
+    /// Total bytes transmitted.
+    pub tx_bytes: u64,
+    /// Total bytes received.
+    pub rx_bytes: u64,
+    /// Event group period in scheduling slots.
+    pub event_group_period: u16,
+    /// Supervision timeout in 10 ms units.
+    pub supervision_timeout: u16,
+    /// Pending TX queue depth.
+    pub tx_pending: u16,
+    /// Pending RX queue depth.
+    pub rx_pending: u16,
+    /// Connection state (see ConnState).
+    pub state: u8,
+    /// Peer SLE address.
+    pub peer_addr: [u8; 6],
+    /// Local GT role: 0=T, 1=G.
+    pub local_role: u8,
+    /// Negotiated bandwidth in MHz.
+    pub bandwidth_mhz: u8,
+    /// Negotiated MCS index.
+    pub mcs_index: u8,
+    /// Current TX sequence number.
+    pub tx_seq: u8,
+    /// Current RX sequence number.
+    pub rx_seq: u8,
+    _reserved: [u8; 12],
+}
+
+/// Data buffer for connection send/receive ioctls.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleConnData {
+    /// Data payload length in bytes.
+    pub length: u16,
+    /// Data payload.
+    pub data: [u8; 255],
+    _reserved: u8,
+}
+
+impl Default for SleConnData {
+    fn default() -> Self {
+        Self {
+            length: 0,
+            data: [0u8; 255],
+            _reserved: 0,
+        }
+    }
+}
+
+// SAFETY: SleConnData is repr(C) with only primitive fields, all bit patterns valid.
+unsafe impl FromBytes for SleConnData {}
+
+/// Injected connection response for loopback testing.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleInjectConnResp {
+    /// Response type (0=accepted, 1=role fail, 2=resource, 3=rejected).
+    pub response_type: u8,
+    /// Bandwidth in MHz for the accepted connection.
+    pub bandwidth_mhz: u8,
+    /// MCS index for the accepted connection.
+    pub mcs_index: u8,
+    _pad: u8,
+    /// Supervision timeout in 10 ms units.
+    pub supervision_timeout: u16,
+    _reserved: [u8; 2],
+}
+
+impl Default for SleInjectConnResp {
+    fn default() -> Self {
+        Self {
+            response_type: 0,
+            bandwidth_mhz: 1,
+            mcs_index: 4,
+            _pad: 0,
+            supervision_timeout: 100,
+            _reserved: [0u8; 2],
+        }
+    }
+}
+
+// SAFETY: SleInjectConnResp is repr(C) with only primitive fields, all bit patterns valid.
+unsafe impl FromBytes for SleInjectConnResp {}
 
 // ---------------------------------------------------------------------------
 // SCI bus types
@@ -419,6 +575,8 @@ impl kernel::InPlaceModule for SparkLinkModule {
 struct SparkLinkCtl {
     #[pin]
     adv_scan: Mutex<AdvScanInner>,
+    #[pin]
+    conn: Mutex<ConnInner>,
     dev: ARef<Device>,
 }
 
@@ -437,6 +595,7 @@ impl MiscDevice for SparkLinkCtl {
             try_pin_init! {
                 SparkLinkCtl {
                     adv_scan <- new_mutex!(AdvScanInner::new(addr, name)),
+                    conn <- new_mutex!(ConnInner::new(addr)),
                     dev: dev,
                 }
             },
@@ -546,6 +705,133 @@ impl MiscDevice for SparkLinkCtl {
             SL_IOCTL_SCAN_RESULT_COUNT => {
                 let count = me.adv_scan.lock().scan_result_count();
                 Ok(count as isize)
+            }
+            // --- Connection management ---
+            SL_IOCTL_CONNECT => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleConnectParams>(),
+                );
+                let mut reader = slice.reader();
+                let cp: SleConnectParams = reader.read()?;
+                let role = if cp.gt_role == 1 {
+                    GtRole::GNode
+                } else {
+                    GtRole::TNode
+                };
+                me.conn.lock().connect(cp.peer_addr, role)?;
+                Ok(0)
+            }
+            SL_IOCTL_DISCONNECT => {
+                me.conn.lock().disconnect()?;
+                Ok(0)
+            }
+            SL_IOCTL_CONN_INFO => {
+                // Gather connection info while holding the lock
+                let info = {
+                    let guard = me.conn.lock();
+                    // SAFETY: SleConnInfo is repr(C) with no implicit padding
+                    // (fields ordered largest-first), zeroed ensures all bytes defined.
+                    let mut info: SleConnInfo = unsafe { core::mem::zeroed() };
+                    info.state = guard.state as u8;
+                    info.peer_addr = guard.peer_addr;
+                    info.local_role = guard.local_role as u8;
+                    info.bandwidth_mhz = guard.params.bandwidth_mhz;
+                    info.mcs_index = guard.params.mcs_index;
+                    info.event_group_period = guard.params.event_group_period;
+                    info.supervision_timeout = guard.params.supervision_timeout;
+                    info.tx_seq = guard.seq.tx_seq;
+                    info.rx_seq = guard.seq.rx_seq;
+                    info.tx_pending = guard.tx_pending() as u16;
+                    info.rx_pending = guard.rx_pending() as u16;
+                    info.tx_bytes = guard.tx_bytes;
+                    info.rx_bytes = guard.rx_bytes;
+                    info
+                };
+                // Write back to userspace (lock released)
+                // SAFETY: SleConnInfo is repr(C) and fully initialized via zeroed().
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &info as *const SleConnInfo as *const u8,
+                        core::mem::size_of::<SleConnInfo>(),
+                    )
+                };
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleConnInfo>(),
+                );
+                let mut writer = slice.writer();
+                writer.write_slice(bytes)?;
+                Ok(0)
+            }
+            SL_IOCTL_CONN_SEND => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleConnData>(),
+                );
+                let mut reader = slice.reader();
+                let cd: SleConnData = reader.read()?;
+                let len = (cd.length as usize).min(CONN_DATA_MAX);
+                let sent = me.conn.lock().send(&cd.data[..len])?;
+                Ok(sent as isize)
+            }
+            SL_IOCTL_CONN_RECV => {
+                let data_vec = me.conn.lock().recv()?;
+                // Build SleConnData response
+                // SAFETY: SleConnData is repr(C), zeroed gives all-zero which is valid.
+                let mut cd: SleConnData = unsafe { core::mem::zeroed() };
+                let copy_len = data_vec.len().min(CONN_DATA_MAX);
+                cd.length = copy_len as u16;
+                cd.data[..copy_len].copy_from_slice(&data_vec[..copy_len]);
+                // Write to userspace
+                // SAFETY: SleConnData is repr(C) and fully initialized via zeroed().
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &cd as *const SleConnData as *const u8,
+                        core::mem::size_of::<SleConnData>(),
+                    )
+                };
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleConnData>(),
+                );
+                let mut writer = slice.writer();
+                writer.write_slice(bytes)?;
+                Ok(0)
+            }
+            SL_IOCTL_INJECT_CONN_RESP => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleInjectConnResp>(),
+                );
+                let mut reader = slice.reader();
+                let resp: SleInjectConnResp = reader.read()?;
+                let resp_type = AccessResponseType::from_raw(resp.response_type)
+                    .ok_or(EINVAL)?;
+                let mut params = NegotiatedParams::default();
+                params.bandwidth_mhz = resp.bandwidth_mhz;
+                params.mcs_index = resp.mcs_index;
+                params.supervision_timeout = resp.supervision_timeout;
+                me.conn.lock().process_access_response(resp_type, params)?;
+                Ok(0)
+            }
+            SL_IOCTL_INJECT_CONN_DATA => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleConnData>(),
+                );
+                let mut reader = slice.reader();
+                let cd: SleConnData = reader.read()?;
+                let len = (cd.length as usize).min(CONN_DATA_MAX);
+                let mut guard = me.conn.lock();
+                let seq = guard.seq.rx_seq; // Use expected seq for loopback
+                guard.receive_data(&cd.data[..len], seq)?;
+                dev_info!(
+                    me.dev,
+                    "sparklink: injected {} bytes connection data\n",
+                    len
+                );
+                Ok(0)
             }
             _ => {
                 dev_err!(me.dev, "sparklink: unknown ioctl 0x{:x}\n", cmd);

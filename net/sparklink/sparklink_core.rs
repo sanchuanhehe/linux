@@ -14,15 +14,22 @@
 //!   - Transport: Async/sync data link management
 //!   - Security: SM2/SM3/SM4 pairing and encryption (future)
 
+mod sle_pdu;
+mod sle_adv;
+
 use kernel::{
     device::Device,
     fs::File,
-    ioctl::{_IO, _IOC_SIZE, _IOR, _IOW},
+    ioctl::{_IO, _IOR, _IOW},
     miscdevice::{MiscDevice, MiscDeviceOptions, MiscDeviceRegistration},
     new_mutex,
     prelude::*,
     sync::{aref::ARef, Arc, Mutex},
+    transmute::FromBytes,
+    uaccess::{UserPtr, UserSlice},
 };
+
+use sle_adv::{AdvParams, AdvScanInner, ScanParams};
 
 // ---------------------------------------------------------------------------
 // IOCTL definitions for the /dev/sparklink control interface
@@ -141,6 +148,9 @@ pub struct SleAdvParams {
     _reserved: [u8; 11],
 }
 
+// SAFETY: SleAdvParams is repr(C) with only primitive fields, all bit patterns valid.
+unsafe impl FromBytes for SleAdvParams {}
+
 /// SLE scanning parameters.
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -155,6 +165,9 @@ pub struct SleScanParams {
     pub filter_discovery_level: u8,
     _reserved: [u8; 9],
 }
+
+// SAFETY: SleScanParams is repr(C) with only primitive fields, all bit patterns valid.
+unsafe impl FromBytes for SleScanParams {}
 
 // ---------------------------------------------------------------------------
 // SCI bus types
@@ -183,12 +196,12 @@ pub enum SciBus {
 #[allow(dead_code)]
 struct SciDevInner {
     state: SciState,
-    adv_params: Option<SleAdvParams>,
-    scan_params: Option<SleScanParams>,
+    adv_scan: AdvScanInner,
 }
 
 /// An SCI device represents a single SparkLink controller.
 #[allow(dead_code)]
+#[pin_data]
 pub struct SciDevEntry {
     /// SCI device index.
     pub index: u16,
@@ -198,7 +211,26 @@ pub struct SciDevEntry {
     pub addr: SleAddr,
     /// Device name (UTF-8, null-padded).
     pub name: [u8; 32],
+    #[pin]
     inner: Mutex<SciDevInner>,
+}
+
+impl SciDevEntry {
+    /// Create a new SCI device entry.
+    #[allow(dead_code)]
+    fn new(index: u16, bus: SciBus, addr: SleAddr, name: [u8; 32]) -> impl PinInit<Self, Error> {
+        let adv_scan = AdvScanInner::new(addr.b, &name);
+        try_pin_init!(Self {
+            index,
+            bus,
+            addr,
+            name,
+            inner <- new_mutex!(SciDevInner {
+                state: SciState::Idle,
+                adv_scan,
+            }),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -208,8 +240,52 @@ pub struct SciDevEntry {
 /// Global state: the list of all registered SCI devices.
 #[allow(dead_code)]
 struct SparkLinkState {
-    devices: KVec<Arc<SciDevEntry>>,
+    devices: KVec<Pin<KBox<SciDevEntry>>>,
     next_index: u16,
+}
+
+#[allow(dead_code)]
+impl SparkLinkState {
+    /// Register a new virtual SCI device for testing.
+    fn register_virtual_device(&mut self) -> Result<u16> {
+        let idx = self.next_index;
+        let addr = SleAddr {
+            b: [0x5E, 0x00, 0x00, 0x00, (idx >> 8) as u8, idx as u8],
+        };
+        let mut name = [0u8; 32];
+        // "sparklink0", "sparklink1", ...
+        let prefix = b"sparklink";
+        name[..prefix.len()].copy_from_slice(prefix);
+        // Append index digit(s) — simple single-digit for now
+        let digit = b'0' + (idx % 10) as u8;
+        name[prefix.len()] = digit;
+
+        let dev = KBox::try_pin_init(
+            SciDevEntry::new(idx, SciBus::Virtual, addr, name),
+            GFP_KERNEL,
+        )?;
+        self.devices.push(dev, GFP_KERNEL)?;
+        self.next_index = idx.checked_add(1).ok_or(EOVERFLOW)?;
+        pr_info!("sparklink: registered device sci{}\n", idx);
+        Ok(idx)
+    }
+
+    /// Unregister a device by index.
+    fn unregister_device(&mut self, index: u16) -> Result {
+        let pos = self
+            .devices
+            .iter()
+            .position(|d| d.index == index)
+            .ok_or(ENODEV)?;
+        let _ = self.devices.remove(pos);
+        pr_info!("sparklink: unregistered device sci{}\n", index);
+        Ok(())
+    }
+
+    /// Find device by index.
+    fn find_device(&self, index: u16) -> Option<&Pin<KBox<SciDevEntry>>> {
+        self.devices.iter().find(|d| d.index == index)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +310,7 @@ struct SparkLinkModule {
 
 impl kernel::InPlaceModule for SparkLinkModule {
     fn init(_module: &'static ThisModule) -> impl PinInit<Self, Error> {
-        pr_info!("sparklink: initialising SparkLink subsystem v0.1.0\n");
+        pr_info!("sparklink: initialising SparkLink subsystem v0.2.0\n");
 
         let state = Arc::pin_init(
             new_mutex!(SparkLinkState {
@@ -256,18 +332,24 @@ impl kernel::InPlaceModule for SparkLinkModule {
 }
 
 // ---------------------------------------------------------------------------
+// Global state accessor — store a clone of the Arc in each open file handle
+// ---------------------------------------------------------------------------
+// The MiscDevice trait doesn't give us access to SparkLinkModule directly,
+// so we store the global state Arc inside each SparkLinkCtl instance.
+// For now, since MiscDeviceRegistration doesn't carry user data to open(),
+// we use a simpler approach: each SparkLinkCtl gets its own per-fd state.
+// Full global registry integration will follow when the kernel API supports
+// registering user data on MiscDeviceRegistration.
+
+// ---------------------------------------------------------------------------
 // Misc device implementation: /dev/sparklink control interface
 // ---------------------------------------------------------------------------
 
 #[pin_data(PinnedDrop)]
 struct SparkLinkCtl {
     #[pin]
-    inner: Mutex<SparkLinkCtlInner>,
+    adv_scan: Mutex<AdvScanInner>,
     dev: ARef<Device>,
-}
-
-struct SparkLinkCtlInner {
-    _placeholder: u32,
 }
 
 #[vtable]
@@ -278,12 +360,13 @@ impl MiscDevice for SparkLinkCtl {
         let dev = ARef::from(misc.device());
         dev_info!(dev, "sparklink: control interface opened\n");
 
+        let addr = [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let name = b"sparklink-ctl";
+
         KBox::try_pin_init(
             try_pin_init! {
                 SparkLinkCtl {
-                    inner <- new_mutex!(SparkLinkCtlInner {
-                        _placeholder: 0,
-                    }),
+                    adv_scan <- new_mutex!(AdvScanInner::new(addr, name)),
                     dev: dev,
                 }
             },
@@ -291,41 +374,73 @@ impl MiscDevice for SparkLinkCtl {
         )
     }
 
-    fn ioctl(me: Pin<&SparkLinkCtl>, _file: &File, cmd: u32, _arg: usize) -> Result<isize> {
-        let _size = _IOC_SIZE(cmd);
-
+    fn ioctl(me: Pin<&SparkLinkCtl>, _file: &File, cmd: u32, arg: usize) -> Result<isize> {
         match cmd {
-            SL_IOCTL_DEV_COUNT => {
-                dev_info!(me.dev, "sparklink: DEV_COUNT query\n");
-                // Placeholder: return 0 devices
-                Ok(0)
-            }
-            SL_IOCTL_DEV_REGISTER => {
-                dev_info!(me.dev, "sparklink: DEV_REGISTER\n");
-                Ok(0)
-            }
-            SL_IOCTL_DEV_UNREGISTER => {
-                dev_info!(me.dev, "sparklink: DEV_UNREGISTER\n");
-                Ok(0)
-            }
             SL_IOCTL_START_ADV => {
-                dev_info!(me.dev, "sparklink: START_ADV\n");
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleAdvParams>(),
+                );
+                let mut reader = slice.reader();
+                let uparams: SleAdvParams = reader.read()?;
+                let params = AdvParams {
+                    discovery_level: uparams.discovery_level,
+                    interval_slots: (uparams.interval_ms as u32) * 8, // ms to 125us slots
+                    broadcast_type: sle_pdu::BroadcastType::AccessibleScannable,
+                    tx_power: 0,
+                };
+                let mut guard = me.adv_scan.lock();
+                guard.start_advertising(params)?;
+                // Build and log the first PDU as a sanity check
+                if let Some(pdu) = guard.build_adv_pdu() {
+                    dev_info!(
+                        me.dev,
+                        "sparklink: ADV PDU built, {} bytes data, CRC=0x{:03x}\n",
+                        pdu.data_len,
+                        pdu.crc
+                    );
+                }
                 Ok(0)
             }
             SL_IOCTL_STOP_ADV => {
-                dev_info!(me.dev, "sparklink: STOP_ADV\n");
+                me.adv_scan.lock().stop_advertising()?;
                 Ok(0)
             }
             SL_IOCTL_START_SCAN => {
-                dev_info!(me.dev, "sparklink: START_SCAN\n");
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleScanParams>(),
+                );
+                let mut reader = slice.reader();
+                let uparams: SleScanParams = reader.read()?;
+                let params = ScanParams {
+                    window_slots: (uparams.window_ms as u32) * 8,
+                    interval_slots: (uparams.interval_ms as u32) * 8,
+                    filter_level: uparams.filter_discovery_level,
+                    active: false,
+                };
+                me.adv_scan.lock().start_scanning(params)?;
                 Ok(0)
             }
             SL_IOCTL_STOP_SCAN => {
-                dev_info!(me.dev, "sparklink: STOP_SCAN\n");
+                me.adv_scan.lock().stop_scanning()?;
+                Ok(0)
+            }
+            SL_IOCTL_DEV_COUNT => {
+                // Return scan result count when scanning, 0 otherwise
+                let count = me.adv_scan.lock().scan_result_count();
+                Ok(count as isize)
+            }
+            SL_IOCTL_DEV_REGISTER => {
+                dev_info!(me.dev, "sparklink: DEV_REGISTER (stub)\n");
+                Ok(0)
+            }
+            SL_IOCTL_DEV_UNREGISTER => {
+                dev_info!(me.dev, "sparklink: DEV_UNREGISTER (stub)\n");
                 Ok(0)
             }
             _ => {
-                dev_err!(me.dev, "sparklink: unknown ioctl {}\n", cmd);
+                dev_err!(me.dev, "sparklink: unknown ioctl 0x{:x}\n", cmd);
                 Err(ENOTTY)
             }
         }

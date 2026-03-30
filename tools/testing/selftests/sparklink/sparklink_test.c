@@ -70,6 +70,14 @@
 #define SL_IOCTL_SSAP_NOTIFY      _IOW(SL_MAGIC, 0x55, uint16_t)
 #define SL_IOCTL_SSAP_DEQUEUE_NTF _IOR(SL_MAGIC, 0x56, struct ssap_notification)
 
+/* Power management */
+#define SL_IOCTL_PM_INFO         _IOR(SL_MAGIC, 0x60, struct sle_pm_info)
+#define SL_IOCTL_PM_SET_STATE    _IOW(SL_MAGIC, 0x61, struct sle_pm_state_cmd)
+#define SL_IOCTL_PM_SET_INTERVAL _IOW(SL_MAGIC, 0x62, struct sle_pm_interval)
+#define SL_IOCTL_PM_FORCE_ACTIVE _IOW(SL_MAGIC, 0x63, uint8_t)
+#define SL_IOCTL_PM_TICK         _IO(SL_MAGIC, 0x64)
+#define SL_IOCTL_PM_ACTIVITY     _IO(SL_MAGIC, 0x65)
+
 /* ------------------------------------------------------------------ */
 /* Userspace data structures — must match repr(C) in sparklink_core   */
 /* ------------------------------------------------------------------ */
@@ -201,6 +209,35 @@ struct ssap_notification {
 	uint8_t  indication;
 	uint8_t  length;
 	uint8_t  data[252];
+} __attribute__((packed));
+
+/* Power management */
+struct sle_pm_info {
+	uint8_t  state;
+	uint8_t  force_active;
+	uint8_t  power_pct;
+	uint8_t  _pad;
+	uint16_t current_interval;
+	uint16_t supervision_timeout;
+	uint16_t latency;
+	uint16_t idle_count;
+	uint32_t transitions;
+	uint64_t active_events;
+	uint64_t sniff_events;
+	uint64_t idle_events;
+	uint8_t  _reserved[8];
+} __attribute__((packed));
+
+struct sle_pm_state_cmd {
+	uint8_t target_state;
+	uint8_t _reserved[3];
+} __attribute__((packed));
+
+struct sle_pm_interval {
+	uint16_t min_interval;
+	uint16_t max_interval;
+	uint16_t latency;
+	uint16_t supervision_timeout;
 } __attribute__((packed));
 
 /* ------------------------------------------------------------------ */
@@ -879,6 +916,107 @@ static void test_ssap_service(int fd)
 	}
 }
 
+static void test_power_management(int fd)
+{
+	test_header("Power management: state transitions and intervals");
+
+	/* Step 1: Get initial PM info */
+	struct sle_pm_info pm;
+	memset(&pm, 0, sizeof(pm));
+	int ret = ioctl(fd, SL_IOCTL_PM_INFO, &pm);
+	check("PM_INFO (initial)", ret);
+	if (ret == 0) {
+		printf("  state=%u force_active=%u power=%u%% interval=%u timeout=%u\n",
+		       pm.state, pm.force_active, pm.power_pct,
+		       pm.current_interval, pm.supervision_timeout);
+		if (pm.state != 0)
+			printf("  WARN: expected state=0 (Active)\n");
+	}
+
+	/* Step 2: Update connection interval */
+	struct sle_pm_interval intv = {
+		.min_interval = 16,   /* 20 ms */
+		.max_interval = 80,   /* 100 ms */
+		.latency = 2,
+		.supervision_timeout = 400,  /* 4 s */
+	};
+	ret = ioctl(fd, SL_IOCTL_PM_SET_INTERVAL, &intv);
+	check("PM_SET_INTERVAL", ret);
+
+	/* Step 3: Verify updated interval */
+	memset(&pm, 0, sizeof(pm));
+	ret = ioctl(fd, SL_IOCTL_PM_INFO, &pm);
+	if (ret == 0 && pm.current_interval == 16) {
+		printf("  OK:   Interval updated to %u (%.1f ms)\n",
+		       pm.current_interval, pm.current_interval * 1.25);
+	} else if (ret == 0) {
+		printf("  WARN: expected interval=16, got %u\n", pm.current_interval);
+	}
+
+	/* Step 4: Simulate ticks to trigger sniff transition */
+	for (int i = 0; i < 55; i++)
+		ioctl(fd, SL_IOCTL_PM_TICK, NULL);
+
+	memset(&pm, 0, sizeof(pm));
+	ret = ioctl(fd, SL_IOCTL_PM_INFO, &pm);
+	if (ret == 0) {
+		printf("  After 55 ticks: state=%u power=%u%% transitions=%u\n",
+		       pm.state, pm.power_pct, pm.transitions);
+		if (pm.state == 1)
+			printf("  OK:   Entered Sniff mode\n");
+	}
+
+	/* Step 5: Record activity — should return to Active */
+	ret = ioctl(fd, SL_IOCTL_PM_ACTIVITY, NULL);
+	check("PM_ACTIVITY", ret);
+
+	memset(&pm, 0, sizeof(pm));
+	ret = ioctl(fd, SL_IOCTL_PM_INFO, &pm);
+	if (ret == 0 && pm.state == 0) {
+		printf("  OK:   Returned to Active after activity\n");
+	}
+
+	/* Step 6: Force active, then try suspend — should fail */
+	uint8_t fa = 1;
+	ret = ioctl(fd, SL_IOCTL_PM_FORCE_ACTIVE, &fa);
+	check("PM_FORCE_ACTIVE(1)", ret);
+
+	struct sle_pm_state_cmd cmd;
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.target_state = 3; /* Suspend */
+	ret = ioctl(fd, SL_IOCTL_PM_SET_STATE, &cmd);
+	if (ret < 0 && errno == EBUSY) {
+		printf("  OK:   Suspend rejected during force-active (EBUSY)\n");
+	} else {
+		printf("  WARN: expected EBUSY, got ret=%d errno=%d\n", ret, errno);
+	}
+
+	/* Step 7: Clear force-active and suspend */
+	fa = 0;
+	ioctl(fd, SL_IOCTL_PM_FORCE_ACTIVE, &fa);
+
+	cmd.target_state = 3;
+	ret = ioctl(fd, SL_IOCTL_PM_SET_STATE, &cmd);
+	check("PM_SET_STATE (suspend)", ret);
+
+	memset(&pm, 0, sizeof(pm));
+	ret = ioctl(fd, SL_IOCTL_PM_INFO, &pm);
+	if (ret == 0 && pm.state == 3) {
+		printf("  OK:   Suspended (power=%u%%)\n", pm.power_pct);
+	}
+
+	/* Step 8: Resume */
+	cmd.target_state = 0;
+	ret = ioctl(fd, SL_IOCTL_PM_SET_STATE, &cmd);
+	check("PM_SET_STATE (resume)", ret);
+
+	memset(&pm, 0, sizeof(pm));
+	ret = ioctl(fd, SL_IOCTL_PM_INFO, &pm);
+	if (ret == 0 && pm.state == 0) {
+		printf("  OK:   Resumed to Active (transitions=%u)\n", pm.transitions);
+	}
+}
+
 /* ------------------------------------------------------------------ */
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
@@ -910,6 +1048,7 @@ int main(void)
 	test_sm3_hash(fd);
 	test_security_pairing(fd);
 	test_ssap_service(fd);
+	test_power_management(fd);
 	test_unknown_ioctl(fd);
 
 	printf("\n=== All tests completed ===\n");

@@ -20,6 +20,7 @@ mod sle_conn;
 mod sle_crypto;
 mod sle_security;
 mod sle_ssap;
+mod sle_power;
 
 use kernel::{
     debugfs::{Dir, File},
@@ -43,6 +44,7 @@ use sle_adv::{AdvParams, AdvScanInner, ScanParams};
 use sle_conn::{AccessResponseType, ConnInner, GtRole, NegotiatedParams, CONN_DATA_MAX};
 use sle_security::SecurityInner;
 use sle_ssap::SsapInner;
+use sle_power::PowerInner;
 
 // ---------------------------------------------------------------------------
 // IOCTL definitions for the /dev/sparklink control interface
@@ -151,6 +153,26 @@ const SL_IOCTL_SSAP_NOTIFY: u32 = _IOW::<u16>(SL_MAGIC, 0x55);
 
 /// Dequeue one pending notification.
 const SL_IOCTL_SSAP_DEQUEUE_NTF: u32 = _IOR::<SsapNotification>(SL_MAGIC, 0x56);
+
+// --- Power management ioctls ---
+
+/// Get power management status.
+const SL_IOCTL_PM_INFO: u32 = _IOR::<SlePmInfo>(SL_MAGIC, 0x60);
+
+/// Set power state (Active/Sniff/Suspend/Resume).
+const SL_IOCTL_PM_SET_STATE: u32 = _IOW::<SlePmStateCmd>(SL_MAGIC, 0x61);
+
+/// Update connection interval parameters.
+const SL_IOCTL_PM_SET_INTERVAL: u32 = _IOW::<SlePmInterval>(SL_MAGIC, 0x62);
+
+/// Set force-active mode.
+const SL_IOCTL_PM_FORCE_ACTIVE: u32 = _IOW::<u8>(SL_MAGIC, 0x63);
+
+/// Simulate a connection event tick (for testing).
+const SL_IOCTL_PM_TICK: u32 = _IO(SL_MAGIC, 0x64);
+
+/// Record a data activity event.
+const SL_IOCTL_PM_ACTIVITY: u32 = _IO(SL_MAGIC, 0x65);
 
 // ---------------------------------------------------------------------------
 // SparkLink address (6 bytes, same as SLE MAC layer identifier)
@@ -563,6 +585,69 @@ pub struct SsapNotification {
 }
 
 // ---------------------------------------------------------------------------
+// Power management userspace data structures
+// ---------------------------------------------------------------------------
+
+/// Power management status info returned to userspace.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlePmInfo {
+    /// Current power state (0=Active, 1=Sniff, 2=Idle, 3=Suspended).
+    pub state: u8,
+    /// Whether force-active is enabled.
+    pub force_active: u8,
+    /// Estimated power consumption percentage (0-100).
+    pub power_pct: u8,
+    _pad: u8,
+    /// Current connection interval in 1.25 ms units.
+    pub current_interval: u16,
+    /// Supervision timeout in 10 ms units.
+    pub supervision_timeout: u16,
+    /// Peripheral latency.
+    pub latency: u16,
+    /// Idle event count since last activity.
+    pub idle_count: u16,
+    /// Total state transitions.
+    pub transitions: u32,
+    /// Active events count.
+    pub active_events: u64,
+    /// Sniff events count.
+    pub sniff_events: u64,
+    /// Idle events count.
+    pub idle_events: u64,
+    _reserved: [u8; 8],
+}
+
+/// Power state command.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlePmStateCmd {
+    /// Target state: 0=Active, 1=Sniff, 3=Suspend.
+    pub target_state: u8,
+    _reserved: [u8; 3],
+}
+
+// SAFETY: SlePmStateCmd is repr(C) with only primitive fields.
+unsafe impl FromBytes for SlePmStateCmd {}
+
+/// Connection interval parameters from userspace.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlePmInterval {
+    /// Minimum interval in 1.25 ms units.
+    pub min_interval: u16,
+    /// Maximum interval in 1.25 ms units.
+    pub max_interval: u16,
+    /// Peripheral latency.
+    pub latency: u16,
+    /// Supervision timeout in 10 ms units.
+    pub supervision_timeout: u16,
+}
+
+// SAFETY: SlePmInterval is repr(C) with only primitive fields.
+unsafe impl FromBytes for SlePmInterval {}
+
+// ---------------------------------------------------------------------------
 // SCI bus types
 // ---------------------------------------------------------------------------
 
@@ -771,6 +856,8 @@ struct SparkLinkCtl {
     security: Mutex<SecurityInner>,
     #[pin]
     ssap: Mutex<SsapInner>,
+    #[pin]
+    power: Mutex<PowerInner>,
     dev: ARef<Device>,
 }
 
@@ -792,6 +879,7 @@ impl MiscDevice for SparkLinkCtl {
                     conn <- new_mutex!(ConnInner::new(addr)),
                     security <- new_mutex!(SecurityInner::new()),
                     ssap <- new_mutex!(SsapInner::new()),
+                    power <- new_mutex!(PowerInner::new()),
                     dev: dev,
                 }
             },
@@ -1301,6 +1389,89 @@ impl MiscDevice for SparkLinkCtl {
                     }
                     None => Err(EAGAIN),
                 }
+            }
+            // --- Power management ---
+            SL_IOCTL_PM_INFO => {
+                let info = {
+                    let guard = me.power.lock();
+                    // SAFETY: SlePmInfo is repr(C).
+                    let mut info: SlePmInfo = unsafe { core::mem::zeroed() };
+                    info.state = guard.state as u8;
+                    info.force_active = if guard.is_forced_active() { 1 } else { 0 };
+                    info.power_pct = guard.estimated_power_pct();
+                    info.current_interval = guard.interval.current_interval;
+                    info.supervision_timeout = guard.interval.supervision_timeout;
+                    info.latency = guard.interval.latency;
+                    info.idle_count = guard.stats.active_events.min(u16::MAX as u64) as u16;
+                    info.transitions = guard.stats.transitions;
+                    info.active_events = guard.stats.active_events;
+                    info.sniff_events = guard.stats.sniff_events;
+                    info.idle_events = guard.stats.idle_events;
+                    info
+                };
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &info as *const SlePmInfo as *const u8,
+                        core::mem::size_of::<SlePmInfo>(),
+                    )
+                };
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SlePmInfo>(),
+                );
+                let mut writer = slice.writer();
+                writer.write_slice(bytes)?;
+                Ok(0)
+            }
+            SL_IOCTL_PM_SET_STATE => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SlePmStateCmd>(),
+                );
+                let mut reader = slice.reader();
+                let cmd_data: SlePmStateCmd = reader.read()?;
+                let mut guard = me.power.lock();
+                match cmd_data.target_state {
+                    0 => { guard.resume(); Ok(0) }
+                    1 => { guard.on_activity(); guard.force_active(false); Ok(0) }
+                    3 => { guard.suspend()?; Ok(0) }
+                    _ => Err(EINVAL),
+                }
+            }
+            SL_IOCTL_PM_SET_INTERVAL => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SlePmInterval>(),
+                );
+                let mut reader = slice.reader();
+                let params: SlePmInterval = reader.read()?;
+                let interval = sle_power::ConnInterval {
+                    min_interval: params.min_interval,
+                    max_interval: params.max_interval,
+                    current_interval: params.min_interval,
+                    latency: params.latency,
+                    supervision_timeout: params.supervision_timeout,
+                };
+                me.power.lock().update_interval(interval)?;
+                Ok(0)
+            }
+            SL_IOCTL_PM_FORCE_ACTIVE => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<u8>(),
+                );
+                let mut reader = slice.reader();
+                let enable: u8 = reader.read()?;
+                me.power.lock().force_active(enable != 0);
+                Ok(0)
+            }
+            SL_IOCTL_PM_TICK => {
+                me.power.lock().on_tick();
+                Ok(0)
+            }
+            SL_IOCTL_PM_ACTIVITY => {
+                me.power.lock().on_activity();
+                Ok(0)
             }
             _ => {
                 dev_err!(me.dev, "sparklink: unknown ioctl 0x{:x}\n", cmd);

@@ -40,6 +40,9 @@
 #define SL_IOCTL_START_SCAN      _IOW(SL_MAGIC, 0x12, struct sle_scan_params)
 #define SL_IOCTL_STOP_SCAN       _IO(SL_MAGIC, 0x13)
 
+#define SL_IOCTL_INJECT_ADV      _IOW(SL_MAGIC, 0x20, struct sle_inject_adv)
+#define SL_IOCTL_SCAN_RESULT_COUNT _IO(SL_MAGIC, 0x21)
+
 /* ------------------------------------------------------------------ */
 /* Userspace data structures — must match repr(C) in sparklink_core   */
 /* ------------------------------------------------------------------ */
@@ -57,6 +60,15 @@ struct sle_scan_params {
 	uint16_t interval_ms;
 	uint8_t  filter_discovery_level;
 	uint8_t  _reserved[9];
+} __attribute__((packed));
+
+struct sle_inject_adv {
+	uint8_t  addr[6];
+	int8_t   rssi;
+	uint8_t  discovery_level;
+	uint8_t  name[32];
+	uint8_t  name_len;
+	uint8_t  _reserved[7];
 } __attribute__((packed));
 
 /* ------------------------------------------------------------------ */
@@ -200,6 +212,115 @@ static void test_unknown_ioctl(int fd)
 	}
 }
 
+static void test_loopback(int fd)
+{
+	test_header("Loopback: SCAN + INJECT_ADV");
+
+	/* Start scanning */
+	struct sle_scan_params scan;
+	memset(&scan, 0, sizeof(scan));
+	scan.window_ms = 50;
+	scan.interval_ms = 100;
+	scan.filter_discovery_level = 0;
+
+	int ret = ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+	check("START_SCAN", ret);
+
+	/* Verify no results yet */
+	ret = ioctl(fd, SL_IOCTL_SCAN_RESULT_COUNT, NULL);
+	check("SCAN_RESULT_COUNT (initial)", ret);
+	if (ret != 0)
+		printf("  WARN: expected 0 results, got %d\n", ret);
+
+	/* Inject 3 simulated advertisements */
+	struct sle_inject_adv inject;
+
+	memset(&inject, 0, sizeof(inject));
+	inject.addr[0] = 0xAA; inject.addr[1] = 0xBB; inject.addr[5] = 0x01;
+	inject.rssi = -40;
+	inject.discovery_level = 1;
+	memcpy(inject.name, "dev-alpha", 9);
+	inject.name_len = 9;
+	ret = ioctl(fd, SL_IOCTL_INJECT_ADV, &inject);
+	check("INJECT_ADV #1 (dev-alpha)", ret);
+
+	memset(&inject, 0, sizeof(inject));
+	inject.addr[0] = 0xCC; inject.addr[1] = 0xDD; inject.addr[5] = 0x02;
+	inject.rssi = -65;
+	inject.discovery_level = 2;
+	memcpy(inject.name, "dev-beta", 8);
+	inject.name_len = 8;
+	ret = ioctl(fd, SL_IOCTL_INJECT_ADV, &inject);
+	check("INJECT_ADV #2 (dev-beta)", ret);
+
+	memset(&inject, 0, sizeof(inject));
+	inject.addr[0] = 0xEE; inject.addr[1] = 0xFF; inject.addr[5] = 0x03;
+	inject.rssi = -80;
+	inject.discovery_level = 0;  /* Invisible — should still pass filter=0 */
+	memcpy(inject.name, "dev-gamma", 9);
+	inject.name_len = 9;
+	ret = ioctl(fd, SL_IOCTL_INJECT_ADV, &inject);
+	check("INJECT_ADV #3 (dev-gamma)", ret);
+
+	/* Verify 3 results */
+	ret = ioctl(fd, SL_IOCTL_SCAN_RESULT_COUNT, NULL);
+	check("SCAN_RESULT_COUNT (after inject)", ret);
+	if (ret == 3) {
+		printf("  OK:   Got expected 3 scan results\n");
+	} else {
+		printf("  WARN: expected 3 results, got %d\n", ret);
+	}
+
+	ret = ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+	check("STOP_SCAN", ret);
+}
+
+static void test_loopback_filter(int fd)
+{
+	test_header("Loopback with discovery level filter");
+
+	struct sle_scan_params scan;
+	memset(&scan, 0, sizeof(scan));
+	scan.window_ms = 50;
+	scan.interval_ms = 100;
+	scan.filter_discovery_level = 2;  /* Accept level >= 2 only */
+
+	int ret = ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+	check("START_SCAN (filter>=2)", ret);
+
+	/* Inject level=1 — should be filtered */
+	struct sle_inject_adv inject;
+	memset(&inject, 0, sizeof(inject));
+	inject.addr[5] = 0x10;
+	inject.rssi = -30;
+	inject.discovery_level = 1;
+	memcpy(inject.name, "filtered", 8);
+	inject.name_len = 8;
+	ret = ioctl(fd, SL_IOCTL_INJECT_ADV, &inject);
+	check("INJECT_ADV (level=1, should filter)", ret);
+
+	/* Inject level=2 — should pass */
+	memset(&inject, 0, sizeof(inject));
+	inject.addr[5] = 0x20;
+	inject.rssi = -45;
+	inject.discovery_level = 2;
+	memcpy(inject.name, "accepted", 8);
+	inject.name_len = 8;
+	ret = ioctl(fd, SL_IOCTL_INJECT_ADV, &inject);
+	check("INJECT_ADV (level=2, should pass)", ret);
+
+	ret = ioctl(fd, SL_IOCTL_SCAN_RESULT_COUNT, NULL);
+	check("SCAN_RESULT_COUNT", ret);
+	if (ret == 1) {
+		printf("  OK:   Filter working: 1 result (level=1 filtered out)\n");
+	} else {
+		printf("  WARN: expected 1 result, got %d\n", ret);
+	}
+
+	ret = ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+	check("STOP_SCAN", ret);
+}
+
 /* ------------------------------------------------------------------ */
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
@@ -223,6 +344,8 @@ int main(void)
 	test_advertising(fd);
 	test_scanning(fd);
 	test_mutual_exclusion(fd);
+	test_loopback(fd);
+	test_loopback_filter(fd);
 	test_unknown_ioctl(fd);
 
 	printf("\n=== All tests completed ===\n");

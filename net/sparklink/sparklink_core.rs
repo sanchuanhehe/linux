@@ -68,6 +68,14 @@ const SL_IOCTL_START_SCAN: u32 = _IOW::<SleScanParams>(SL_MAGIC, 0x12);
 /// Stop SLE scanning.
 const SL_IOCTL_STOP_SCAN: u32 = _IO(SL_MAGIC, 0x13);
 
+/// Inject a simulated advertising PDU for loopback testing.
+/// Userspace provides a SleInjectAdv struct; if in scanning state,
+/// the PDU is processed as a received advertisement.
+const SL_IOCTL_INJECT_ADV: u32 = _IOW::<SleInjectAdv>(SL_MAGIC, 0x20);
+
+/// Get the current scan result count.
+const SL_IOCTL_SCAN_RESULT_COUNT: u32 = _IO(SL_MAGIC, 0x21);
+
 // ---------------------------------------------------------------------------
 // SparkLink address (6 bytes, same as SLE MAC layer identifier)
 // ---------------------------------------------------------------------------
@@ -174,6 +182,39 @@ pub struct SleScanParams {
 
 // SAFETY: SleScanParams is repr(C) with only primitive fields, all bit patterns valid.
 unsafe impl FromBytes for SleScanParams {}
+
+/// Injected advertising data for loopback testing.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleInjectAdv {
+    /// Simulated source SLE address.
+    pub addr: [u8; 6],
+    /// Simulated RSSI.
+    pub rssi: i8,
+    /// Discovery level to include in the advertising data.
+    pub discovery_level: u8,
+    /// Device name (UTF-8, null-terminated).
+    pub name: [u8; 32],
+    /// Name length.
+    pub name_len: u8,
+    _reserved: [u8; 7],
+}
+
+impl Default for SleInjectAdv {
+    fn default() -> Self {
+        Self {
+            addr: [0u8; 6],
+            rssi: -50,
+            discovery_level: 1,
+            name: [0u8; 32],
+            name_len: 0,
+            _reserved: [0u8; 7],
+        }
+    }
+}
+
+// SAFETY: SleInjectAdv is repr(C) with only primitive fields, all bit patterns valid.
+unsafe impl FromBytes for SleInjectAdv {}
 
 // ---------------------------------------------------------------------------
 // SCI bus types
@@ -467,6 +508,44 @@ impl MiscDevice for SparkLinkCtl {
             SL_IOCTL_DEV_UNREGISTER => {
                 dev_info!(me.dev, "sparklink: DEV_UNREGISTER (stub)\n");
                 Ok(0)
+            }
+            SL_IOCTL_INJECT_ADV => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleInjectAdv>(),
+                );
+                let mut reader = slice.reader();
+                let inject: SleInjectAdv = reader.read()?;
+
+                // Build a fake AdvPdu from the injected data
+                let mut builder = sle_pdu::AdvDataBuilder::new();
+                let _ = builder.push_discovery_level(inject.discovery_level);
+                let _ = builder.push_sle_addr(&inject.addr);
+                let name_len = (inject.name_len as usize).min(32);
+                if name_len > 0 {
+                    let _ = builder.push_complete_name(&inject.name[..name_len]);
+                }
+                let pdu = sle_pdu::AdvPdu::build(
+                    sle_pdu::BroadcastType::AccessibleScannable,
+                    sle_pdu::PacketType::BasicAdv,
+                    0,
+                    &builder,
+                );
+
+                let mut guard = me.adv_scan.lock();
+                guard.process_adv_pdu(&pdu, inject.rssi)?;
+                dev_info!(
+                    me.dev,
+                    "sparklink: injected ADV from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} rssi={}\n",
+                    inject.addr[0], inject.addr[1], inject.addr[2],
+                    inject.addr[3], inject.addr[4], inject.addr[5],
+                    inject.rssi
+                );
+                Ok(0)
+            }
+            SL_IOCTL_SCAN_RESULT_COUNT => {
+                let count = me.adv_scan.lock().scan_result_count();
+                Ok(count as isize)
             }
             _ => {
                 dev_err!(me.dev, "sparklink: unknown ioctl 0x{:x}\n", cmd);

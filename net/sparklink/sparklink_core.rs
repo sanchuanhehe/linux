@@ -24,6 +24,7 @@ mod sle_power;
 mod sle_dli;
 mod sle_event;
 mod sle_usb;
+mod sle_netlink;
 
 use sle_dli::SleController;
 
@@ -864,11 +865,11 @@ impl kernel::InPlaceModule for SparkLinkModule {
             ),
             _build_info <- debugfs.read_only_file(
                 c"build_info",
-                CString::try_from_fmt(fmt!("sparklink subsystem\nstandard: T/XS 10002-2025, T/XS 20001-2025, T/XS 10003-2025\nmodules: core pdu adv conn crypto security ssap power event dli usb\nlanguage: Rust"))?,
+                CString::try_from_fmt(fmt!("sparklink subsystem\nstandard: T/XS 10002-2025, T/XS 20001-2025, T/XS 10003-2025\nmodules: core pdu adv conn crypto security ssap power event dli usb netlink\nlanguage: Rust"))?,
             ),
             _subsystems <- debugfs.read_only_file(
                 c"subsystems",
-                CString::try_from_fmt(fmt!("sle_pdu: frame codec\nsle_adv: advertising/scanning\nsle_conn: connection management\nsle_crypto: SM3/SM4 crypto\nsle_security: pairing/encryption\nsle_ssap: service access protocol\nsle_power: power management\nsle_event: async event notification\nsle_dli: driver layer interface\nsle_usb: USB transport"))?,
+                CString::try_from_fmt(fmt!("sle_pdu: frame codec\nsle_adv: advertising/scanning\nsle_conn: connection management\nsle_crypto: SM3/SM4 crypto\nsle_security: pairing/encryption\nsle_ssap: service access protocol\nsle_power: power management\nsle_event: async event notification\nsle_dli: driver layer interface\nsle_usb: USB transport\nsle_netlink: Generic Netlink protocol"))?,
             ),
             adv_count <- debugfs.read_write_file(
                 c"adv_count",

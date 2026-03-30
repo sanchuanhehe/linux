@@ -685,6 +685,33 @@ hardware drivers are registered. A separate ``sparklink_usb`` kernel
 module implementing ``usb::Driver`` will register the USB transport
 when hardware is available.
 
+Generic Netlink interface
+=========================
+
+The SparkLink subsystem defines a Generic Netlink family
+``"sparklink"`` (version 1) for structured kernel-userspace
+communication as an alternative to the ioctl interface.
+
+Protocol definitions are in ``include/uapi/linux/sparklink.h``.
+
+The netlink interface provides 28 commands covering all subsystem
+operations (device management, advertising, scanning, connections,
+security, SSAP, power management, DLI) with typed TLV attributes.
+
+A multicast group ``"events"`` delivers async event notifications
+to subscribed userspace listeners via ``SPARKLINK_CMD_EVENT``.
+
+The ``sle_netlink.rs`` module provides:
+
+- Command/attribute enumerations (``NlCmd``, ``NlAttr``)
+- Attribute TLV builder (``NlAttrBuilder``) for constructing messages
+- Attribute TLV parser (``parse_attrs()``) with type-safe extractors
+
+Full genetlink family registration requires kernel Rust genetlink
+bindings (``genl_register_family()``) which are not yet available.
+The current implementation provides protocol types and
+serialization ready for integration when bindings are added.
+
 debugfs interface
 =================
 

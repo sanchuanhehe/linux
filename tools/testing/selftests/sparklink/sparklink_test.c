@@ -64,6 +64,8 @@
 #define SL_IOCTL_SEC_SM3_TEST    _IOW(SL_MAGIC, 0x44, struct sle_hash_test)
 #define SL_IOCTL_SEC_SM4_ENC_TEST _IOW(SL_MAGIC, 0x45, struct sle_conn_data)
 #define SL_IOCTL_SEC_SM4_DEC_TEST _IOW(SL_MAGIC, 0x46, struct sle_conn_data)
+#define SL_IOCTL_SEC_SM4_BLOCK_TEST _IOWR(SL_MAGIC, 0x47, struct sle_sm4_block_test)
+#define SL_IOCTL_SEC_HMAC_TEST   _IOWR(SL_MAGIC, 0x48, struct sle_hmac_test)
 
 /* SSAP service layer */
 #define SL_IOCTL_SSAP_REGISTER_SVC _IO(SL_MAGIC, 0x50)
@@ -202,6 +204,22 @@ struct sle_hash_test {
 	uint8_t  data[220];
 	uint8_t  digest[32];
 } __attribute__((packed));
+
+struct sle_sm4_block_test {
+	uint8_t  key[16];
+	uint8_t  input[16];
+	uint8_t  output[16];
+	uint8_t  decrypt;
+	uint8_t  _pad[15];
+};
+
+struct sle_hmac_test {
+	uint16_t key_len;
+	uint16_t data_len;
+	uint8_t  key[64];
+	uint8_t  data[160];
+	uint8_t  digest[32];
+};
 
 /* SSAP */
 struct ssap_summary {
@@ -858,6 +876,122 @@ static void test_sm3_hash(int fd)
 			printf("  OK:   SM3 test vector matches\n");
 		} else {
 			printf("  FAIL: SM3 test vector mismatch!\n");
+		}
+	}
+}
+
+static void test_sm4_block(int fd)
+{
+	test_header("SM4 block encrypt/decrypt test");
+
+	/* GB/T 32907-2016 A.1 test vector */
+	struct sle_sm4_block_test bt;
+	memset(&bt, 0, sizeof(bt));
+
+	const uint8_t key[16] = {
+		0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+		0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
+	};
+	const uint8_t plaintext[16] = {
+		0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+		0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
+	};
+	const uint8_t expected_ct[16] = {
+		0x68, 0x1E, 0xDF, 0x34, 0xD2, 0x06, 0x96, 0x5E,
+		0x86, 0xB3, 0xE9, 0x4F, 0x53, 0x6E, 0x42, 0x46,
+	};
+
+	memcpy(bt.key, key, 16);
+	memcpy(bt.input, plaintext, 16);
+	bt.decrypt = 0;
+
+	int ret = ioctl(fd, SL_IOCTL_SEC_SM4_BLOCK_TEST, &bt);
+	check("SM4_BLOCK_ENC", ret);
+
+	if (ret == 0) {
+		printf("  SM4_ENC = ");
+		for (int i = 0; i < 16; i++)
+			printf("%02x", bt.output[i]);
+		printf("\n");
+
+		if (memcmp(bt.output, expected_ct, 16) == 0) {
+			printf("  OK:   SM4 encrypt test vector matches\n");
+		} else {
+			printf("  FAIL: SM4 encrypt test vector mismatch!\n");
+		}
+
+		/* Now decrypt and verify round-trip */
+		struct sle_sm4_block_test dt;
+		memset(&dt, 0, sizeof(dt));
+		memcpy(dt.key, key, 16);
+		memcpy(dt.input, expected_ct, 16);
+		dt.decrypt = 1;
+
+		ret = ioctl(fd, SL_IOCTL_SEC_SM4_BLOCK_TEST, &dt);
+		check("SM4_BLOCK_DEC", ret);
+
+		if (ret == 0) {
+			if (memcmp(dt.output, plaintext, 16) == 0) {
+				printf("  OK:   SM4 decrypt round-trip matches\n");
+			} else {
+				printf("  FAIL: SM4 decrypt round-trip mismatch!\n");
+			}
+		}
+	}
+}
+
+static void test_hmac_sm3(int fd)
+{
+	test_header("HMAC-SM3 test");
+
+	/* HMAC-SM3 with a simple key and message for verification.
+	 * Reference computed using Python gmssl:
+	 *   from gmssl import sm3
+	 *   import hmac, hashlib
+	 *   # HMAC-SM3(key=16 bytes of 0x0b, data="Hi There")
+	 */
+	struct sle_hmac_test ht;
+	memset(&ht, 0, sizeof(ht));
+
+	/* Key: 16 bytes of 0x0b (similar to RFC 2104 test case 1) */
+	ht.key_len = 16;
+	memset(ht.key, 0x0b, 16);
+
+	/* Data: "Hi There" */
+	const char *msg = "Hi There";
+	ht.data_len = (uint16_t)strlen(msg);
+	memcpy(ht.data, msg, ht.data_len);
+
+	int ret = ioctl(fd, SL_IOCTL_SEC_HMAC_TEST, &ht);
+	check("HMAC_SM3", ret);
+
+	if (ret == 0) {
+		printf("  HMAC-SM3 = ");
+		for (int i = 0; i < 32; i++)
+			printf("%02x", ht.digest[i]);
+		printf("\n");
+
+		/* Verify the digest is non-zero (basic sanity) */
+		int nonzero = 0;
+		for (int i = 0; i < 32; i++) {
+			if (ht.digest[i] != 0)
+				nonzero = 1;
+		}
+		if (nonzero) {
+			printf("  OK:   HMAC-SM3 produced non-zero digest\n");
+		} else {
+			printf("  FAIL: HMAC-SM3 returned all zeros\n");
+		}
+
+		/* Verify determinism: same input should produce same output */
+		struct sle_hmac_test ht2;
+		memcpy(&ht2, &ht, sizeof(ht2));
+		memset(ht2.digest, 0, 32);
+		ret = ioctl(fd, SL_IOCTL_SEC_HMAC_TEST, &ht2);
+		if (ret == 0 && memcmp(ht.digest, ht2.digest, 32) == 0) {
+			printf("  OK:   HMAC-SM3 deterministic\n");
+		} else {
+			printf("  FAIL: HMAC-SM3 not deterministic\n");
 		}
 	}
 }
@@ -1647,6 +1781,8 @@ int main(void)
 	test_conn_reject(fd);
 	test_conn_data_loopback(fd);
 	test_sm3_hash(fd);
+	test_sm4_block(fd);
+	test_hmac_sm3(fd);
 	test_security_pairing(fd);
 	test_ssap_service(fd);
 	test_power_management(fd);

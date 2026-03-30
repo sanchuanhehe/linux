@@ -63,6 +63,8 @@
 #define SL_IOCTL_SEC_PAIR        _IOW(SL_MAGIC, 0x41, struct sle_pair_params)
 #define SL_IOCTL_SEC_INFO        _IOR(SL_MAGIC, 0x42, struct sle_sec_info)
 #define SL_IOCTL_SEC_ENCRYPT_ON  _IO(SL_MAGIC, 0x43)
+#define SL_IOCTL_SEC_SM4_BLOCK_TEST _IOWR(SL_MAGIC, 0x47, struct sle_sm4_block_test)
+#define SL_IOCTL_SEC_HMAC_TEST   _IOWR(SL_MAGIC, 0x48, struct sle_hmac_test)
 #define SL_IOCTL_SSAP_REGISTER_SVC _IO(SL_MAGIC, 0x50)
 #define SL_IOCTL_SSAP_INFO       _IOR(SL_MAGIC, 0x51, struct ssap_summary)
 #define SL_IOCTL_SSAP_READ       _IOWR(SL_MAGIC, 0x52, struct ssap_read_write)
@@ -161,6 +163,22 @@ struct sle_sec_info {
 	uint8_t enc_key_fingerprint[4];
 	uint8_t _reserved[8];
 } __attribute__((packed));
+
+struct sle_sm4_block_test {
+	uint8_t  key[16];
+	uint8_t  input[16];
+	uint8_t  output[16];
+	uint8_t  decrypt;
+	uint8_t  _pad[15];
+};
+
+struct sle_hmac_test {
+	uint16_t key_len;
+	uint16_t data_len;
+	uint8_t  key[64];
+	uint8_t  data[160];
+	uint8_t  digest[32];
+};
 
 struct ssap_summary {
 	uint16_t service_count;

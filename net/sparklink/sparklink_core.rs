@@ -181,6 +181,12 @@ const SL_IOCTL_SEC_SM4_ENC_TEST: u32 = _IOW::<SleConnData>(SL_MAGIC, 0x45);
 /// SM4 decrypt test: decrypt data in-place using session key.
 const SL_IOCTL_SEC_SM4_DEC_TEST: u32 = _IOW::<SleConnData>(SL_MAGIC, 0x46);
 
+/// SM4 standalone block test: encrypt or decrypt one 16-byte block with explicit key.
+const SL_IOCTL_SEC_SM4_BLOCK_TEST: u32 = _IOWR::<SleSm4BlockTest>(SL_MAGIC, 0x47);
+
+/// HMAC-SM3 test: compute HMAC-SM3(key, data) and return digest.
+const SL_IOCTL_SEC_HMAC_TEST: u32 = _IOWR::<SleHmacTest>(SL_MAGIC, 0x48);
+
 // --- SSAP service layer ioctls ---
 
 /// Register the built-in device info service.
@@ -587,6 +593,43 @@ pub struct SleHashTest {
 
 // SAFETY: SleHashTest is repr(C) with only primitive fields.
 unsafe impl FromBytes for SleHashTest {}
+
+/// SM4 standalone block encrypt/decrypt test.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleSm4BlockTest {
+    /// 128-bit key.
+    pub key: [u8; 16],
+    /// 16-byte input block.
+    pub input: [u8; 16],
+    /// 16-byte output block (filled by kernel).
+    pub output: [u8; 16],
+    /// 0 = encrypt, 1 = decrypt.
+    pub decrypt: u8,
+    _pad: [u8; 15],
+}
+
+// SAFETY: SleSm4BlockTest is repr(C) with only primitive fields.
+unsafe impl FromBytes for SleSm4BlockTest {}
+
+/// HMAC-SM3 standalone test.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleHmacTest {
+    /// HMAC key length (max 64).
+    pub key_len: u16,
+    /// Input data length (max 160).
+    pub data_len: u16,
+    /// HMAC key.
+    pub key: [u8; 64],
+    /// Input data.
+    pub data: [u8; 160],
+    /// Output HMAC-SM3 digest (32 bytes, filled by kernel).
+    pub digest: [u8; 32],
+}
+
+// SAFETY: SleHmacTest is repr(C) with only primitive fields.
+unsafe impl FromBytes for SleHmacTest {}
 
 // ---------------------------------------------------------------------------
 // SSAP service layer userspace data structures
@@ -1315,6 +1358,25 @@ impl MiscDevice for SparkLinkCtl {
                 let len = (cd.length as usize).min(CONN_DATA_MAX);
                 me.security.lock().decrypt_test(&mut cd.data[..len])?;
                 write_user_struct(arg, &cd)?;
+                Ok(0)
+            }
+            SL_IOCTL_SEC_SM4_BLOCK_TEST => {
+                let mut bt: SleSm4BlockTest = read_user_struct(arg)?;
+                let ctx = sle_crypto::Sm4Key::new(&bt.key);
+                bt.output = if bt.decrypt != 0 {
+                    ctx.decrypt_block(&bt.input)
+                } else {
+                    ctx.encrypt_block(&bt.input)
+                };
+                write_user_struct(arg, &bt)?;
+                Ok(0)
+            }
+            SL_IOCTL_SEC_HMAC_TEST => {
+                let mut ht: SleHmacTest = read_user_struct(arg)?;
+                let klen = (ht.key_len as usize).min(64);
+                let dlen = (ht.data_len as usize).min(160);
+                ht.digest = sle_crypto::hmac_sm3(&ht.key[..klen], &ht.data[..dlen]);
+                write_user_struct(arg, &ht)?;
                 Ok(0)
             }
             // --- SSAP service layer ---

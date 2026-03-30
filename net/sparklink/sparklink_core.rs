@@ -789,14 +789,22 @@ struct SparkLinkModule {
     #[pin]
     _version: File<CString>,
     #[pin]
+    _build_info: File<CString>,
+    #[pin]
+    _subsystems: File<CString>,
+    #[pin]
     adv_count: File<Atomic<usize>>,
     #[pin]
     scan_count: File<Atomic<usize>>,
+    #[pin]
+    conn_count: File<Atomic<usize>>,
+    #[pin]
+    ioctl_count: File<Atomic<usize>>,
 }
 
 impl kernel::InPlaceModule for SparkLinkModule {
     fn init(_module: &'static ThisModule) -> impl PinInit<Self, Error> {
-        pr_info!("sparklink: initialising SparkLink subsystem v0.2.0\n");
+        pr_info!("sparklink: initialising SparkLink subsystem v0.3.0\n");
 
         let state = Arc::pin_init(
             new_mutex!(SparkLinkState {
@@ -817,7 +825,15 @@ impl kernel::InPlaceModule for SparkLinkModule {
             state <- state,
             _version <- debugfs.read_only_file(
                 c"version",
-                CString::try_from_fmt(fmt!("sparklink 0.2.0"))?,
+                CString::try_from_fmt(fmt!("sparklink 0.3.0"))?,
+            ),
+            _build_info <- debugfs.read_only_file(
+                c"build_info",
+                CString::try_from_fmt(fmt!("sparklink subsystem\nstandard: T/XS 10002-2025, T/XS 20001-2025\nmodules: core pdu adv conn crypto security ssap power\nlanguage: Rust"))?,
+            ),
+            _subsystems <- debugfs.read_only_file(
+                c"subsystems",
+                CString::try_from_fmt(fmt!("sle_pdu: frame codec\nsle_adv: advertising/scanning\nsle_conn: connection management\nsle_crypto: SM3/SM4 crypto\nsle_security: pairing/encryption\nsle_ssap: service access protocol\nsle_power: power management"))?,
             ),
             adv_count <- debugfs.read_write_file(
                 c"adv_count",
@@ -825,6 +841,14 @@ impl kernel::InPlaceModule for SparkLinkModule {
             ),
             scan_count <- debugfs.read_write_file(
                 c"scan_count",
+                Atomic::<usize>::new(0),
+            ),
+            conn_count <- debugfs.read_write_file(
+                c"conn_count",
+                Atomic::<usize>::new(0),
+            ),
+            ioctl_count <- debugfs.read_write_file(
+                c"ioctl_count",
                 Atomic::<usize>::new(0),
             ),
             _debugfs: debugfs,

@@ -767,6 +767,34 @@ Build and run:
         tools/testing/selftests/sparklink/sparklink_test.c
     sudo ./sparklink_test
 
+run_qemu_test.sh
+----------------
+
+QEMU integration test runner at
+``tools/testing/selftests/sparklink/run_qemu_test.sh``.
+Boots the kernel in a QEMU VM with a minimal initramfs, runs the full
+sparklink_test suite against the real kernel module, and reports results.
+
+Prerequisites:
+
+- ``qemu-system-x86_64``
+- ``busybox`` (statically linked)
+- Built kernel at ``build/`` (or set ``KBUILD``)
+
+.. code-block:: shell
+
+    cd tools/testing/selftests/sparklink
+    ./run_qemu_test.sh              # Normal run
+    ./run_qemu_test.sh --verbose    # Show full console output
+
+The script:
+
+1. Builds ``sparklink_test`` as a static binary
+2. Creates a minimal initramfs with busybox and the test binary
+3. Boots the kernel in QEMU with KVM (if available)
+4. Waits for ``/dev/sparklink`` and runs all 21 test cases
+5. Parses console output for OK/FAIL/WARN counts and overall result
+
 sparklink_ctl
 --------------
 

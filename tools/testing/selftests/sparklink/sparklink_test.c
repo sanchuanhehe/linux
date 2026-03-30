@@ -1284,7 +1284,10 @@ static void test_event_stats(int fd)
 	struct sle_event_stats stats;
 	memset(&stats, 0, sizeof(stats));
 	int ret = ioctl(fd, SL_IOCTL_EVENT_STATS, &stats);
-	ASSERT(ret == 0, "EVENT_STATS ioctl");
+	if (ret != 0) {
+		printf("  FAIL: EVENT_STATS ioctl: %s\n", strerror(errno));
+		return;
+	}
 	printf("  Pending:   %u\n", stats.pending);
 	printf("  Enqueued:  %lu\n", (unsigned long)stats.total_enqueued);
 	printf("  Dropped:   %lu\n", (unsigned long)stats.total_dropped);
@@ -1299,7 +1302,10 @@ static void test_dli_info(int fd)
 	struct sle_dli_info dli;
 	memset(&dli, 0, sizeof(dli));
 	int ret = ioctl(fd, SL_IOCTL_DLI_INFO, &dli);
-	ASSERT(ret == 0, "DLI_INFO ioctl");
+	if (ret != 0) {
+		printf("  FAIL: DLI_INFO ioctl: %s\n", strerror(errno));
+		return;
+	}
 	printf("  Name:         %.32s\n", dli.name);
 	printf("  Bus:          %u\n", dli.bus);
 

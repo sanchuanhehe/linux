@@ -24,11 +24,13 @@ mod sle_power;
 mod sle_dli;
 mod sle_event;
 
+use sle_dli::SleController;
+
 use kernel::{
     debugfs::{Dir, File},
     device::Device,
     fs::{File as FsFile, Kiocb},
-    ioctl::{_IO, _IOR, _IOW},
+    ioctl::{_IO, _IOR, _IOW, _IOWR},
     iov::IovIterDest,
     miscdevice::{MiscDevice, MiscDeviceOptions, MiscDeviceRegistration},
     new_mutex,
@@ -132,13 +134,13 @@ const SL_IOCTL_CONNECT: u32 = _IOW::<SleConnectParams>(SL_MAGIC, 0x30);
 const SL_IOCTL_DISCONNECT: u32 = _IOW::<u16>(SL_MAGIC, 0x31);
 
 /// Get connection status and statistics by handle.
-const SL_IOCTL_CONN_INFO: u32 = _IOW::<SleConnInfo>(SL_MAGIC, 0x32);
+const SL_IOCTL_CONN_INFO: u32 = _IOWR::<SleConnInfo>(SL_MAGIC, 0x32);
 
 /// Send data on a connection identified by handle.
 const SL_IOCTL_CONN_SEND: u32 = _IOW::<SleConnData>(SL_MAGIC, 0x33);
 
 /// Receive data from a connection identified by handle.
-const SL_IOCTL_CONN_RECV: u32 = _IOW::<SleConnData>(SL_MAGIC, 0x34);
+const SL_IOCTL_CONN_RECV: u32 = _IOWR::<SleConnData>(SL_MAGIC, 0x34);
 
 /// Inject a simulated access response for loopback testing.
 const SL_IOCTL_INJECT_CONN_RESP: u32 = _IOW::<SleInjectConnResp>(SL_MAGIC, 0x35);
@@ -184,7 +186,7 @@ const SL_IOCTL_SSAP_REGISTER_SVC: u32 = _IO(SL_MAGIC, 0x50);
 const SL_IOCTL_SSAP_INFO: u32 = _IOR::<SsapSummary>(SL_MAGIC, 0x51);
 
 /// Read a property by handle.
-const SL_IOCTL_SSAP_READ: u32 = _IOW::<SsapReadWrite>(SL_MAGIC, 0x52);
+const SL_IOCTL_SSAP_READ: u32 = _IOWR::<SsapReadWrite>(SL_MAGIC, 0x52);
 
 /// Write a property by handle.
 const SL_IOCTL_SSAP_WRITE: u32 = _IOW::<SsapReadWrite>(SL_MAGIC, 0x53);
@@ -220,6 +222,12 @@ const SL_IOCTL_PM_ACTIVITY: u32 = _IO(SL_MAGIC, 0x65);
 
 /// Get number of pending events in the event queue.
 const SL_IOCTL_EVENT_COUNT: u32 = _IO(SL_MAGIC, 0x70);
+
+/// Get event queue lifetime statistics.
+const SL_IOCTL_EVENT_STATS: u32 = _IOR::<SleEventStats>(SL_MAGIC, 0x71);
+
+/// Get DLI controller information.
+const SL_IOCTL_DLI_INFO: u32 = _IOR::<SleDliInfo>(SL_MAGIC, 0x80);
 
 // ---------------------------------------------------------------------------
 // SparkLink address (6 bytes, same as SLE MAC layer identifier)
@@ -716,6 +724,49 @@ pub struct SlePmInterval {
 unsafe impl FromBytes for SlePmInterval {}
 
 // ---------------------------------------------------------------------------
+// Event queue statistics
+// ---------------------------------------------------------------------------
+
+/// Lifetime statistics for the event queue.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleEventStats {
+    /// Number of events currently pending.
+    pub pending: u32,
+    _pad: u32,
+    /// Total events enqueued (lifetime).
+    pub total_enqueued: u64,
+    /// Total events dropped (queue full).
+    pub total_dropped: u64,
+    /// Total events delivered to userspace.
+    pub total_delivered: u64,
+}
+
+// ---------------------------------------------------------------------------
+// DLI controller information
+// ---------------------------------------------------------------------------
+
+/// DLI controller information returned to userspace.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleDliInfo {
+    /// Bus type (0=Virtual, 1=UART, 2=USB, 3=SDIO).
+    pub bus: u8,
+    _pad: [u8; 3],
+    /// Firmware version (major.minor.patch packed as u32).
+    pub firmware_version: u32,
+    /// Supported feature bitmask (TXS-10003-2025).
+    pub features: u64,
+    /// Maximum simultaneous connections.
+    pub max_connections: u8,
+    /// Maximum advertising sets.
+    pub max_adv_sets: u8,
+    /// Controller name (null-terminated).
+    pub name: [u8; 32],
+    _reserved: [u8; 14],
+}
+
+// ---------------------------------------------------------------------------
 // SCI bus types
 // ---------------------------------------------------------------------------
 
@@ -780,6 +831,8 @@ struct SparkLinkModule {
     conn_count: File<Atomic<usize>>,
     #[pin]
     ioctl_count: File<Atomic<usize>>,
+    #[pin]
+    _dli_info: File<CString>,
 }
 
 impl kernel::InPlaceModule for SparkLinkModule {
@@ -808,11 +861,11 @@ impl kernel::InPlaceModule for SparkLinkModule {
             ),
             _build_info <- debugfs.read_only_file(
                 c"build_info",
-                CString::try_from_fmt(fmt!("sparklink subsystem\nstandard: T/XS 10002-2025, T/XS 20001-2025\nmodules: core pdu adv conn crypto security ssap power\nlanguage: Rust"))?,
+                CString::try_from_fmt(fmt!("sparklink subsystem\nstandard: T/XS 10002-2025, T/XS 20001-2025, T/XS 10003-2025\nmodules: core pdu adv conn crypto security ssap power event dli\nlanguage: Rust"))?,
             ),
             _subsystems <- debugfs.read_only_file(
                 c"subsystems",
-                CString::try_from_fmt(fmt!("sle_pdu: frame codec\nsle_adv: advertising/scanning\nsle_conn: connection management\nsle_crypto: SM3/SM4 crypto\nsle_security: pairing/encryption\nsle_ssap: service access protocol\nsle_power: power management"))?,
+                CString::try_from_fmt(fmt!("sle_pdu: frame codec\nsle_adv: advertising/scanning\nsle_conn: connection management\nsle_crypto: SM3/SM4 crypto\nsle_security: pairing/encryption\nsle_ssap: service access protocol\nsle_power: power management\nsle_event: async event notification\nsle_dli: driver layer interface"))?,
             ),
             adv_count <- debugfs.read_write_file(
                 c"adv_count",
@@ -830,6 +883,21 @@ impl kernel::InPlaceModule for SparkLinkModule {
                 c"ioctl_count",
                 Atomic::<usize>::new(0),
             ),
+            _dli_info <- {
+                let ctrl = sle_dli::VirtualController::new([0x5E, 0, 0, 0, 0, 1]);
+                let cinfo = ctrl.info();
+                let major = (cinfo.fw_version >> 16) & 0xFF;
+                let minor = (cinfo.fw_version >> 8) & 0xFF;
+                let patch = cinfo.fw_version & 0xFF;
+                debugfs.read_only_file(
+                    c"dli_controller",
+                    CString::try_from_fmt(fmt!(
+                        "bus: {:?}\nfirmware: {}.{}.{}\nfeatures: 0x{:016x}\nmax_connections: {}",
+                        cinfo.bus, major, minor, patch,
+                        cinfo.features, cinfo.max_connections
+                    ))?,
+                )
+            },
             _debugfs: debugfs,
         })
     }
@@ -1365,6 +1433,39 @@ impl MiscDevice for SparkLinkCtl {
             SL_IOCTL_EVENT_COUNT => {
                 let count = me.events.lock().pending();
                 Ok(count as isize)
+            }
+            SL_IOCTL_EVENT_STATS => {
+                let guard = me.events.lock();
+                let stats = SleEventStats {
+                    pending: guard.pending() as u32,
+                    _pad: 0,
+                    total_enqueued: guard.total_enqueued,
+                    total_dropped: guard.total_dropped,
+                    total_delivered: guard.total_delivered,
+                };
+                drop(guard);
+                write_user_struct(arg, &stats)?;
+                Ok(0)
+            }
+            // --- DLI controller info ---
+            SL_IOCTL_DLI_INFO => {
+                let ctrl = sle_dli::VirtualController::new([0x5E, 0, 0, 0, 0, 1]);
+                let cinfo = ctrl.info();
+                let mut name = [0u8; 32];
+                let copy_len = cinfo.name.len().min(31);
+                name[..copy_len].copy_from_slice(&cinfo.name[..copy_len]);
+                let info = SleDliInfo {
+                    bus: cinfo.bus as u8,
+                    _pad: [0u8; 3],
+                    firmware_version: cinfo.fw_version,
+                    features: cinfo.features,
+                    max_connections: cinfo.max_connections,
+                    max_adv_sets: 1,
+                    name,
+                    _reserved: [0u8; 14],
+                };
+                write_user_struct(arg, &info)?;
+                Ok(0)
             }
             _ => {
                 dev_err!(me.dev, "sparklink: unknown ioctl 0x{:x}\n", cmd);

@@ -4,18 +4,25 @@
 Linux SparkLink subsystem
 ========================
 
-SparkLink（星闪）是一种短距无线通信技术，面向智能终端、智能家居、智能汽车
-和智能制造等场景，提供低时延、高可靠的无线连接。本子系统实现了 SparkLink
-SLE（SparkLink Low Energy）协议栈，遵循 T/XS 10002-2025（SLE 空口技术规范）
-和 T/XS 20001-2025（设备发现与服务管理技术规范）两项标准。
+SparkLink (NearLink) is a short-range wireless communication technology
+targeting smart terminals, smart home, automotive, and industrial
+scenarios, providing low-latency, high-reliability wireless connectivity.
 
-整个协议栈使用 Rust 编写，运行在内核态，通过 ``/dev/sparklink`` 字符设备
-向用户空间暴露 ioctl 控制接口。
+This subsystem implements the SparkLink SLE (SparkLink Low Energy) protocol
+stack in the Linux kernel, following these standards:
+
+- T/XS 10002-2025: SLE air interface specification
+- T/XS 20001-2025: device discovery and service management
+- T/XS 10003-2025: driver layer interface (DLI)
+
+The entire protocol stack is written in Rust and runs in kernel space.
+It exposes a character device ``/dev/sparklink`` to userspace for ioctl
+control and asynchronous event delivery via ``read()``.
 
 Architecture overview
 =====================
 
-子系统按协议层次划分为以下模块：
+The subsystem is organized in a layered architecture:
 
 .. code-block:: none
 
@@ -23,59 +30,82 @@ Architecture overview
     |                    USER SPACE                         |
     |   sparklink_ctl / sparklink_test / custom app         |
     +------------------------------------------------------+
-                         |  ioctl
-                         v
+                    |  ioctl + read()
+                    v
     +------------------------------------------------------+
     |              sparklink_core (SCI)                     |
-    |   misc device · ioctl dispatch · debugfs · module     |
-    +------+------+------+------+------+------+------+-----+
-           |      |      |      |      |      |      |
-           v      v      v      v      v      v      v
-        sle_pdu sle_adv sle_conn sle_crypto sle_sec sle_ssap sle_power
-         帧编解码 广播扫描  连接管理   国密算法  安全配对  服务属性   功耗管理
+    |  misc device - ioctl dispatch - event queue - debugfs |
+    +--+------+------+------+------+------+------+------+--+
+       |      |      |      |      |      |      |      |
+       v      v      v      v      v      v      v      v
+    sle_pdu sle_adv sle_conn sle_crypto sle_sec sle_ssap sle_power sle_event
+    codec   adv/scan  multi    SM3/SM4  pairing   SSAP     PM     event queue
+                     conn
     +------------------------------------------------------+
-    |          sparklink_virtual (virtual controller)       |
-    +------------------------------------------------------+
+    |                  sle_dli (DLI)                        |
+    |  SleController trait - opcode/event model (10003)     |
+    +------+-----------------------+-----------------------+
+           |                       |
+    VirtualController        USB / UART / SPI driver
+       (loopback)              (future hardware)
 
-各模块职责：
+Module descriptions:
 
-**sparklink_core** (``net/sparklink/sparklink_core.rs``, 1513 行)
-  SCI（SparkLink Controller Interface）核心。注册 ``/dev/sparklink`` misc
-  设备，管理虚拟控制器的生命周期，分发全部 ioctl 命令，维护 debugfs 信息节点。
+**sparklink_core** (``net/sparklink/sparklink_core.rs``)
+  SCI (SparkLink Controller Interface) core. Registers the ``/dev/sparklink``
+  misc device, dispatches all ioctl commands, delivers events through
+  ``read()``, and maintains debugfs information nodes.
 
-**sle_pdu** (``net/sparklink/sle_pdu.rs``, 490 行)
-  帧编解码器。按照 T/XS 10002-2025 第 6 章定义的 PDU 格式实现帧的序列化与
-  反序列化，覆盖 Preamble、Access Address、PDU Header、Payload、CRC24 等字段。
+**sle_pdu** (``net/sparklink/sle_pdu.rs``)
+  Frame codec implementing the PDU format defined in T/XS 10002-2025
+  chapter 6, including Preamble, Access Address, PDU Header, Payload,
+  and CRC-24.
 
-**sle_adv** (``net/sparklink/sle_adv.rs``, 299 行)
-  广播与扫描状态机。管理 SLE 的 Advertising 和 Scanning 两种模式，支持
-  参数配置、互斥检查、广播报文的注入与扫描结果的收集。
+**sle_adv** (``net/sparklink/sle_adv.rs``)
+  Advertising and scanning state machine. Manages broadcast and scan
+  modes with parameter configuration and mutual exclusion.
 
-**sle_conn** (``net/sparklink/sle_conn.rs``, 484 行)
-  连接管理模块。实现三态状态机（Idle → Connecting → Connected），支持
-  GT 角色协商、连接参数谈判、1-bit ARQ 序列号跟踪、数据收发和回环。
+**sle_conn** (``net/sparklink/sle_conn.rs``)
+  Multi-connection manager supporting up to 8 simultaneous connections.
+  Each connection is identified by a 16-bit handle and follows the
+  state machine: Idle -> Connecting -> Connected -> Disconnecting.
+  Supports GT role negotiation, parameter negotiation, 1-bit ARQ
+  sequence tracking, and per-connection data queues.
 
-**sle_crypto** (``net/sparklink/sle_crypto.rs``, 466 行)
-  国密算法库。纯 Rust 实现 SM3 哈希（GB/T 32905-2016）、SM4 分组密码
-  （GB/T 32907-2016）、HMAC-SM3 和 SM4-CTR 模式，用于安全层的密钥派生与
-  数据加解密。
+**sle_crypto** (``net/sparklink/sle_crypto.rs``)
+  Pure Rust implementation of SM3 hash (GB/T 32905-2016), SM4 block
+  cipher (GB/T 32907-2016), HMAC-SM3, and SM4-CTR mode for key
+  derivation and data encryption.
 
-**sle_security** (``net/sparklink/sle_security.rs``, 282 行)
-  安全层状态机。支持 JustWorks 和 PSK 两种配对方式，管理安全状态
-  （Unpaired → Pairing → Paired → Encrypted），提供 SM4-CTR 数据加密、
-  密钥派生和指纹计算。
+**sle_security** (``net/sparklink/sle_security.rs``)
+  Security state machine supporting JustWorks and PSK pairing methods.
+  Manages security states (Unpaired -> Pairing -> Paired -> Encrypted)
+  and provides SM4-CTR data encryption.
 
-**sle_ssap** (``net/sparklink/sle_ssap.rs``, 845 行)
-  SSAP（SLE Service Access Profile）层，功能等价于蓝牙 GATT。按照
-  T/XS 20001-2025 第 7.4 节实现服务注册、属性读写、方法调用、事件通知和
-  服务发现。内置 Device Information Service（UUID 0x0001）。
+**sle_ssap** (``net/sparklink/sle_ssap.rs``)
+  SSAP (SLE Service Access Profile) layer, functionally equivalent to
+  Bluetooth GATT. Implements service registration, property read/write,
+  notifications, and service discovery per T/XS 20001-2025 section 7.4.
 
-**sle_power** (``net/sparklink/sle_power.rs``, 298 行)
-  功耗管理模块。维护连接间隔、Sniff 参数和功耗统计，实现基于空闲计数的
-  自动状态转换（Active → Sniff → Idle），支持挂起/恢复和强制激活。
+**sle_power** (``net/sparklink/sle_power.rs``)
+  Power management module with automatic state transitions
+  (Active -> Sniff -> Idle) based on idle count, plus suspend/resume
+  and force-active mode.
 
-**sparklink_virtual** (``drivers/sparklink/sparklink_virtual.rs``, 32 行)
-  虚拟控制器驱动。在无物理硬件时提供测试用的虚拟 SCI 设备。
+**sle_event** (``net/sparklink/sle_event.rs``)
+  Asynchronous event notification subsystem. Delivers typed events
+  (connection state, advertising reports, data received, security
+  changes, power changes, hardware errors) to userspace via ``read()``
+  on the device file descriptor.
+
+**sle_dli** (``net/sparklink/sle_dli.rs``)
+  Driver Layer Interface following T/XS 10003-2025. Defines the
+  ``SleController`` trait that hardware drivers implement, with
+  standard DLI opcode encoding (OGF/OCF), event codes, and feature
+  bits from the 80-bit feature set.
+
+**sparklink_virtual** (``drivers/sparklink/sparklink_virtual.rs``)
+  Virtual controller driver for testing without physical hardware.
 
 Source code layout
 ==================
@@ -83,69 +113,69 @@ Source code layout
 .. code-block:: none
 
     net/sparklink/
-    ├── Kconfig                  # 子系统 Kconfig
-    ├── Makefile                 # 构建规则
-    ├── sparklink_core.rs        # 核心模块
-    ├── sle_pdu.rs               # 帧编解码
-    ├── sle_adv.rs               # 广播扫描
-    ├── sle_conn.rs              # 连接管理
-    ├── sle_crypto.rs            # 国密算法
-    ├── sle_security.rs          # 安全配对
-    ├── sle_ssap.rs              # 服务属性
-    └── sle_power.rs             # 功耗管理
+    ├── Kconfig                  # Subsystem Kconfig
+    ├── Makefile                 # Build rules
+    ├── sparklink_core.rs        # Core module
+    ├── sle_pdu.rs               # Frame codec
+    ├── sle_adv.rs               # Advertising/scanning
+    ├── sle_conn.rs              # Multi-connection manager
+    ├── sle_crypto.rs            # SM3/SM4 crypto
+    ├── sle_security.rs          # Security/pairing
+    ├── sle_ssap.rs              # Service access protocol
+    ├── sle_power.rs             # Power management
+    ├── sle_event.rs             # Event notification
+    └── sle_dli.rs               # Driver layer interface
 
     drivers/sparklink/
     ├── Kconfig
     ├── Makefile
-    └── sparklink_virtual.rs     # 虚拟控制器
+    └── sparklink_virtual.rs     # Virtual controller
 
     tools/testing/selftests/sparklink/
     ├── Makefile
-    ├── sparklink_test.c         # ioctl 自测程序 (1058 行)
-    └── sparklink_ctl.c          # CLI 控制工具 (553 行)
+    ├── sparklink_test.c         # Integration test program
+    └── sparklink_ctl.c          # CLI control utility
 
 Kernel configuration
 ====================
 
-启用 SparkLink 子系统需要以下配置：
+The following options must be enabled:
 
 .. code-block:: none
 
-    CONFIG_RUST=y                  # Rust 支持
-    CONFIG_SPARKLINK=y             # SparkLink 核心协议栈
-    CONFIG_SPARKLINK_DRIVERS=y     # SparkLink 驱动框架
-    CONFIG_SPARKLINK_VIRTUAL=y     # 虚拟控制器（测试用）
+    CONFIG_RUST=y                  # Rust language support
+    CONFIG_SPARKLINK=y             # SparkLink core protocol stack
+    CONFIG_SPARKLINK_DRIVERS=y     # SparkLink driver framework
+    CONFIG_SPARKLINK_VIRTUAL=y     # Virtual controller (testing)
 
-可通过 ``make menuconfig`` 在以下路径找到相关选项::
+Find these options in ``make menuconfig`` at::
 
-    Networking support → SparkLink short-range wireless subsystem
-    Device Drivers → SparkLink Controller drivers → Virtual SparkLink Controller
+    Networking support -> SparkLink short-range wireless subsystem
+    Device Drivers -> SparkLink Controller drivers -> Virtual SparkLink Controller
 
 Building
 ========
 
-确保内核已启用 Rust 支持（参见 ``Documentation/rust/``），然后按常规方式
-编译内核：
+Ensure kernel Rust support is enabled (see ``Documentation/rust/``),
+then build:
 
 .. code-block:: shell
 
-    make O=build menuconfig      # 启用上述 CONFIG 项
+    make O=build menuconfig      # Enable CONFIG options above
     make O=build -j$(nproc)
-
-编译结果中 SparkLink 模块代码链入 vmlinux 或作为模块加载。
 
 ioctl interface
 ===============
 
-SparkLink 子系统通过 ``/dev/sparklink`` 字符设备提供 ioctl 接口。
-ioctl magic number 为 ``'S'`` (0x53)。所有结构体定义见
-``net/sparklink/sparklink_core.rs``。
+The SparkLink subsystem exposes its control plane through ioctl on
+``/dev/sparklink``. The ioctl magic number is ``'S'`` (0x53). All
+structure definitions are in ``net/sparklink/sparklink_core.rs``.
 
-Device management (0x01 – 0x04)
--------------------------------
+Device management (0x01 -- 0x04)
+--------------------------------
 
 .. list-table::
-   :widths: 10 20 30 40
+   :widths: 8 25 15 52
    :header-rows: 1
 
    * - Nr
@@ -153,27 +183,27 @@ Device management (0x01 – 0x04)
      - Direction
      - Description
    * - 0x01
-     - ``SL_IOCTL_DEV_REGISTER``
+     - ``DEV_REGISTER``
      - None
-     - 注册一个虚拟 SCI 设备，返回设备索引
+     - Register a virtual SCI device (stub)
    * - 0x02
-     - ``SL_IOCTL_DEV_UNREGISTER``
+     - ``DEV_UNREGISTER``
      - Write (u16)
-     - 按索引注销 SCI 设备
+     - Unregister a SCI device by index (stub)
    * - 0x03
-     - ``SL_IOCTL_DEV_COUNT``
+     - ``DEV_COUNT``
      - Read (u32)
-     - 读取当前已注册设备数
+     - Get number of registered devices
    * - 0x04
-     - ``SL_IOCTL_DEV_INFO``
+     - ``DEV_INFO``
      - Read (SciDevInfo)
-     - 读取设备基本信息
+     - Get device information (state, address, name)
 
-Advertising & Scanning (0x10 – 0x13)
--------------------------------------
+Advertising and scanning (0x10 -- 0x13)
+---------------------------------------
 
 .. list-table::
-   :widths: 10 20 30 40
+   :widths: 8 25 15 52
    :header-rows: 1
 
    * - Nr
@@ -181,27 +211,27 @@ Advertising & Scanning (0x10 – 0x13)
      - Direction
      - Description
    * - 0x10
-     - ``SL_IOCTL_START_ADV``
+     - ``START_ADV``
      - Write (SleAdvParams)
-     - 开始广播，设置间隔和发射功率
+     - Start advertising with interval and discovery level
    * - 0x11
-     - ``SL_IOCTL_STOP_ADV``
+     - ``STOP_ADV``
      - None
-     - 停止广播
+     - Stop advertising
    * - 0x12
-     - ``SL_IOCTL_START_SCAN``
+     - ``START_SCAN``
      - Write (SleScanParams)
-     - 开始扫描，设置窗口和扫描类型
+     - Start scanning with window, interval, and filter
    * - 0x13
-     - ``SL_IOCTL_STOP_SCAN``
+     - ``STOP_SCAN``
      - None
-     - 停止扫描
+     - Stop scanning
 
-Loopback injection (0x20 – 0x21)
+Loopback injection (0x20 -- 0x21)
 ---------------------------------
 
 .. list-table::
-   :widths: 10 20 30 40
+   :widths: 8 25 15 52
    :header-rows: 1
 
    * - Nr
@@ -209,19 +239,24 @@ Loopback injection (0x20 – 0x21)
      - Direction
      - Description
    * - 0x20
-     - ``SL_IOCTL_INJECT_ADV``
+     - ``INJECT_ADV``
      - Write (SleInjectAdv)
-     - 向扫描结果队列注入一条虚拟广播报文
+     - Inject a simulated advertising PDU into the scan result queue
    * - 0x21
-     - ``SL_IOCTL_SCAN_RESULT_COUNT``
-     - None
-     - 返回当前扫描结果队列中的报文数量
+     - ``SCAN_RESULT_COUNT``
+     - None (retval)
+     - Return number of pending scan results
 
-Connection management (0x30 – 0x36)
+Connection management (0x30 -- 0x38)
 ------------------------------------
 
+All connection ioctls use handle-based addressing. A handle is returned
+by ``CONNECT`` and must be passed to subsequent connection operations.
+Handle ``0`` is a legacy shortcut that resolves to the first active
+connection.
+
 .. list-table::
-   :widths: 10 20 30 40
+   :widths: 8 25 15 52
    :header-rows: 1
 
    * - Nr
@@ -229,39 +264,47 @@ Connection management (0x30 – 0x36)
      - Direction
      - Description
    * - 0x30
-     - ``SL_IOCTL_CONNECT``
+     - ``CONNECT``
      - Write (SleConnectParams)
-     - 发起到目标地址的连接请求
+     - Initiate connection; returns handle (> 0) on success
    * - 0x31
-     - ``SL_IOCTL_DISCONNECT``
-     - None
-     - 断开当前连接
+     - ``DISCONNECT``
+     - Write (u16)
+     - Disconnect by handle; removes the connection entry
    * - 0x32
-     - ``SL_IOCTL_CONN_INFO``
-     - Read (SleConnInfo)
-     - 读取连接状态和参数
+     - ``CONN_INFO``
+     - Write/Read (SleConnInfo)
+     - Get connection state, parameters, and statistics by handle
    * - 0x33
-     - ``SL_IOCTL_CONN_SEND``
+     - ``CONN_SEND``
      - Write (SleConnData)
-     - 发送连接数据
+     - Send data on a connection by handle
    * - 0x34
-     - ``SL_IOCTL_CONN_RECV``
-     - Read (SleConnData)
-     - 接收连接数据
+     - ``CONN_RECV``
+     - Write/Read (SleConnData)
+     - Receive data from a connection by handle
    * - 0x35
-     - ``SL_IOCTL_INJECT_CONN_RESP``
+     - ``INJECT_CONN_RESP``
      - Write (SleInjectConnResp)
-     - 注入连接响应（回环测试）
+     - Inject connection response for loopback testing
    * - 0x36
-     - ``SL_IOCTL_INJECT_CONN_DATA``
+     - ``INJECT_CONN_DATA``
      - Write (SleConnData)
-     - 注入连接数据（回环测试）
+     - Inject received data for loopback testing
+   * - 0x37
+     - ``CONN_COUNT``
+     - None (retval)
+     - Return number of active connections
+   * - 0x38
+     - ``CONN_LIST``
+     - Read (SleConnList)
+     - Return list of active connection handles (up to 8)
 
-Security (0x40 – 0x46)
+Security (0x40 -- 0x46)
 -----------------------
 
 .. list-table::
-   :widths: 10 20 30 40
+   :widths: 8 25 15 52
    :header-rows: 1
 
    * - Nr
@@ -269,39 +312,39 @@ Security (0x40 – 0x46)
      - Direction
      - Description
    * - 0x40
-     - ``SL_IOCTL_SEC_SET_PSK``
+     - ``SEC_SET_PSK``
      - Write (SlePskParams)
-     - 设置预共享密钥
+     - Set 128-bit pre-shared key
    * - 0x41
-     - ``SL_IOCTL_SEC_PAIR``
+     - ``SEC_PAIR``
      - Write (SlePairParams)
-     - 发起配对流程（JustWorks 或 PSK）
+     - Initiate pairing (method=1 JustWorks, method=2 PSK)
    * - 0x42
-     - ``SL_IOCTL_SEC_INFO``
+     - ``SEC_INFO``
      - Read (SleSecInfo)
-     - 读取安全状态
+     - Get security state, method, and key fingerprint
    * - 0x43
-     - ``SL_IOCTL_SEC_ENCRYPT_ON``
+     - ``SEC_ENCRYPT_ON``
      - None
-     - 启用数据加密
+     - Enable data path encryption (requires Paired state)
    * - 0x44
-     - ``SL_IOCTL_SEC_SM3_TEST``
-     - Write (SleHashTest)
-     - SM3 哈希测试接口
+     - ``SEC_SM3_TEST``
+     - Write/Read (SleHashTest)
+     - Compute SM3 hash of input data
    * - 0x45
-     - ``SL_IOCTL_SEC_SM4_ENC_TEST``
-     - Write (SleConnData)
-     - SM4-CTR 加密测试接口
+     - ``SEC_SM4_ENC_TEST``
+     - Write/Read (SleConnData)
+     - Encrypt data in-place with SM4-CTR
    * - 0x46
-     - ``SL_IOCTL_SEC_SM4_DEC_TEST``
-     - Write (SleConnData)
-     - SM4-CTR 解密测试接口
+     - ``SEC_SM4_DEC_TEST``
+     - Write/Read (SleConnData)
+     - Decrypt data in-place with SM4-CTR
 
-SSAP service layer (0x50 – 0x56)
+SSAP service layer (0x50 -- 0x56)
 ---------------------------------
 
 .. list-table::
-   :widths: 10 20 30 40
+   :widths: 8 25 15 52
    :header-rows: 1
 
    * - Nr
@@ -309,39 +352,39 @@ SSAP service layer (0x50 – 0x56)
      - Direction
      - Description
    * - 0x50
-     - ``SL_IOCTL_SSAP_REGISTER_SVC``
+     - ``SSAP_REGISTER_SVC``
      - None
-     - 注册内置 Device Information Service
+     - Register built-in Device Information Service
    * - 0x51
-     - ``SL_IOCTL_SSAP_INFO``
+     - ``SSAP_INFO``
      - Read (SsapSummary)
-     - 读取 SSAP 摘要信息（服务数、属性数等）
+     - Get SSAP summary (service count, MTU, etc.)
    * - 0x52
-     - ``SL_IOCTL_SSAP_READ``
+     - ``SSAP_READ``
      - Write/Read (SsapReadWrite)
-     - 按 handle 读取属性值
+     - Read property value by handle
    * - 0x53
-     - ``SL_IOCTL_SSAP_WRITE``
+     - ``SSAP_WRITE``
      - Write (SsapReadWrite)
-     - 按 handle 写入属性值
+     - Write property value by handle
    * - 0x54
-     - ``SL_IOCTL_SSAP_FIND_SVC``
+     - ``SSAP_FIND_SVC``
      - Read (SsapServiceList)
-     - 服务发现，返回已注册服务列表
+     - Discover registered services
    * - 0x55
-     - ``SL_IOCTL_SSAP_NOTIFY``
+     - ``SSAP_NOTIFY``
      - Write (u16)
-     - 对指定属性触发通知
+     - Trigger notification on a property handle
    * - 0x56
-     - ``SL_IOCTL_SSAP_DEQUEUE_NTF``
+     - ``SSAP_DEQUEUE_NTF``
      - Read (SsapNotification)
-     - 取出一条排队的通知
+     - Dequeue one pending notification
 
-Power management (0x60 – 0x65)
+Power management (0x60 -- 0x65)
 -------------------------------
 
 .. list-table::
-   :widths: 10 20 30 40
+   :widths: 8 25 15 52
    :header-rows: 1
 
    * - Nr
@@ -349,48 +392,280 @@ Power management (0x60 – 0x65)
      - Direction
      - Description
    * - 0x60
-     - ``SL_IOCTL_PM_INFO``
+     - ``PM_INFO``
      - Read (SlePmInfo)
-     - 读取功耗管理状态和统计
+     - Get power state, statistics, and interval parameters
    * - 0x61
-     - ``SL_IOCTL_PM_SET_STATE``
+     - ``PM_SET_STATE``
      - Write (SlePmStateCmd)
-     - 设置功耗状态（Active/Sniff/Idle/Suspended）
+     - Set power state (0=Active, 1=Sniff, 3=Suspend)
    * - 0x62
-     - ``SL_IOCTL_PM_SET_INTERVAL``
+     - ``PM_SET_INTERVAL``
      - Write (SlePmInterval)
-     - 设置连接间隔参数
+     - Update connection interval parameters
    * - 0x63
-     - ``SL_IOCTL_PM_FORCE_ACTIVE``
+     - ``PM_FORCE_ACTIVE``
      - Write (u8)
-     - 强制保持 Active 状态（1）或解除（0）
+     - Enable (1) or disable (0) force-active mode
    * - 0x64
-     - ``SL_IOCTL_PM_TICK``
+     - ``PM_TICK``
      - None
-     - 触发一次功耗管理时钟 tick
+     - Simulate a power management clock tick
    * - 0x65
-     - ``SL_IOCTL_PM_ACTIVITY``
+     - ``PM_ACTIVITY``
      - None
-     - 上报一次活动事件，重置空闲计数器
+     - Record a data activity event, reset idle counter
+
+Event notification (0x70-0x71)
+------------------------------
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0x70
+     - ``EVENT_COUNT``
+     - None (retval)
+     - Return number of pending events in the queue
+   * - 0x71
+     - ``EVENT_STATS``
+     - Read
+     - Return event queue lifetime statistics (SleEventStats)
+
+``SleEventStats`` structure:
+
+.. code-block:: c
+
+    struct sle_event_stats {
+        uint32_t pending;          /* current pending count */
+        uint32_t _pad;
+        uint64_t total_enqueued;   /* lifetime enqueued */
+        uint64_t total_dropped;    /* dropped due to queue full */
+        uint64_t total_delivered;  /* delivered to userspace */
+    };
+
+DLI controller info (0x80)
+--------------------------
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0x80
+     - ``DLI_INFO``
+     - Read
+     - Return DLI controller information (SleDliInfo)
+
+``SleDliInfo`` structure:
+
+.. code-block:: c
+
+    struct sle_dli_info {
+        uint8_t  bus;               /* 0=Virtual, 1=UART, 2=USB, 3=SDIO */
+        uint8_t  _pad[3];
+        uint32_t firmware_version;  /* major.minor.patch packed */
+        uint64_t features;          /* feature bitmask (TXS-10003-2025) */
+        uint8_t  max_connections;
+        uint8_t  max_adv_sets;
+        uint8_t  name[32];          /* null-terminated controller name */
+        uint8_t  _reserved[14];
+    };
+
+Event delivery via read()
+=========================
+
+Asynchronous events are delivered to userspace through the standard
+``read()`` system call on ``/dev/sparklink``. Each event is serialized
+as a fixed-size ``SleWireEvent`` structure (44 bytes):
+
+.. code-block:: none
+
+    Offset  Size  Field
+    ------  ----  -----
+    0       1     event_type (SleEventType)
+    1       1     payload_len
+    2       40    payload (type-specific, padded with zeros)
+    42      2     _pad (alignment)
+
+Event types:
+
+.. list-table::
+   :widths: 10 25 65
+   :header-rows: 1
+
+   * - Code
+     - Type
+     - Description
+   * - 0x01
+     - ConnStateChanged
+     - Connection state transition (handle, old/new state, peer addr, reason)
+   * - 0x02
+     - AdvReport
+     - Advertising report (address, RSSI, discovery level, name)
+   * - 0x03
+     - DataReceived
+     - Data available on a connection (handle, rx_bytes count)
+   * - 0x04
+     - SecurityChanged
+     - Security state transition (state, method, encrypted flag)
+   * - 0x05
+     - PowerChanged
+     - Power state transition (state, power percentage)
+   * - 0x06
+     - HardwareError
+     - Controller hardware error (error code)
+
+The event queue holds up to 64 events. When full, the oldest event is
+dropped (LRU eviction). ``read()`` returns ``EAGAIN`` when no events
+are pending; callers should use non-blocking I/O or poll for readability.
+
+Multiple events are returned in a single ``read()`` call if the
+userspace buffer is large enough.
+
+Driver Layer Interface (DLI)
+============================
+
+The DLI module (``sle_dli.rs``) defines the ``SleController`` trait
+that hardware controller drivers implement, following T/XS 10003-2025.
+
+Opcode encoding
+---------------
+
+DLI command opcodes use a 16-bit format:
+
+.. code-block:: none
+
+    Bits [15:10]  OGF (Opcode Group Field, 6 bits)
+    Bits [9:0]    OCF (Opcode Command Field, 10 bits)
+
+Command groups:
+
+.. list-table::
+   :widths: 8 15 20 57
+   :header-rows: 1
+
+   * - OGF
+     - Wire prefix
+     - Group
+     - Key commands
+   * - 0x01
+     - 0x04xx
+     - Basic
+     - Reset, ReadLocalVersion, ReadLocalFeatures, SetMacAddr
+   * - 0x03
+     - 0x0Cxx
+     - Broadcast
+     - SetBroadcastParam, SetBroadcastData, EnableBroadcast
+   * - 0x04
+     - 0x10xx
+     - Scan
+     - SetScanParam, EnableScan
+   * - 0x05
+     - 0x14xx
+     - Connection
+     - CreateConnection, Disconnect, SetConnParam, ReadRssi
+   * - 0x06
+     - 0x18xx
+     - Link control
+     - SetPhyParam, SetTxPower, SetMaxDataLen
+   * - 0x07
+     - 0x1Cxx
+     - Security
+     - RequestPair, SetPairPsk, StartEncrypt, SetRpaEnable
+   * - 0x08
+     - 0x20xx
+     - Measurement
+     - ReadLocalMeasCap, MeasAction, EnableMeas
+   * - 0x0A
+     - 0x28xx
+     - Sync link
+     - SyncUcastCreate, SyncUcastRemove
+   * - 0x3E
+     - 0xF8xx
+     - Test
+     - TestModeEnable, TestRx, TestTx
+
+DLI transport
+-------------
+
+The standard defines five DLI packet types on the transport layer:
+
+.. list-table::
+   :widths: 10 25 65
+   :header-rows: 1
+
+   * - ID
+     - Type
+     - Description
+   * - 0xA1
+     - Command
+     - Host to controller: opcode (2B) + param_len (1B) + params
+   * - 0xA2
+     - Event
+     - Controller to host: event_code (2B) + param_len (1B) + params
+   * - 0xA3
+     - Async unicast
+     - Asynchronous connection data: link_id (2B) + data_len (2B) + data
+   * - 0xA4
+     - Sync unicast
+     - Synchronous connection data
+   * - 0xA5
+     - Async multicast
+     - Multicast data distribution
+
+For USB controllers, the transport maps to four endpoints:
+
+- EP0 (Control): DLI commands (Class request)
+- EP1 (Interrupt IN, 16B max): DLI events
+- EP2 (Bulk OUT): Async TX data
+- EP3 (Bulk IN): Async RX data
+
+USB device class: 0xE0 (Wireless Controller), subclass 0x01,
+protocol 0x05.
+
+SleController trait
+-------------------
+
+Hardware drivers implement the ``SleController`` trait::
+
+    trait SleController: Send + Sync {
+        fn info(&self) -> SleControllerInfo;
+        fn open(&self) -> Result;
+        fn close(&self);
+        fn send_command(&self, opcode: SleOpcode, params: &[u8]) -> Result;
+        fn send_data(&self, handle: u16, data: &[u8]) -> Result;
+        fn poll_event(&self) -> Option<SleEvent>;
+        fn reset(&self) -> Result;
+    }
+
+The built-in ``VirtualController`` implements this trait for loopback
+testing without physical hardware.
 
 debugfs interface
 =================
 
-加载 SparkLink 模块后，以下 debugfs 节点在 ``/sys/kernel/debug/sparklink/``
-目录下可用：
+After loading the SparkLink module, the following debugfs nodes are
+available under ``/sys/kernel/debug/sparklink/``:
 
 .. code-block:: none
 
     /sys/kernel/debug/sparklink/
-    ├── version          # 协议栈版本号
-    ├── build_info       # 构建信息（内核版本、编译器、标准号）
-    ├── subsystems       # 已启用子系统列表
-    ├── adv_count        # 广播操作累计次数
-    ├── scan_count       # 扫描操作累计次数
-    ├── conn_count       # 连接操作累计次数
-    └── ioctl_count      # ioctl 调用总次数
-
-所有节点均为只读。
+    ├── version          # Protocol stack version
+    ├── build_info       # Build info (standards, language)
+    ├── subsystems       # Enabled subsystem list
+    ├── adv_count        # Advertising operation count
+    ├── scan_count       # Scanning operation count
+    ├── conn_count       # Connection operation count
+    ├── ioctl_count      # Total ioctl call count
+    └── dli_controller   # DLI controller info (bus, firmware, features)
 
 Userspace tools
 ===============
@@ -398,19 +673,28 @@ Userspace tools
 sparklink_test
 --------------
 
-位于 ``tools/testing/selftests/sparklink/sparklink_test.c``，集成测试程序，
-覆盖全部子系统的 ioctl 接口。包含 15 个测试用例：
+Integration test program at
+``tools/testing/selftests/sparklink/sparklink_test.c``.
+Covers all subsystem ioctl interfaces with 19 test cases:
 
-- 设备管理：计数、注册
-- 广播扫描：启动/停止广播、启动/停止扫描、互斥检查
-- 回环测试：注入广播报文、结果计数、RSSI 过滤
-- 连接管理：发起连接、拒绝响应、数据回环
-- 安全层：SM3 哈希验证、JustWorks 配对
-- SSAP：服务注册与属性读取
-- 功耗管理：状态查询与转换
-- 错误处理：未知 ioctl
+- Device management: count, info, register
+- Advertising: start/stop, duplicate detection
+- Scanning: start/stop, result count
+- Mutual exclusion: advertising blocks scanning
+- Loopback: inject advertising PDU, filter by discovery level
+- Multi-connection: connect to multiple peers, CONN_COUNT, CONN_LIST
+- Connection rejection: handle-based access response
+- Data loopback: send/inject/recv, statistics, disconnect cleanup
+- Event notification: read events after connect/inject
+- Event statistics: EVENT_STATS ioctl verification
+- DLI controller info: DLI_INFO ioctl verification
+- SM3 hash: test vector verification
+- Security: PSK pairing, encryption, SM4 roundtrip
+- SSAP: service registration, property read/write, notifications
+- Power management: state transitions, intervals, force-active
+- Error handling: unknown ioctl
 
-编译和运行：
+Build and run:
 
 .. code-block:: shell
 
@@ -421,51 +705,49 @@ sparklink_test
 sparklink_ctl
 --------------
 
-位于 ``tools/testing/selftests/sparklink/sparklink_ctl.c``，命令行控制工具，
-在缺少 Generic Netlink Rust 绑定的情况下作为主要的用户空间管理接口。
-
-用法：
+CLI control tool at ``tools/testing/selftests/sparklink/sparklink_ctl.c``.
 
 .. code-block:: shell
 
     sparklink_ctl <command> [args...]
 
-    # 查看子系统信息
-    sparklink_ctl info
+    info                              Show subsystem information
 
-    # 广播管理
-    sparklink_ctl adv start [interval_ms] [tx_power_dbm]
-    sparklink_ctl adv stop
+    adv start                         Start advertising
+    adv stop                          Stop advertising
 
-    # 扫描管理
-    sparklink_ctl scan start [window_ms] [type]
-    sparklink_ctl scan stop
-    sparklink_ctl scan count
+    scan start                        Start scanning
+    scan stop                         Stop scanning
+    scan results                      Show scan result count
 
-    # 连接管理
-    sparklink_ctl conn connect <addr_hex>
-    sparklink_ctl conn info
-    sparklink_ctl conn disconnect
-    sparklink_ctl conn send <data_hex>
+    conn <addr_hex>                   Connect to peer
+    conn info [handle]                Show connection info
+    conn disconnect <handle>          Disconnect by handle
+    conn count                        Show active connection count
+    conn list                         List active connection handles
+    conn send <handle> <data>         Send data on connection
 
-    # 安全管理
-    sparklink_ctl sec psk <key_hex>
-    sparklink_ctl sec pair <method: 0=JustWorks, 1=PSK>
-    sparklink_ctl sec info
-    sparklink_ctl sec encrypt
+    sec psk <key_hex>                 Set pre-shared key
+    sec pair <method>                 Start pairing (1=JustWorks, 2=PSK)
+    sec info                          Show security info
+    sec encrypt                       Enable encryption
 
-    # SSAP 服务层
-    sparklink_ctl ssap register
-    sparklink_ctl ssap info
-    sparklink_ctl ssap read <handle>
-    sparklink_ctl ssap write <handle> <data_hex>
+    ssap register                     Register device info service
+    ssap info                         Show SSAP summary
+    ssap read <handle>                Read property
+    ssap write <handle> <data>        Write property
 
-    # 功耗管理
-    sparklink_ctl pm info
-    sparklink_ctl pm suspend
-    sparklink_ctl pm resume
+    pm info                           Show power management info
+    pm suspend                        Suspend
+    pm resume                         Resume
 
-编译：
+    event count                       Show pending event count
+    event read                        Read and display pending events
+
+    dli info                          Show DLI controller information
+    dli stats                         Show event queue statistics
+
+Build:
 
 .. code-block:: shell
 
@@ -475,10 +757,10 @@ sparklink_ctl
 Protocol overview
 =================
 
-SLE 空口帧格式
---------------
+SLE air interface frame format
+------------------------------
 
-按照 T/XS 10002-2025 第 6 章，SLE 空口 PDU 的帧格式如下：
+Per T/XS 10002-2025 chapter 6, the SLE over-the-air PDU is:
 
 .. code-block:: none
 
@@ -487,58 +769,58 @@ SLE 空口帧格式
     | (1-2 B)  |    (4 B)       |  (2 B)    | (var)   | (3 B)   |
     +----------+----------------+-----------+---------+---------+
 
-    PDU Header 字段：
+    PDU Header fields:
     +---------+---------+-------+----------+---------+
     | PDU Type| RFU     | TxAdd | Payload  | SN/NESN |
     | (4 bit) | (1 bit) | (1b)  | Len (8b) | (2 bit) |
     +---------+---------+-------+----------+---------+
 
-PDU 类型包括：
+PDU types:
 
-- ``AdvInd`` (0x0): 可连接非定向广播
-- ``AdvDirectInd`` (0x1): 可连接定向广播
-- ``AdvNonconnInd`` (0x2): 不可连接非定向广播
-- ``ScanReq`` (0x3): 扫描请求
-- ``ScanRsp`` (0x4): 扫描响应
-- ``ConnReq`` (0x5): 连接请求
-- ``Data`` (0x6): 数据 PDU
-- ``Ack`` (0x7): 确认 PDU
+- ``AdvInd`` (0x0): Connectable undirected advertising
+- ``AdvDirectInd`` (0x1): Connectable directed advertising
+- ``AdvNonconnInd`` (0x2): Non-connectable undirected advertising
+- ``ScanReq`` (0x3): Scan request
+- ``ScanRsp`` (0x4): Scan response
+- ``ConnReq`` (0x5): Connection request
+- ``Data`` (0x6): Data PDU
+- ``Ack`` (0x7): Acknowledgment PDU
 
-SSAP 服务模型
--------------
+SSAP service model
+------------------
 
-SSAP（SLE Service Access Profile）遵循 T/XS 20001-2025 第 7.4 节，采用与
-蓝牙 GATT 类似的分层模型：
+SSAP (SLE Service Access Profile) follows T/XS 20001-2025 section 7.4,
+using a hierarchical model similar to Bluetooth GATT:
 
 .. code-block:: none
 
     Service (UUID, handle range)
-    ├── Property (类似 Characteristic)
+    ├── Property (similar to Characteristic)
     │   ├── handle
     │   ├── permissions (read/write/notify)
     │   └── value (max 244 bytes)
-    ├── Method (可调用操作)
+    ├── Method (invocable operation)
     │   ├── handle
     │   └── permissions
-    └── Event (通知/指示)
+    └── Event (notification/indication)
         ├── handle
         └── permissions
 
-UUID 支持 16 位短格式和 128 位长格式。操作指示器（OpIndicator）以位掩码
-编码读、写、通知三种权限。
+UUIDs support both 16-bit short and 128-bit long formats. The
+OpIndicator bitmask encodes read, write, and notify permissions.
 
-安全体系
---------
-
-安全层基于国密算法，提供以下机制：
-
-1. **配对** — JustWorks（无需用户交互）或 PSK（预共享密钥）
-2. **密钥派生** — 使用 HMAC-SM3 从配对结果和双方随机数派生会话链路密钥
-3. **数据加密** — SM4-CTR 模式，128 位密钥，96 位 IV
-4. **完整性** — 链路密钥指纹通过 SM3 哈希计算
-
-功耗管理状态机
+Security model
 --------------
+
+The security layer uses Chinese national cryptographic algorithms:
+
+1. **Pairing** -- JustWorks (no user interaction) or PSK (pre-shared key)
+2. **Key derivation** -- HMAC-SM3 from pairing result and nonces
+3. **Data encryption** -- SM4-CTR mode, 128-bit key, 96-bit IV
+4. **Integrity** -- Link key fingerprint via SM3 hash
+
+Power management state machine
+-------------------------------
 
 .. code-block:: none
 
@@ -555,32 +837,55 @@ UUID 支持 16 位短格式和 128 位长格式。操作指示器（OpIndicator�
                     resume           └───────────┘
          <──────────────────────────
 
+Multi-connection model
+----------------------
+
+The connection manager supports up to 8 concurrent connections.
+Each connection has:
+
+- A unique 16-bit handle (assigned sequentially starting from 1)
+- Independent state machine per connection
+- Per-connection TX/RX queues (max 64 entries each)
+- Per-connection sequence tracking (1-bit ARQ for async links)
+- Per-connection statistics (tx_bytes, rx_bytes)
+
+Duplicate peer address detection prevents connecting to the same
+device twice. The handle ``0`` serves as a legacy shortcut that
+resolves to the first active connection.
+
 Limitations and future work
 ============================
 
-当前实现的主要限制：
+Current limitations:
 
-1. **无物理硬件支持** — 仅有虚拟控制器，所有测试在回环模式下进行
-2. **无 Generic Netlink 接口** — 内核 Rust 尚未提供正式的 Generic Netlink
-   绑定，暂以 ioctl + CLI 工具替代
-3. **国密算法为纯 Rust 实现** — 未对接内核 crypto 子系统的硬件加速路径
-4. **单连接** — 连接管理目前仅支持一条活跃连接
-5. **SSAP 通知为轮询模式** — 缺少 epoll/异步通知机制
+1. **No physical hardware driver** -- Only the virtual loopback
+   controller is available; all testing is done in loopback mode.
 
-后续计划：
+2. **No Generic Netlink interface** -- Kernel Rust does not yet
+   provide upstream Generic Netlink bindings; the control plane
+   uses ioctl + CLI tools as an interim solution.
 
-- 对接物理 SLE 射频芯片驱动
-- 在 Generic Netlink Rust 绑定就绪后迁移控制面
-- 集成内核 crypto API 的 SM3/SM4 实现
-- 支持多连接管理
-- 添加 sysfs/configfs 运行时配置接口
-- 实现基于 poll/epoll 的异步事件通知
+3. **Pure Rust crypto** -- SM3/SM4 are implemented in pure Rust
+   without kernel crypto API hardware acceleration.
+
+4. **No poll/epoll** -- The kernel MiscDevice vtable does not
+   expose a ``poll`` callback in the current Rust binding; event
+   notification uses non-blocking ``read()`` only.
+
+Planned work:
+
+- USB DLI driver for physical SLE radio controllers
+- Generic Netlink control plane migration when Rust bindings mature
+- Kernel crypto API integration for hardware-accelerated SM3/SM4
+- poll/epoll support when the Rust MiscDevice binding adds it
+- sysfs/configfs runtime configuration interface
 
 References
 ==========
 
-- T/XS 10002-2025: SparkLink SLE 空口技术规范
-- T/XS 20001-2025: SparkLink 设备发现与服务管理技术规范
-- GB/T 32905-2016: SM3 密码杂凑算法
-- GB/T 32907-2016: SM4 分组密码算法
-- ``Documentation/rust/``: Linux 内核 Rust 支持文档
+- T/XS 10002-2025: SparkLink SLE air interface specification
+- T/XS 20001-2025: SparkLink device discovery and service management
+- T/XS 10003-2025: SparkLink driver layer interface (DLI)
+- GB/T 32905-2016: SM3 cryptographic hash algorithm
+- GB/T 32907-2016: SM4 block cipher algorithm
+- ``Documentation/rust/``: Linux kernel Rust support

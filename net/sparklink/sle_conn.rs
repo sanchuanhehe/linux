@@ -351,8 +351,11 @@ impl ConnManager {
 
     /// Allocate a handle and return it.
     fn alloc_handle(&mut self) -> u16 {
-        let h = self.next_handle;
-        self.next_handle = self.next_handle.wrapping_add(1);
+        let mut h = self.next_handle;
+        if h == INVALID_HANDLE {
+            h = 1;
+        }
+        self.next_handle = h.wrapping_add(1);
         if self.next_handle == INVALID_HANDLE {
             self.next_handle = 1;
         }
@@ -575,20 +578,20 @@ impl ConnManager {
     // These methods operate on the most recently created connection
     // for backward compatibility with handle=0 (auto-select).
 
-    /// Find the first active connection (for legacy handle=0 usage).
-    fn find_first_active_mut(&mut self) -> Result<&mut ConnEntry> {
+    /// Find the first connected (not merely connecting) entry.
+    fn find_first_connected_mut(&mut self) -> Result<&mut ConnEntry> {
         for entry in self.connections.iter_mut() {
-            if entry.state == ConnState::Connected || entry.state == ConnState::Connecting {
+            if entry.state == ConnState::Connected {
                 return Ok(entry);
             }
         }
         Err(EPIPE)
     }
 
-    /// Resolve a handle: 0 means "first active connection".
+    /// Resolve a handle: 0 means "first connected connection".
     pub fn resolve_handle(&mut self, handle: u16) -> Result<u16> {
         if handle == 0 {
-            let entry = self.find_first_active_mut()?;
+            let entry = self.find_first_connected_mut()?;
             Ok(entry.handle)
         } else {
             // Verify handle exists

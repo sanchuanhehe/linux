@@ -54,7 +54,7 @@
 #define SL_IOCTL_SCAN_RESULT_COUNT _IO(SL_MAGIC, 0x21)
 #define SL_IOCTL_CONNECT         _IOW(SL_MAGIC, 0x30, struct sle_connect_params)
 #define SL_IOCTL_DISCONNECT      _IOW(SL_MAGIC, 0x31, uint16_t)
-#define SL_IOCTL_CONN_INFO       _IOW(SL_MAGIC, 0x32, struct sle_conn_info)
+#define SL_IOCTL_CONN_INFO       _IOWR(SL_MAGIC, 0x32, struct sle_conn_info)
 #define SL_IOCTL_CONN_SEND       _IOW(SL_MAGIC, 0x33, struct sle_conn_data)
 #define SL_IOCTL_CONN_COUNT      _IO(SL_MAGIC, 0x37)
 #define SL_IOCTL_CONN_LIST       _IOR(SL_MAGIC, 0x38, struct sle_conn_list)
@@ -64,10 +64,17 @@
 #define SL_IOCTL_SEC_ENCRYPT_ON  _IO(SL_MAGIC, 0x43)
 #define SL_IOCTL_SSAP_REGISTER_SVC _IO(SL_MAGIC, 0x50)
 #define SL_IOCTL_SSAP_INFO       _IOR(SL_MAGIC, 0x51, struct ssap_summary)
-#define SL_IOCTL_SSAP_READ       _IOW(SL_MAGIC, 0x52, struct ssap_read_write)
+#define SL_IOCTL_SSAP_READ       _IOWR(SL_MAGIC, 0x52, struct ssap_read_write)
 #define SL_IOCTL_SSAP_WRITE      _IOW(SL_MAGIC, 0x53, struct ssap_read_write)
 #define SL_IOCTL_PM_INFO         _IOR(SL_MAGIC, 0x60, struct sle_pm_info)
 #define SL_IOCTL_PM_SET_STATE    _IOW(SL_MAGIC, 0x61, struct sle_pm_state_cmd)
+
+/* Event notification */
+#define SL_IOCTL_EVENT_COUNT     _IO(SL_MAGIC, 0x70)
+#define SL_IOCTL_EVENT_STATS     _IOR(SL_MAGIC, 0x71, struct sle_event_stats)
+
+/* DLI controller info */
+#define SL_IOCTL_DLI_INFO        _IOR(SL_MAGIC, 0x80, struct sle_dli_info)
 
 /* Data structures */
 struct sci_dev_info {
@@ -189,6 +196,46 @@ struct sle_pm_state_cmd {
 	uint8_t target_state;
 	uint8_t _reserved[3];
 } __attribute__((packed));
+
+/* Event wire format — must match SleWireEvent in sle_event.rs */
+struct sle_wire_event {
+	uint8_t  event_type;
+	uint8_t  payload_len;
+	uint8_t  payload[40];
+	uint8_t  _pad[2];
+} __attribute__((packed));
+
+/* Event queue statistics */
+struct sle_event_stats {
+	uint32_t pending;
+	uint32_t _pad;
+	uint64_t total_enqueued;
+	uint64_t total_dropped;
+	uint64_t total_delivered;
+};
+
+/* DLI controller information */
+struct sle_dli_info {
+	uint8_t  bus;
+	uint8_t  _pad[3];
+	uint32_t firmware_version;
+	uint64_t features;
+	uint8_t  max_connections;
+	uint8_t  max_adv_sets;
+	uint8_t  name[32];
+	uint8_t  _reserved[14];
+} __attribute__((packed));
+
+static const char *bus_type_str(uint8_t b)
+{
+	switch (b) {
+	case 0: return "Virtual";
+	case 1: return "UART";
+	case 2: return "USB";
+	case 3: return "SDIO";
+	default: return "Unknown";
+	}
+}
 
 static const char *power_state_str(uint8_t s)
 {
@@ -555,6 +602,102 @@ static void cmd_pm(int fd, int argc, char **argv)
 	}
 }
 
+static const char *event_type_str(uint8_t t)
+{
+	switch (t) {
+	case 0x01: return "ConnStateChanged";
+	case 0x02: return "AdvReport";
+	case 0x03: return "DataReceived";
+	case 0x04: return "SecurityChanged";
+	case 0x05: return "PowerChanged";
+	case 0x06: return "HardwareError";
+	default:   return "Unknown";
+	}
+}
+
+static void cmd_event(int fd, int argc, char **argv)
+{
+	if (argc < 1) {
+		fprintf(stderr, "Usage: sparklink_ctl event <count|read>\n");
+		return;
+	}
+	if (strcmp(argv[0], "count") == 0) {
+		int ret = ioctl(fd, SL_IOCTL_EVENT_COUNT, NULL);
+		if (ret < 0)
+			perror("EVENT_COUNT");
+		else
+			printf("Pending events: %d\n", ret);
+	} else if (strcmp(argv[0], "read") == 0) {
+		int total = 0;
+		while (total < 64) {
+			struct sle_wire_event evt;
+			memset(&evt, 0, sizeof(evt));
+			ssize_t n = read(fd, &evt, sizeof(evt));
+			if (n < 0) {
+				if (errno == EAGAIN)
+					break;
+				perror("read");
+				break;
+			}
+			if (n == 0)
+				break;
+			total++;
+			printf("  [%d] %s (type=0x%02x, payload_len=%u): ",
+			       total, event_type_str(evt.event_type),
+			       evt.event_type, evt.payload_len);
+			for (int i = 0; i < evt.payload_len && i < 16; i++)
+				printf("%02x ", evt.payload[i]);
+			printf("\n");
+		}
+		if (total == 0)
+			printf("No pending events\n");
+		else
+			printf("Total: %d event(s)\n", total);
+	} else {
+		fprintf(stderr, "Unknown event command: %s\n", argv[0]);
+	}
+}
+
+static void cmd_dli(int fd, int argc, char **argv)
+{
+	if (argc < 1) {
+		fprintf(stderr, "Usage: sparklink_ctl dli <info|stats>\n");
+		return;
+	}
+	if (strcmp(argv[0], "info") == 0) {
+		struct sle_dli_info dli;
+		memset(&dli, 0, sizeof(dli));
+		if (ioctl(fd, SL_IOCTL_DLI_INFO, &dli) < 0) {
+			perror("DLI_INFO");
+			return;
+		}
+		unsigned major = (dli.firmware_version >> 16) & 0xFF;
+		unsigned minor = (dli.firmware_version >> 8) & 0xFF;
+		unsigned patch = dli.firmware_version & 0xFF;
+		printf("DLI Controller:\n");
+		printf("  Name:             %.32s\n", dli.name);
+		printf("  Bus:              %s (%u)\n", bus_type_str(dli.bus), dli.bus);
+		printf("  Firmware:         %u.%u.%u\n", major, minor, patch);
+		printf("  Features:         0x%016lx\n", (unsigned long)dli.features);
+		printf("  Max connections:  %u\n", dli.max_connections);
+		printf("  Max adv sets:     %u\n", dli.max_adv_sets);
+	} else if (strcmp(argv[0], "stats") == 0) {
+		struct sle_event_stats stats;
+		memset(&stats, 0, sizeof(stats));
+		if (ioctl(fd, SL_IOCTL_EVENT_STATS, &stats) < 0) {
+			perror("EVENT_STATS");
+			return;
+		}
+		printf("Event Queue Statistics:\n");
+		printf("  Pending:    %u\n", stats.pending);
+		printf("  Enqueued:   %lu\n", (unsigned long)stats.total_enqueued);
+		printf("  Dropped:    %lu\n", (unsigned long)stats.total_dropped);
+		printf("  Delivered:  %lu\n", (unsigned long)stats.total_delivered);
+	} else {
+		fprintf(stderr, "Unknown dli command: %s\n", argv[0]);
+	}
+}
+
 static void usage(void)
 {
 	fprintf(stderr, "sparklink_ctl - SparkLink control utility\n\n");
@@ -570,6 +713,8 @@ static void usage(void)
 	fprintf(stderr, "  ssap <register|info|read <h>|write <h> <v>>\n");
 	fprintf(stderr, "                             SSAP service layer\n");
 	fprintf(stderr, "  pm   <info|suspend|resume> Power management\n");
+	fprintf(stderr, "  event <count|read>         Event notification\n");
+	fprintf(stderr, "  dli  <info|stats>          DLI controller / stats\n");
 }
 
 int main(int argc, char **argv)
@@ -599,6 +744,10 @@ int main(int argc, char **argv)
 		cmd_ssap(fd, argc - 2, argv + 2);
 	else if (strcmp(argv[1], "pm") == 0)
 		cmd_pm(fd, argc - 2, argv + 2);
+	else if (strcmp(argv[1], "event") == 0)
+		cmd_event(fd, argc - 2, argv + 2);
+	else if (strcmp(argv[1], "dli") == 0)
+		cmd_dli(fd, argc - 2, argv + 2);
 	else {
 		fprintf(stderr, "Unknown command: %s\n", argv[1]);
 		usage();

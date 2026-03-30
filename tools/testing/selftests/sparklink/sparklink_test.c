@@ -47,9 +47,9 @@
 /* Connection management */
 #define SL_IOCTL_CONNECT         _IOW(SL_MAGIC, 0x30, struct sle_connect_params)
 #define SL_IOCTL_DISCONNECT      _IOW(SL_MAGIC, 0x31, uint16_t)
-#define SL_IOCTL_CONN_INFO       _IOW(SL_MAGIC, 0x32, struct sle_conn_info)
+#define SL_IOCTL_CONN_INFO       _IOWR(SL_MAGIC, 0x32, struct sle_conn_info)
 #define SL_IOCTL_CONN_SEND       _IOW(SL_MAGIC, 0x33, struct sle_conn_data)
-#define SL_IOCTL_CONN_RECV       _IOW(SL_MAGIC, 0x34, struct sle_conn_data)
+#define SL_IOCTL_CONN_RECV       _IOWR(SL_MAGIC, 0x34, struct sle_conn_data)
 #define SL_IOCTL_INJECT_CONN_RESP _IOW(SL_MAGIC, 0x35, struct sle_inject_conn_resp)
 #define SL_IOCTL_INJECT_CONN_DATA _IOW(SL_MAGIC, 0x36, struct sle_conn_data)
 #define SL_IOCTL_CONN_COUNT      _IO(SL_MAGIC, 0x37)
@@ -67,7 +67,7 @@
 /* SSAP service layer */
 #define SL_IOCTL_SSAP_REGISTER_SVC _IO(SL_MAGIC, 0x50)
 #define SL_IOCTL_SSAP_INFO        _IOR(SL_MAGIC, 0x51, struct ssap_summary)
-#define SL_IOCTL_SSAP_READ        _IOW(SL_MAGIC, 0x52, struct ssap_read_write)
+#define SL_IOCTL_SSAP_READ        _IOWR(SL_MAGIC, 0x52, struct ssap_read_write)
 #define SL_IOCTL_SSAP_WRITE       _IOW(SL_MAGIC, 0x53, struct ssap_read_write)
 #define SL_IOCTL_SSAP_FIND_SVC    _IOR(SL_MAGIC, 0x54, struct ssap_service_list)
 #define SL_IOCTL_SSAP_NOTIFY      _IOW(SL_MAGIC, 0x55, uint16_t)
@@ -80,6 +80,13 @@
 #define SL_IOCTL_PM_FORCE_ACTIVE _IOW(SL_MAGIC, 0x63, uint8_t)
 #define SL_IOCTL_PM_TICK         _IO(SL_MAGIC, 0x64)
 #define SL_IOCTL_PM_ACTIVITY     _IO(SL_MAGIC, 0x65)
+
+/* Event notification */
+#define SL_IOCTL_EVENT_COUNT     _IO(SL_MAGIC, 0x70)
+#define SL_IOCTL_EVENT_STATS     _IOR(SL_MAGIC, 0x71, struct sle_event_stats)
+
+/* DLI controller info */
+#define SL_IOCTL_DLI_INFO        _IOR(SL_MAGIC, 0x80, struct sle_dli_info)
 
 /* ------------------------------------------------------------------ */
 /* Userspace data structures — must match repr(C) in sparklink_core   */
@@ -259,6 +266,42 @@ struct sle_pm_interval {
 	uint16_t max_interval;
 	uint16_t latency;
 	uint16_t supervision_timeout;
+} __attribute__((packed));
+
+/* Event wire format — must match SleWireEvent in sle_event.rs */
+struct sle_wire_event {
+	uint8_t  event_type;
+	uint8_t  payload_len;
+	uint8_t  payload[40];
+	uint8_t  _pad[2];
+} __attribute__((packed));
+
+#define SLE_EVT_CONN_STATE   0x01
+#define SLE_EVT_ADV_REPORT   0x02
+#define SLE_EVT_DATA_RECV    0x03
+#define SLE_EVT_SEC_CHANGED  0x04
+#define SLE_EVT_PWR_CHANGED  0x05
+#define SLE_EVT_HW_ERROR     0x06
+
+/* Event queue statistics */
+struct sle_event_stats {
+	uint32_t pending;
+	uint32_t _pad;
+	uint64_t total_enqueued;
+	uint64_t total_dropped;
+	uint64_t total_delivered;
+};
+
+/* DLI controller information */
+struct sle_dli_info {
+	uint8_t  bus;
+	uint8_t  _pad[3];
+	uint32_t firmware_version;
+	uint64_t features;
+	uint8_t  max_connections;
+	uint8_t  max_adv_sets;
+	uint8_t  name[32];
+	uint8_t  _reserved[14];
 } __attribute__((packed));
 
 /* ------------------------------------------------------------------ */
@@ -1112,6 +1155,311 @@ static void test_power_management(int fd)
 	}
 }
 
+static void test_event_notification(int fd)
+{
+	test_header("Event notification: read() and EVENT_COUNT");
+
+	/* Step 1: Verify empty event queue */
+	int ret = ioctl(fd, SL_IOCTL_EVENT_COUNT, NULL);
+	if (ret == 0) {
+		printf("  OK:   EVENT_COUNT=0 (initial)\n");
+	} else {
+		printf("  WARN: expected EVENT_COUNT=0, got %d\n", ret);
+	}
+
+	/* Step 2: read() on empty queue should return EAGAIN */
+	struct sle_wire_event evt;
+	ssize_t n = read(fd, &evt, sizeof(evt));
+	if (n < 0 && errno == EAGAIN) {
+		printf("  OK:   read() empty queue: EAGAIN\n");
+	} else {
+		printf("  WARN: expected EAGAIN, got n=%zd errno=%d\n", n, errno);
+	}
+
+	/* Step 3: Trigger events via connect + inject adv */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xEE;
+	cp.peer_addr[5] = 0xAA;
+	cp.gt_role = 0;
+	cp.bandwidth = 1;
+	cp.mcs_index = 4;
+	cp.timeout_10ms = 100;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	uint16_t handle = 0;
+	if (ret > 0) {
+		handle = (uint16_t)ret;
+		printf("  OK:   CONNECT generated event (handle=%u)\n", handle);
+	} else {
+		printf("  FAIL: CONNECT failed\n");
+		return;
+	}
+
+	/* Start scanning and inject an adv to generate AdvReport event */
+	struct sle_scan_params scan;
+	memset(&scan, 0, sizeof(scan));
+	scan.window_ms = 50;
+	scan.interval_ms = 100;
+	ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+
+	struct sle_inject_adv inject;
+	memset(&inject, 0, sizeof(inject));
+	inject.addr[0] = 0xBB;
+	inject.addr[5] = 0xCC;
+	inject.rssi = -55;
+	inject.discovery_level = 1;
+	memcpy(inject.name, "evt-test", 8);
+	inject.name_len = 8;
+	ioctl(fd, SL_IOCTL_INJECT_ADV, &inject);
+
+	ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+
+	/* Step 4: Check event count (should have >= 2: ConnState + AdvReport) */
+	ret = ioctl(fd, SL_IOCTL_EVENT_COUNT, NULL);
+	printf("  OK:   EVENT_COUNT=%d after connect+inject_adv\n", ret);
+	if (ret < 2) {
+		printf("  WARN: expected >= 2 events\n");
+	}
+
+	/* Step 5: Read events via read() */
+	int total_read = 0;
+	int got_conn = 0, got_adv = 0;
+	while (total_read < 10) {
+		memset(&evt, 0, sizeof(evt));
+		n = read(fd, &evt, sizeof(evt));
+		if (n < 0) {
+			if (errno == EAGAIN)
+				break;
+			printf("  FAIL: read() error: %s\n", strerror(errno));
+			break;
+		}
+		if (n == 0)
+			break;
+		total_read++;
+		switch (evt.event_type) {
+		case SLE_EVT_CONN_STATE:
+			got_conn = 1;
+			printf("  event: ConnStateChanged (payload_len=%u)\n",
+			       evt.payload_len);
+			break;
+		case SLE_EVT_ADV_REPORT:
+			got_adv = 1;
+			printf("  event: AdvReport (payload_len=%u)\n",
+			       evt.payload_len);
+			break;
+		default:
+			printf("  event: type=0x%02x (payload_len=%u)\n",
+			       evt.event_type, evt.payload_len);
+			break;
+		}
+	}
+
+	if (got_conn)
+		printf("  OK:   Got ConnStateChanged event\n");
+	else
+		printf("  WARN: Missing ConnStateChanged event\n");
+
+	if (got_adv)
+		printf("  OK:   Got AdvReport event\n");
+	else
+		printf("  WARN: Missing AdvReport event\n");
+
+	/* Step 6: Verify queue is now empty */
+	ret = ioctl(fd, SL_IOCTL_EVENT_COUNT, NULL);
+	if (ret == 0) {
+		printf("  OK:   EVENT_COUNT=0 after draining\n");
+	} else {
+		printf("  WARN: expected EVENT_COUNT=0 after drain, got %d\n", ret);
+	}
+
+	/* Cleanup: disconnect */
+	ioctl(fd, SL_IOCTL_DISCONNECT, &handle);
+}
+
+static void test_event_stats(int fd)
+{
+	test_header("Event Queue Statistics");
+
+	struct sle_event_stats stats;
+	memset(&stats, 0, sizeof(stats));
+	int ret = ioctl(fd, SL_IOCTL_EVENT_STATS, &stats);
+	ASSERT(ret == 0, "EVENT_STATS ioctl");
+	printf("  Pending:   %u\n", stats.pending);
+	printf("  Enqueued:  %lu\n", (unsigned long)stats.total_enqueued);
+	printf("  Dropped:   %lu\n", (unsigned long)stats.total_dropped);
+	printf("  Delivered: %lu\n", (unsigned long)stats.total_delivered);
+	printf("  OK:   EVENT_STATS returned successfully\n");
+}
+
+static void test_dli_info(int fd)
+{
+	test_header("DLI Controller Info");
+
+	struct sle_dli_info dli;
+	memset(&dli, 0, sizeof(dli));
+	int ret = ioctl(fd, SL_IOCTL_DLI_INFO, &dli);
+	ASSERT(ret == 0, "DLI_INFO ioctl");
+	printf("  Name:         %.32s\n", dli.name);
+	printf("  Bus:          %u\n", dli.bus);
+
+	unsigned major = (dli.firmware_version >> 16) & 0xFF;
+	unsigned minor = (dli.firmware_version >> 8) & 0xFF;
+	unsigned patch = dli.firmware_version & 0xFF;
+	printf("  Firmware:     %u.%u.%u\n", major, minor, patch);
+	printf("  Features:     0x%016lx\n", (unsigned long)dli.features);
+	printf("  Max conns:    %u\n", dli.max_connections);
+
+	/* Virtual controller should be bus=0 */
+	if (dli.bus == 0)
+		printf("  OK:   bus=Virtual\n");
+	else
+		printf("  WARN: unexpected bus %u\n", dli.bus);
+
+	/* Features should be non-zero */
+	if (dli.features != 0)
+		printf("  OK:   features=0x%lx\n", (unsigned long)dli.features);
+	else
+		printf("  WARN: features=0\n");
+
+	/* Max connections should be > 0 */
+	if (dli.max_connections > 0)
+		printf("  OK:   max_connections=%u\n", dli.max_connections);
+	else
+		printf("  FAIL: max_connections=0\n");
+}
+
+static void test_multi_conn_concurrent(int fd)
+{
+	test_header("Multi-connection: concurrent data exchange");
+
+	uint16_t handles[3];
+	int i;
+
+	/* Step 1: Create 3 connections to different peers */
+	for (i = 0; i < 3; i++) {
+		struct sle_connect_params cp;
+		memset(&cp, 0, sizeof(cp));
+		cp.peer_addr[0] = 0xF0 + i;
+		cp.peer_addr[5] = 0x10 + i;
+		cp.gt_role = 0;
+		cp.bandwidth = 1;
+		cp.mcs_index = 4;
+		cp.timeout_10ms = 100;
+
+		int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+		if (ret <= 0) {
+			printf("  FAIL: CONNECT #%d: ret=%d\n", i, ret);
+			goto cleanup;
+		}
+		handles[i] = (uint16_t)ret;
+		printf("  OK:   CONNECT #%d: handle=%u\n", i, handles[i]);
+	}
+
+	/* Step 2: Accept all connections */
+	for (i = 0; i < 3; i++) {
+		struct sle_inject_conn_resp resp;
+		memset(&resp, 0, sizeof(resp));
+		resp.handle = handles[i];
+		resp.response_type = 0;
+		resp.bandwidth_mhz = 2;
+		resp.mcs_index = 4 + i;
+		resp.supervision_timeout = 100;
+
+		int ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+		check("INJECT_CONN_RESP", ret);
+	}
+
+	/* Step 3: Verify CONN_COUNT */
+	int ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 3) {
+		printf("  OK:   CONN_COUNT=3\n");
+	} else {
+		printf("  WARN: expected CONN_COUNT=3, got %d\n", ret);
+	}
+
+	/* Step 4: Send unique data on each connection */
+	for (i = 0; i < 3; i++) {
+		struct sle_conn_data sd;
+		memset(&sd, 0, sizeof(sd));
+		sd.handle = handles[i];
+		char msg[32];
+		int len = snprintf(msg, sizeof(msg), "data-conn-%d", i);
+		sd.length = len;
+		memcpy(sd.data, msg, len);
+
+		ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
+		if (ret < 0)
+			printf("  FAIL: CONN_SEND handle=%u: %s\n",
+			       handles[i], strerror(errno));
+	}
+
+	/* Step 5: Inject receive data on each connection */
+	for (i = 0; i < 3; i++) {
+		struct sle_conn_data rd;
+		memset(&rd, 0, sizeof(rd));
+		rd.handle = handles[i];
+		char msg[32];
+		int len = snprintf(msg, sizeof(msg), "reply-%d", i);
+		rd.length = len;
+		memcpy(rd.data, msg, len);
+
+		ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &rd);
+	}
+
+	/* Step 6: Receive and verify data on each connection */
+	int match_count = 0;
+	for (i = 0; i < 3; i++) {
+		struct sle_conn_data recv_buf;
+		memset(&recv_buf, 0, sizeof(recv_buf));
+		recv_buf.handle = handles[i];
+
+		ret = ioctl(fd, SL_IOCTL_CONN_RECV, &recv_buf);
+		if (ret == 0) {
+			char expected[32];
+			int exp_len = snprintf(expected, sizeof(expected),
+					       "reply-%d", i);
+			if (recv_buf.length == (uint16_t)exp_len &&
+			    memcmp(recv_buf.data, expected, exp_len) == 0) {
+				match_count++;
+			} else {
+				printf("  WARN: handle=%u data mismatch\n",
+				       handles[i]);
+			}
+		} else {
+			printf("  FAIL: CONN_RECV handle=%u: %s\n",
+			       handles[i], strerror(errno));
+		}
+	}
+	printf("  OK:   %d/3 connections data matched\n", match_count);
+
+	/* Step 7: Check per-connection stats */
+	for (i = 0; i < 3; i++) {
+		struct sle_conn_info info;
+		memset(&info, 0, sizeof(info));
+		info.handle = handles[i];
+		ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+		if (ret == 0) {
+			printf("  handle=%u: tx=%lu rx=%lu mcs=%u\n",
+			       info.handle,
+			       (unsigned long)info.tx_bytes,
+			       (unsigned long)info.rx_bytes,
+			       info.mcs_index);
+		}
+	}
+
+cleanup:
+	/* Step 8: Disconnect all */
+	for (i = 0; i < 3; i++)
+		ioctl(fd, SL_IOCTL_DISCONNECT, &handles[i]);
+
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 0) {
+		printf("  OK:   All connections cleaned up\n");
+	} else {
+		printf("  WARN: CONN_COUNT=%d after cleanup\n", ret);
+	}
+}
+
 /* ------------------------------------------------------------------ */
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
@@ -1146,6 +1494,10 @@ int main(void)
 	test_ssap_service(fd);
 	test_power_management(fd);
 	test_unknown_ioctl(fd);
+	test_event_notification(fd);
+	test_event_stats(fd);
+	test_dli_info(fd);
+	test_multi_conn_concurrent(fd);
 
 	printf("\n=== All tests completed ===\n");
 

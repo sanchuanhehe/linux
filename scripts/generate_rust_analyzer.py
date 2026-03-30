@@ -195,11 +195,25 @@ def generate_crates(srctree, objtree, sysroot_src, external_src, cfgs, core_edit
             return False
 
     # Then, the rest outside of `rust/`.
-    #
-    # We explicitly mention the top-level folders we want to cover.
-    extra_dirs = map(lambda dir: srctree / dir, ("samples", "drivers"))
     if external_src is not None:
         extra_dirs = [external_src]
+    else:
+        excluded_dirs = {"rust"}
+        extra_dirs = []
+        objtree_resolved = objtree.resolve()
+
+        for path in srctree.iterdir():
+            if not path.is_dir() or path.name.startswith('.') or path.name in excluded_dirs:
+                continue
+
+            try:
+                if path.resolve() == objtree_resolved:
+                    continue
+            except FileNotFoundError:
+                continue
+
+            extra_dirs.append(path)
+
     for folder in extra_dirs:
         for path in folder.rglob("*.rs"):
             logging.info("Checking %s", path)

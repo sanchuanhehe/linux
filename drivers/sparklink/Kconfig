@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-2.0
+
+menuconfig SPARKLINK_DRIVERS
+	bool "SparkLink device drivers"
+	depends on SPARKLINK
+	help
+	  SparkLink controller hardware drivers. Choose the drivers for your
+	  SparkLink hardware.
+
+	  If unsure, say N.
+
+if SPARKLINK_DRIVERS
+
+config SPARKLINK_VIRTUAL
+	tristate "Virtual SparkLink controller (testing)"
+	help
+	  A virtual SparkLink controller driver for development and testing
+	  purposes. This driver does not require real hardware and can be
+	  used to test the SparkLink protocol stack.
+
+	  To compile this as a module, choose M here:
+	  the module will be called sparklink_virtual.
+
+	  If unsure, say N.
+
+endif # SPARKLINK_DRIVERS

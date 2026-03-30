@@ -417,6 +417,7 @@ endmenu # Networking options
 source "net/ax25/Kconfig"
 source "net/can/Kconfig"
 source "net/bluetooth/Kconfig"
+source "net/sparklink/Kconfig"
 source "net/rxrpc/Kconfig"
 source "net/kcm/Kconfig"
 source "net/strparser/Kconfig"

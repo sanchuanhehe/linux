@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: GPL-2.0
+
+menuconfig SPARKLINK
+	bool "SparkLink (NearLink) subsystem support"
+	depends on RUST
+	depends on NET
+	help
+	  SparkLink (also known as NearLink / 星闪) is a short-range wireless
+	  communication technology designed for low-latency, low-power, and
+	  high-reliability scenarios including smart terminals, smart home,
+	  smart vehicles, and industrial IoT.
+
+	  This option enables the SparkLink protocol stack, providing:
+	    - SCI (SparkLink Controller Interface) device management
+	    - SLE (Synchronous Low Energy) air interface support
+	    - Device discovery and service management
+	    - Security management (SM2/SM3/SM4)
+
+	  Say Y here to compile SparkLink support into the kernel or say M
+	  to compile it as a module.
+
+	  If unsure, say N.
+
+if SPARKLINK
+
+config SPARKLINK_SLE
+	bool "SLE (Synchronous Low Energy) support"
+	default y
+	help
+	  Enable support for the SparkLink SLE air interface, which provides
+	  low-power wireless communication with synchronous scheduling.
+
+	  This includes device discovery, connection management, and
+	  data transfer over the SLE protocol.
+
+config SPARKLINK_DEBUGFS
+	bool "SparkLink debugging via debugfs"
+	depends on DEBUG_FS
+	default y
+	help
+	  Expose SparkLink subsystem debugging information through debugfs.
+
+	  The debugfs entries will be created under /sys/kernel/debug/sparklink/.
+
+source "drivers/sparklink/Kconfig"
+
+endif # SPARKLINK

@@ -22,12 +22,14 @@ mod sle_security;
 mod sle_ssap;
 mod sle_power;
 mod sle_dli;
+mod sle_event;
 
 use kernel::{
     debugfs::{Dir, File},
     device::Device,
-    fs::File as FsFile,
+    fs::{File as FsFile, Kiocb},
     ioctl::{_IO, _IOR, _IOW},
+    iov::IovIterDest,
     miscdevice::{MiscDevice, MiscDeviceOptions, MiscDeviceRegistration},
     new_mutex,
     prelude::*,
@@ -46,6 +48,7 @@ use sle_conn::{AccessResponseType, ConnManager, GtRole, NegotiatedParams, CONN_D
 use sle_security::SecurityInner;
 use sle_ssap::SsapInner;
 use sle_power::PowerInner;
+use sle_event::EventQueue;
 
 // ---------------------------------------------------------------------------
 // Userspace read/write helpers for repr(C) ioctl structures
@@ -214,6 +217,9 @@ const SL_IOCTL_PM_TICK: u32 = _IO(SL_MAGIC, 0x64);
 
 /// Record a data activity event.
 const SL_IOCTL_PM_ACTIVITY: u32 = _IO(SL_MAGIC, 0x65);
+
+/// Get number of pending events in the event queue.
+const SL_IOCTL_EVENT_COUNT: u32 = _IO(SL_MAGIC, 0x70);
 
 // ---------------------------------------------------------------------------
 // SparkLink address (6 bytes, same as SLE MAC layer identifier)
@@ -855,6 +861,8 @@ struct SparkLinkCtl {
     ssap: Mutex<SsapInner>,
     #[pin]
     power: Mutex<PowerInner>,
+    #[pin]
+    events: Mutex<EventQueue>,
     dev: ARef<Device>,
 }
 
@@ -877,11 +885,33 @@ impl MiscDevice for SparkLinkCtl {
                     security <- new_mutex!(SecurityInner::new()),
                     ssap <- new_mutex!(SsapInner::new()),
                     power <- new_mutex!(PowerInner::new()),
+                    events <- new_mutex!(EventQueue::new()),
                     dev: dev,
                 }
             },
             GFP_KERNEL,
         )
+    }
+
+    fn read_iter(kiocb: Kiocb<'_, Self::Ptr>, iov: &mut IovIterDest<'_>) -> Result<usize> {
+        let me = kiocb.file();
+        let mut guard = me.events.lock();
+        if !guard.has_events() {
+            return Err(EAGAIN);
+        }
+        let mut total = 0usize;
+        let evt_size = core::mem::size_of::<sle_event::SleWireEvent>();
+        while guard.has_events() && iov.len() >= evt_size {
+            if let Some(evt) = guard.dequeue() {
+                let bytes: &[u8] = evt.as_bytes();
+                let written = iov.copy_to_iter(bytes);
+                if written == 0 {
+                    break;
+                }
+                total += written;
+            }
+        }
+        Ok(total)
     }
 
     fn ioctl(me: Pin<&SparkLinkCtl>, _file: &FsFile, cmd: u32, arg: usize) -> Result<isize> {
@@ -976,6 +1006,14 @@ impl MiscDevice for SparkLinkCtl {
 
                 let mut guard = me.adv_scan.lock();
                 guard.process_adv_pdu(&pdu, inject.rssi)?;
+                drop(guard);
+                let name_len = (inject.name_len as usize).min(31);
+                me.events.lock().push_adv_report(
+                    inject.addr,
+                    inject.rssi,
+                    inject.discovery_level,
+                    &inject.name[..name_len],
+                );
                 dev_info!(
                     me.dev,
                     "sparklink: injected ADV from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} rssi={}\n",
@@ -998,13 +1036,18 @@ impl MiscDevice for SparkLinkCtl {
                     GtRole::TNode
                 };
                 let handle = me.conn.lock().connect(cp.peer_addr, role)?;
+                me.events.lock().push_conn_state(handle, 0, 1, cp.peer_addr, 0);
                 Ok(handle as isize)
             }
             SL_IOCTL_DISCONNECT => {
                 let handle: u16 = read_user_struct(arg)?;
                 let mut guard = me.conn.lock();
                 let handle = guard.resolve_handle(handle)?;
+                let peer_addr = guard.info(handle).map(|e| e.peer_addr).unwrap_or([0u8; 6]);
+                let old_state = guard.info(handle).map(|e| e.state as u8).unwrap_or(0);
                 guard.disconnect(handle)?;
+                drop(guard);
+                me.events.lock().push_conn_state(handle, old_state, 0, peer_addr, 0);
                 Ok(0)
             }
             SL_IOCTL_CONN_INFO => {
@@ -1075,8 +1118,18 @@ impl MiscDevice for SparkLinkCtl {
                 params.supervision_timeout = resp.supervision_timeout;
                 let mut guard = me.conn.lock();
                 let handle = guard.resolve_handle(resp.handle)?;
-                guard.process_access_response(handle, resp_type, params)?;
-                Ok(0)
+                let peer_addr = guard.info(handle).map(|e| e.peer_addr).unwrap_or([0u8; 6]);
+                let result = guard.process_access_response(handle, resp_type, params);
+                drop(guard);
+                match &result {
+                    Ok(()) => {
+                        me.events.lock().push_conn_state(handle, 1, 2, peer_addr, 0);
+                    }
+                    Err(_) => {
+                        me.events.lock().push_conn_state(handle, 1, 0, peer_addr, resp.response_type);
+                    }
+                }
+                result.map(|()| 0isize)
             }
             SL_IOCTL_INJECT_CONN_DATA => {
                 let cd: SleConnData = read_user_struct(arg)?;
@@ -1088,6 +1141,8 @@ impl MiscDevice for SparkLinkCtl {
                     entry.seq.rx_seq
                 };
                 guard.receive_data(handle, &cd.data[..len], seq)?;
+                drop(guard);
+                me.events.lock().push_data_received(handle, len as u16);
                 dev_info!(
                     me.dev,
                     "sparklink: injected {} bytes connection data (handle={})\n",
@@ -1305,6 +1360,11 @@ impl MiscDevice for SparkLinkCtl {
             SL_IOCTL_PM_ACTIVITY => {
                 me.power.lock().on_activity();
                 Ok(0)
+            }
+            // --- Event notification ---
+            SL_IOCTL_EVENT_COUNT => {
+                let count = me.events.lock().pending();
+                Ok(count as isize)
             }
             _ => {
                 dev_err!(me.dev, "sparklink: unknown ioctl 0x{:x}\n", cmd);

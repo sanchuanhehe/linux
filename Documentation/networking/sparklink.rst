@@ -523,10 +523,11 @@ Event types:
      - HardwareError
      - Controller hardware error (error code)
 
-The event queue holds up to 64 events. When full, the oldest event is
-dropped (LRU eviction). ``read()`` returns ``EAGAIN`` when no events
-are pending. Callers can use ``poll()``/``epoll()`` to wait for events
-with ``POLLIN | POLLRDNORM`` readiness indication.
+The event queue uses a fixed-size ring buffer (64 slots, O(1) enqueue
+and dequeue) with no per-event heap allocation. When full, the oldest
+event is dropped (LRU eviction). ``read()`` returns ``EAGAIN`` when no
+events are pending. Callers can use ``poll()``/``epoll()`` to wait for
+events with ``POLLIN | POLLRDNORM`` readiness indication.
 
 Multiple events are returned in a single ``read()`` call if the
 userspace buffer is large enough.
@@ -676,7 +677,7 @@ sparklink_test
 
 Integration test program at
 ``tools/testing/selftests/sparklink/sparklink_test.c``.
-Covers all subsystem ioctl interfaces with 20 test cases:
+Covers all subsystem ioctl interfaces with 21 test cases:
 
 - Device management: count, info, register
 - Advertising: start/stop, duplicate detection
@@ -690,6 +691,7 @@ Covers all subsystem ioctl interfaces with 20 test cases:
 - Event statistics: EVENT_STATS ioctl verification
 - DLI controller info: DLI_INFO ioctl verification
 - poll/epoll: poll readiness with event trigger and drain
+- Ring buffer stress: overflow handling with 80 events in 64-slot buffer
 - SM3 hash: test vector verification
 - Security: PSK pairing, encryption, SM4 roundtrip
 - SSAP: service registration, property read/write, notifications

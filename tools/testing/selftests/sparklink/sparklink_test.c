@@ -1384,6 +1384,101 @@ static void test_poll_epoll(int fd)
 	ioctl(fd, SL_IOCTL_DISCONNECT, &handle);
 }
 
+/* ------------------------------------------------------------------ */
+/* Test 21: Ring buffer stress test                                    */
+/* ------------------------------------------------------------------ */
+
+static void test_ring_buffer_stress(int fd)
+{
+	test_header("Ring buffer: stress fill and drain");
+	int i, ret;
+	struct sle_wire_event evt;
+	ssize_t n;
+
+	/* Step 1: drain any leftover events */
+	while (read(fd, &evt, sizeof(evt)) > 0)
+		;
+
+	ret = ioctl(fd, SL_IOCTL_EVENT_COUNT, NULL);
+	if (ret != 0) {
+		printf("  WARN: queue not empty before stress, count=%d\n", ret);
+		return;
+	}
+
+	/* Step 2: start scanning so we can inject advs to generate events */
+	struct sle_scan_params scan;
+	memset(&scan, 0, sizeof(scan));
+	scan.window_ms = 50;
+	scan.interval_ms = 100;
+	ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+
+	/* Step 3: inject 80 events (exceeds 64-slot ring buffer) */
+	for (i = 0; i < 80; i++) {
+		struct sle_inject_adv inject;
+		memset(&inject, 0, sizeof(inject));
+		inject.addr[0] = 0xA0 + (i & 0x0F);
+		inject.addr[5] = (uint8_t)(i >> 4);
+		inject.rssi = -40 - (i % 20);
+		inject.discovery_level = 1;
+		inject.name_len = 4;
+		memcpy(inject.name, "ring", 4);
+		ioctl(fd, SL_IOCTL_INJECT_ADV, &inject);
+	}
+
+	ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+
+	/* Step 4: count should be capped at 64 */
+	ret = ioctl(fd, SL_IOCTL_EVENT_COUNT, NULL);
+	if (ret == 64) {
+		printf("  OK:   pending=%d (capped at ring buffer size)\n", ret);
+	} else {
+		printf("  WARN: expected pending=64, got %d\n", ret);
+	}
+
+	/* Step 5: check stats — should show 80 enqueued, 16 dropped */
+	struct sle_event_stats stats;
+	memset(&stats, 0, sizeof(stats));
+	ioctl(fd, SL_IOCTL_EVENT_STATS, &stats);
+	printf("  stats: enqueued=%lu dropped=%lu delivered=%lu\n",
+	       (unsigned long)stats.total_enqueued,
+	       (unsigned long)stats.total_dropped,
+	       (unsigned long)stats.total_delivered);
+	if (stats.total_dropped >= 16) {
+		printf("  OK:   dropped >= 16 (oldest events evicted)\n");
+	} else {
+		printf("  WARN: expected >= 16 drops, got %lu\n",
+		       (unsigned long)stats.total_dropped);
+	}
+
+	/* Step 6: drain all events, verify we get exactly 64 */
+	int drained = 0;
+	while (drained < 100) {
+		n = read(fd, &evt, sizeof(evt));
+		if (n < 0) {
+			if (errno == EAGAIN)
+				break;
+			printf("  FAIL: read error: %s\n", strerror(errno));
+			break;
+		}
+		if (n == 0)
+			break;
+		drained++;
+	}
+	if (drained == 64) {
+		printf("  OK:   drained=%d events (full ring buffer)\n", drained);
+	} else {
+		printf("  WARN: expected 64 drained, got %d\n", drained);
+	}
+
+	/* Step 7: queue must be empty now */
+	ret = ioctl(fd, SL_IOCTL_EVENT_COUNT, NULL);
+	if (ret == 0) {
+		printf("  OK:   queue empty after full drain\n");
+	} else {
+		printf("  WARN: expected 0, got %d\n", ret);
+	}
+}
+
 static void test_multi_conn_concurrent(int fd)
 {
 	test_header("Multi-connection: concurrent data exchange");
@@ -1554,6 +1649,7 @@ int main(void)
 	test_event_stats(fd);
 	test_dli_info(fd);
 	test_poll_epoll(fd);
+	test_ring_buffer_stress(fd);
 	test_multi_conn_concurrent(fd);
 
 	printf("\n=== All tests completed ===\n");

@@ -173,11 +173,19 @@ const EVENT_QUEUE_MAX: usize = 64;
 
 /// Event queue for delivering asynchronous notifications to userspace.
 ///
+/// Uses a fixed-size ring buffer for O(1) enqueue and dequeue, avoiding
+/// the O(n) element shift of the previous KVec-based implementation and
+/// eliminating per-event heap allocation.
+///
 /// Events are enqueued by kernel-side subsystems and dequeued by
 /// userspace via `read()` on the /dev/sparklink file descriptor.
 pub struct EventQueue {
-    /// Circular buffer of serialized events.
-    events: KVec<SleWireEvent>,
+    /// Fixed-size ring buffer (pre-allocated, no per-event allocation).
+    buf: [SleWireEvent; EVENT_QUEUE_MAX],
+    /// Index of the oldest pending event (read position).
+    head: usize,
+    /// Number of events currently in the buffer.
+    count: usize,
     /// Total events enqueued (lifetime counter).
     pub total_enqueued: u64,
     /// Total events dropped due to queue full.
@@ -187,10 +195,14 @@ pub struct EventQueue {
 }
 
 impl EventQueue {
-    /// Create an empty event queue.
+    /// Create an empty event queue with pre-allocated ring buffer.
     pub fn new() -> Self {
+        // SAFETY: SleWireEvent is repr(C) with only primitive fields;
+        // all-zero is a valid bit pattern.
         Self {
-            events: KVec::new(),
+            buf: unsafe { core::mem::zeroed() },
+            head: 0,
+            count: 0,
             total_enqueued: 0,
             total_dropped: 0,
             total_delivered: 0,
@@ -199,12 +211,12 @@ impl EventQueue {
 
     /// Number of pending events.
     pub fn pending(&self) -> usize {
-        self.events.len()
+        self.count
     }
 
     /// Whether the queue has any pending events.
     pub fn has_events(&self) -> bool {
-        !self.events.is_empty()
+        self.count > 0
     }
 
     /// Enqueue a connection state change event.
@@ -284,25 +296,25 @@ impl EventQueue {
     }
 
     /// Dequeue the oldest event. Returns None if the queue is empty.
+    ///
+    /// O(1) — advances the ring buffer head pointer.
     pub fn dequeue(&mut self) -> Option<SleWireEvent> {
-        if self.events.is_empty() {
+        if self.count == 0 {
             return None;
         }
-        match self.events.remove(0) {
-            Ok(evt) => {
-                self.total_delivered += 1;
-                Some(evt)
-            }
-            Err(_) => None,
-        }
+        let evt = self.buf[self.head];
+        self.head = (self.head + 1) % EVENT_QUEUE_MAX;
+        self.count -= 1;
+        self.total_delivered += 1;
+        Some(evt)
     }
 
     /// Drain as many events as fit into the given buffer size.
     /// Returns the total bytes written.
     pub fn drain_to_buf(&mut self, buf: &mut [u8]) -> usize {
+        let evt_size = core::mem::size_of::<SleWireEvent>();
         let mut offset = 0;
-        while !self.events.is_empty() {
-            let evt_size = core::mem::size_of::<SleWireEvent>();
+        while self.count > 0 {
             if offset + evt_size > buf.len() {
                 break;
             }
@@ -317,6 +329,7 @@ impl EventQueue {
 
     // --- Internal ---
 
+    /// O(1) ring buffer insertion. Drops oldest event if full.
     fn enqueue<T: Sized>(&mut self, event_type: SleEventType, payload: &T) {
         let payload_size = core::mem::size_of::<T>();
         let copy_len = payload_size.min(EVENT_PAYLOAD_MAX);
@@ -335,14 +348,16 @@ impl EventQueue {
         wire.payload[..copy_len].copy_from_slice(payload_bytes);
 
         // Drop oldest if queue is full
-        if self.events.len() >= EVENT_QUEUE_MAX {
-            let _ = self.events.remove(0);
+        if self.count >= EVENT_QUEUE_MAX {
+            self.head = (self.head + 1) % EVENT_QUEUE_MAX;
+            self.count -= 1;
             self.total_dropped += 1;
             pr_warn!("sparklink: event queue full, dropped oldest event\n");
         }
 
-        if self.events.push(wire, GFP_KERNEL).is_ok() {
-            self.total_enqueued += 1;
-        }
+        let tail = (self.head + self.count) % EVENT_QUEUE_MAX;
+        self.buf[tail] = wire;
+        self.count += 1;
+        self.total_enqueued += 1;
     }
 }

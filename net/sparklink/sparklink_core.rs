@@ -17,6 +17,8 @@
 mod sle_pdu;
 mod sle_adv;
 mod sle_conn;
+mod sle_crypto;
+mod sle_security;
 
 use kernel::{
     debugfs::{Dir, File},
@@ -38,6 +40,7 @@ use kernel::{
 
 use sle_adv::{AdvParams, AdvScanInner, ScanParams};
 use sle_conn::{AccessResponseType, ConnInner, GtRole, NegotiatedParams, CONN_DATA_MAX};
+use sle_security::SecurityInner;
 
 // ---------------------------------------------------------------------------
 // IOCTL definitions for the /dev/sparklink control interface
@@ -100,6 +103,29 @@ const SL_IOCTL_INJECT_CONN_RESP: u32 = _IOW::<SleInjectConnResp>(SL_MAGIC, 0x35)
 
 /// Inject simulated received data for loopback testing.
 const SL_IOCTL_INJECT_CONN_DATA: u32 = _IOW::<SleConnData>(SL_MAGIC, 0x36);
+
+// --- Security management ioctls ---
+
+/// Set the pre-shared key for PSK pairing.
+const SL_IOCTL_SEC_SET_PSK: u32 = _IOW::<SlePskParams>(SL_MAGIC, 0x40);
+
+/// Start pairing (method specified in parameters).
+const SL_IOCTL_SEC_PAIR: u32 = _IOW::<SlePairParams>(SL_MAGIC, 0x41);
+
+/// Get security status and key fingerprint.
+const SL_IOCTL_SEC_INFO: u32 = _IOR::<SleSecInfo>(SL_MAGIC, 0x42);
+
+/// Enable encryption on the data path (requires Paired state).
+const SL_IOCTL_SEC_ENCRYPT_ON: u32 = _IO(SL_MAGIC, 0x43);
+
+/// SM3 hash test: compute SM3(data) and return digest.
+const SL_IOCTL_SEC_SM3_TEST: u32 = _IOW::<SleHashTest>(SL_MAGIC, 0x44);
+
+/// SM4 encrypt test: encrypt data in-place using session key.
+const SL_IOCTL_SEC_SM4_ENC_TEST: u32 = _IOW::<SleConnData>(SL_MAGIC, 0x45);
+
+/// SM4 decrypt test: decrypt data in-place using session key.
+const SL_IOCTL_SEC_SM4_DEC_TEST: u32 = _IOW::<SleConnData>(SL_MAGIC, 0x46);
 
 // ---------------------------------------------------------------------------
 // SparkLink address (6 bytes, same as SLE MAC layer identifier)
@@ -373,6 +399,69 @@ impl Default for SleInjectConnResp {
 unsafe impl FromBytes for SleInjectConnResp {}
 
 // ---------------------------------------------------------------------------
+// Security management userspace data structures
+// ---------------------------------------------------------------------------
+
+/// Pre-shared key for PSK pairing.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlePskParams {
+    /// 128-bit pre-shared key.
+    pub psk: [u8; 16],
+}
+
+// SAFETY: SlePskParams is repr(C) with only primitive fields.
+unsafe impl FromBytes for SlePskParams {}
+
+/// Pairing request parameters.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlePairParams {
+    /// Pairing method: 1=JustWorks, 2=PSK.
+    pub method: u8,
+    _reserved: [u8; 3],
+}
+
+// SAFETY: SlePairParams is repr(C) with only primitive fields.
+unsafe impl FromBytes for SlePairParams {}
+
+/// Security status returned to userspace.
+///
+/// Layout avoids implicit padding: all fields are u8 or u8 arrays.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleSecInfo {
+    /// Security state (SecurityState).
+    pub state: u8,
+    /// Pairing method (PairingMethod).
+    pub method: u8,
+    /// Security mode (SecurityMode).
+    pub mode: u8,
+    /// Whether encryption is currently active.
+    pub enc_enabled: u8,
+    /// First 4 bytes of SM3(enc_key) for fingerprint verification.
+    pub enc_key_fingerprint: [u8; 4],
+    _reserved: [u8; 8],
+}
+
+/// SM3 hash test request/response.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleHashTest {
+    /// Input data length (max 220).
+    pub in_len: u16,
+    /// Padding.
+    _pad: u16,
+    /// Input data buffer.
+    pub data: [u8; 220],
+    /// Output SM3 digest (32 bytes).
+    pub digest: [u8; 32],
+}
+
+// SAFETY: SleHashTest is repr(C) with only primitive fields.
+unsafe impl FromBytes for SleHashTest {}
+
+// ---------------------------------------------------------------------------
 // SCI bus types
 // ---------------------------------------------------------------------------
 
@@ -577,6 +666,8 @@ struct SparkLinkCtl {
     adv_scan: Mutex<AdvScanInner>,
     #[pin]
     conn: Mutex<ConnInner>,
+    #[pin]
+    security: Mutex<SecurityInner>,
     dev: ARef<Device>,
 }
 
@@ -596,6 +687,7 @@ impl MiscDevice for SparkLinkCtl {
                 SparkLinkCtl {
                     adv_scan <- new_mutex!(AdvScanInner::new(addr, name)),
                     conn <- new_mutex!(ConnInner::new(addr)),
+                    security <- new_mutex!(SecurityInner::new()),
                     dev: dev,
                 }
             },
@@ -831,6 +923,138 @@ impl MiscDevice for SparkLinkCtl {
                     "sparklink: injected {} bytes connection data\n",
                     len
                 );
+                Ok(0)
+            }
+            // --- Security management ---
+            SL_IOCTL_SEC_SET_PSK => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SlePskParams>(),
+                );
+                let mut reader = slice.reader();
+                let params: SlePskParams = reader.read()?;
+                me.security.lock().set_psk(params.psk);
+                Ok(0)
+            }
+            SL_IOCTL_SEC_PAIR => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SlePairParams>(),
+                );
+                let mut reader = slice.reader();
+                let params: SlePairParams = reader.read()?;
+                let mut guard = me.security.lock();
+                match params.method {
+                    1 => guard.pair_just_works()?,
+                    2 => guard.pair_psk()?,
+                    _ => return Err(EINVAL),
+                }
+                Ok(0)
+            }
+            SL_IOCTL_SEC_INFO => {
+                let info = {
+                    let guard = me.security.lock();
+                    // SAFETY: SleSecInfo is repr(C) with all u8 fields, no padding.
+                    let mut info: SleSecInfo = unsafe { core::mem::zeroed() };
+                    info.state = guard.state as u8;
+                    info.method = guard.method as u8;
+                    info.mode = guard.mode as u8;
+                    info.enc_enabled = if guard.is_encrypted() { 1 } else { 0 };
+                    info.enc_key_fingerprint = guard.enc_key_fingerprint();
+                    info
+                };
+                // SAFETY: SleSecInfo is repr(C) and fully initialized via zeroed().
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &info as *const SleSecInfo as *const u8,
+                        core::mem::size_of::<SleSecInfo>(),
+                    )
+                };
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleSecInfo>(),
+                );
+                let mut writer = slice.writer();
+                writer.write_slice(bytes)?;
+                Ok(0)
+            }
+            SL_IOCTL_SEC_ENCRYPT_ON => {
+                me.security.lock().enable_encryption()?;
+                Ok(0)
+            }
+            SL_IOCTL_SEC_SM3_TEST => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleHashTest>(),
+                );
+                let mut reader = slice.reader();
+                let mut ht: SleHashTest = reader.read()?;
+                let in_len = (ht.in_len as usize).min(220);
+                let digest = SecurityInner::sm3_hash(&ht.data[..in_len]);
+                ht.digest = digest;
+                // Write back with digest filled in
+                // SAFETY: SleHashTest is repr(C) and fully initialized.
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &ht as *const SleHashTest as *const u8,
+                        core::mem::size_of::<SleHashTest>(),
+                    )
+                };
+                let out = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleHashTest>(),
+                );
+                let mut writer = out.writer();
+                writer.write_slice(bytes)?;
+                Ok(0)
+            }
+            SL_IOCTL_SEC_SM4_ENC_TEST => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleConnData>(),
+                );
+                let mut reader = slice.reader();
+                let mut cd: SleConnData = reader.read()?;
+                let len = (cd.length as usize).min(CONN_DATA_MAX);
+                me.security.lock().encrypt_test(&mut cd.data[..len])?;
+                // Write the encrypted data back
+                // SAFETY: SleConnData is repr(C) and fully initialized.
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &cd as *const SleConnData as *const u8,
+                        core::mem::size_of::<SleConnData>(),
+                    )
+                };
+                let out = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleConnData>(),
+                );
+                let mut writer = out.writer();
+                writer.write_slice(bytes)?;
+                Ok(0)
+            }
+            SL_IOCTL_SEC_SM4_DEC_TEST => {
+                let slice = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleConnData>(),
+                );
+                let mut reader = slice.reader();
+                let mut cd: SleConnData = reader.read()?;
+                let len = (cd.length as usize).min(CONN_DATA_MAX);
+                me.security.lock().decrypt_test(&mut cd.data[..len])?;
+                // SAFETY: SleConnData is repr(C) and fully initialized.
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &cd as *const SleConnData as *const u8,
+                        core::mem::size_of::<SleConnData>(),
+                    )
+                };
+                let out = UserSlice::new(
+                    UserPtr::from_addr(arg),
+                    core::mem::size_of::<SleConnData>(),
+                );
+                let mut writer = out.writer();
+                writer.write_slice(bytes)?;
                 Ok(0)
             }
             _ => {

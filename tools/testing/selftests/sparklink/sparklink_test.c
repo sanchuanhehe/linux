@@ -52,6 +52,15 @@
 #define SL_IOCTL_INJECT_CONN_RESP _IOW(SL_MAGIC, 0x35, struct sle_inject_conn_resp)
 #define SL_IOCTL_INJECT_CONN_DATA _IOW(SL_MAGIC, 0x36, struct sle_conn_data)
 
+/* Security management */
+#define SL_IOCTL_SEC_SET_PSK     _IOW(SL_MAGIC, 0x40, struct sle_psk_params)
+#define SL_IOCTL_SEC_PAIR        _IOW(SL_MAGIC, 0x41, struct sle_pair_params)
+#define SL_IOCTL_SEC_INFO        _IOR(SL_MAGIC, 0x42, struct sle_sec_info)
+#define SL_IOCTL_SEC_ENCRYPT_ON  _IO(SL_MAGIC, 0x43)
+#define SL_IOCTL_SEC_SM3_TEST    _IOW(SL_MAGIC, 0x44, struct sle_hash_test)
+#define SL_IOCTL_SEC_SM4_ENC_TEST _IOW(SL_MAGIC, 0x45, struct sle_conn_data)
+#define SL_IOCTL_SEC_SM4_DEC_TEST _IOW(SL_MAGIC, 0x46, struct sle_conn_data)
+
 /* ------------------------------------------------------------------ */
 /* Userspace data structures — must match repr(C) in sparklink_core   */
 /* ------------------------------------------------------------------ */
@@ -120,6 +129,32 @@ struct sle_inject_conn_resp {
 	uint8_t  _pad;
 	uint16_t supervision_timeout;
 	uint8_t  _reserved[2];
+} __attribute__((packed));
+
+/* Security */
+struct sle_psk_params {
+	uint8_t psk[16];
+} __attribute__((packed));
+
+struct sle_pair_params {
+	uint8_t method;
+	uint8_t _reserved[3];
+} __attribute__((packed));
+
+struct sle_sec_info {
+	uint8_t state;
+	uint8_t method;
+	uint8_t mode;
+	uint8_t enc_enabled;
+	uint8_t enc_key_fingerprint[4];
+	uint8_t _reserved[8];
+} __attribute__((packed));
+
+struct sle_hash_test {
+	uint16_t in_len;
+	uint16_t _pad;
+	uint8_t  data[220];
+	uint8_t  digest[32];
 } __attribute__((packed));
 
 /* ------------------------------------------------------------------ */
@@ -558,7 +593,7 @@ static void test_conn_data_loopback(int fd)
 	ret = ioctl(fd, SL_IOCTL_DISCONNECT, NULL);
 	check("DISCONNECT", ret);
 
-	/* Step 10: Try to send after disconnect — should fail ENOTCONN */
+	/* Step 10: Try to send after disconnect — should fail EPIPE */
 	memset(&sd, 0, sizeof(sd));
 	sd.length = 5;
 	memcpy(sd.data, "bad", 3);
@@ -567,6 +602,123 @@ static void test_conn_data_loopback(int fd)
 		printf("  OK:   CONN_SEND (disconnected): correctly got EPIPE\n");
 	} else {
 		printf("  WARN: expected EPIPE, got ret=%d errno=%d\n", ret, errno);
+	}
+}
+
+static void test_sm3_hash(int fd)
+{
+	test_header("SM3 hash test");
+
+	/* SM3("abc") test vector from GB/T 32905-2016 A.1 */
+	struct sle_hash_test ht;
+	memset(&ht, 0, sizeof(ht));
+	memcpy(ht.data, "abc", 3);
+	ht.in_len = 3;
+
+	int ret = ioctl(fd, SL_IOCTL_SEC_SM3_TEST, &ht);
+	check("SEC_SM3_TEST", ret);
+
+	if (ret == 0) {
+		printf("  SM3(\"abc\") = ");
+		for (int i = 0; i < 32; i++)
+			printf("%02x", ht.digest[i]);
+		printf("\n");
+
+		/* Expected: 66c7f0f4 62eeedd9 d1f2d46b dc10e4e2
+		 *           4167c487 5cf2f7a2 297da02b 8f4ba8e0 */
+		const uint8_t expected[32] = {
+			0x66, 0xc7, 0xf0, 0xf4, 0x62, 0xee, 0xed, 0xd9,
+			0xd1, 0xf2, 0xd4, 0x6b, 0xdc, 0x10, 0xe4, 0xe2,
+			0x41, 0x67, 0xc4, 0x87, 0x5c, 0xf2, 0xf7, 0xa2,
+			0x29, 0x7d, 0xa0, 0x2b, 0x8f, 0x4b, 0xa8, 0xe0,
+		};
+		if (memcmp(ht.digest, expected, 32) == 0) {
+			printf("  OK:   SM3 test vector matches\n");
+		} else {
+			printf("  FAIL: SM3 test vector mismatch!\n");
+		}
+	}
+}
+
+static void test_security_pairing(int fd)
+{
+	test_header("Security: PSK pairing and encryption");
+
+	/* Step 1: Set PSK */
+	struct sle_psk_params psk;
+	memset(&psk, 0, sizeof(psk));
+	for (int i = 0; i < 16; i++)
+		psk.psk[i] = (uint8_t)i;
+
+	int ret = ioctl(fd, SL_IOCTL_SEC_SET_PSK, &psk);
+	check("SEC_SET_PSK", ret);
+
+	/* Step 2: Pair using PSK */
+	struct sle_pair_params pair;
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 2;  /* PSK */
+
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	check("SEC_PAIR (PSK)", ret);
+
+	/* Step 3: Check security info */
+	struct sle_sec_info sec;
+	memset(&sec, 0, sizeof(sec));
+	ret = ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+	check("SEC_INFO", ret);
+	if (ret == 0) {
+		printf("  state=%u method=%u mode=%u enc=%u fingerprint=%02x%02x%02x%02x\n",
+		       sec.state, sec.method, sec.mode, sec.enc_enabled,
+		       sec.enc_key_fingerprint[0], sec.enc_key_fingerprint[1],
+		       sec.enc_key_fingerprint[2], sec.enc_key_fingerprint[3]);
+		if (sec.state != 2)
+			printf("  WARN: expected state=2 (Paired)\n");
+		if (sec.method != 2)
+			printf("  WARN: expected method=2 (PSK)\n");
+	}
+
+	/* Step 4: Enable encryption */
+	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+	check("SEC_ENCRYPT_ON", ret);
+
+	/* Step 5: Verify encrypted state */
+	memset(&sec, 0, sizeof(sec));
+	ret = ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+	if (ret == 0 && sec.enc_enabled == 1) {
+		printf("  OK:   Encryption enabled (state=%u)\n", sec.state);
+	} else {
+		printf("  WARN: expected enc_enabled=1\n");
+	}
+
+	/* Step 6: SM4 encrypt-decrypt roundtrip */
+	struct sle_conn_data enc_data;
+	memset(&enc_data, 0, sizeof(enc_data));
+	const char *plaintext = "SLE test data 123";
+	enc_data.length = strlen(plaintext);
+	memcpy(enc_data.data, plaintext, enc_data.length);
+
+	uint8_t original[255];
+	memcpy(original, enc_data.data, enc_data.length);
+
+	ret = ioctl(fd, SL_IOCTL_SEC_SM4_ENC_TEST, &enc_data);
+	check("SEC_SM4_ENC_TEST", ret);
+
+	if (ret == 0) {
+		if (memcmp(enc_data.data, original, enc_data.length) != 0) {
+			printf("  OK:   Data encrypted (differs from original)\n");
+		} else {
+			printf("  WARN: encrypted data same as original!\n");
+		}
+
+		ret = ioctl(fd, SL_IOCTL_SEC_SM4_DEC_TEST, &enc_data);
+		check("SEC_SM4_DEC_TEST", ret);
+
+		if (ret == 0 && memcmp(enc_data.data, original, enc_data.length) == 0) {
+			printf("  OK:   Decrypt roundtrip matches: \"%.*s\"\n",
+			       enc_data.length, enc_data.data);
+		} else {
+			printf("  FAIL: decrypt roundtrip mismatch!\n");
+		}
 	}
 }
 
@@ -598,6 +750,8 @@ int main(void)
 	test_connect(fd);
 	test_conn_reject(fd);
 	test_conn_data_loopback(fd);
+	test_sm3_hash(fd);
+	test_security_pairing(fd);
 	test_unknown_ioctl(fd);
 
 	printf("\n=== All tests completed ===\n");

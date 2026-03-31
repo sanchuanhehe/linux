@@ -99,6 +99,12 @@
 /* USB hardware discovery */
 #define SL_IOCTL_USB_DEV_COUNT   _IO(SL_MAGIC, 0x81)
 
+/* DLI event polling */
+#define SL_IOCTL_DLI_POLL_EVENT  _IOR(SL_MAGIC, 0x82, struct sle_dli_event)
+
+/* DLI controller reset */
+#define SL_IOCTL_DLI_RESET       _IO(SL_MAGIC, 0x83)
+
 /* PHY layer */
 #define SL_IOCTL_PHY_INFO        _IOR(SL_MAGIC, 0x90, struct sle_phy_info)
 #define SL_IOCTL_PHY_SET_MCS     _IOW(SL_MAGIC, 0x91, struct sle_phy_mcs_cmd)
@@ -338,6 +344,18 @@ struct sle_dli_info {
 	uint8_t  name[32];
 	uint8_t  _reserved[14];
 } __attribute__((packed));
+
+/* DLI event from controller */
+struct sle_dli_event {
+	uint8_t  event_type;
+	uint8_t  status;
+	uint16_t handle;
+	uint16_t opcode;
+	uint16_t data_len;
+	uint8_t  data[240];
+	uint8_t  addr[6];
+	uint8_t  _pad[2];
+};
 
 /* PHY layer information */
 struct sle_phy_info {
@@ -1565,6 +1583,155 @@ static void test_usb_discovery(int fd)
 		printf("  OK:   %d USB SLE controller(s) attached\n", ret);
 }
 
+static void test_dli_event_poll(int fd)
+{
+	test_header("DLI Event Polling via Controller");
+
+	/* 1. Empty queue should return EAGAIN */
+	struct sle_dli_event ev;
+	memset(&ev, 0, sizeof(ev));
+	int ret = ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev);
+	if (ret < 0 && errno == EAGAIN)
+		printf("  OK:   poll_event returns EAGAIN on empty queue\n");
+	else
+		printf("  FAIL: expected EAGAIN, got ret=%d errno=%d\n", ret, errno);
+
+	/* 2. Trigger a DLI command that generates a CommandComplete event */
+	struct sle_adv_params adv;
+	memset(&adv, 0, sizeof(adv));
+	adv.discovery_level = 1;
+	adv.interval_ms = 100;
+	ret = ioctl(fd, SL_IOCTL_START_ADV, &adv);
+	if (ret != 0) {
+		printf("  FAIL: START_ADV for event trigger: %s\n", strerror(errno));
+		return;
+	}
+	printf("  OK:   START_ADV dispatched (triggers EnableBroadcast cmd)\n");
+
+	/* 3. Now poll_event should return CommandComplete for EnableBroadcast */
+	memset(&ev, 0, sizeof(ev));
+	ret = ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev);
+	if (ret == 0) {
+		printf("  OK:   poll_event returned event\n");
+		if (ev.event_type == 0x01)
+			printf("  OK:   event_type=0x01 (CommandComplete)\n");
+		else
+			printf("  WARN: unexpected event_type=0x%02x\n", ev.event_type);
+		if (ev.status == 0)
+			printf("  OK:   status=0 (Success)\n");
+		else
+			printf("  WARN: status=%u\n", ev.status);
+		/* EnableBroadcast opcode = OGF=0x03, OCF=0x03 → (3<<10)|3 = 0x0C03 */
+		printf("  OK:   opcode=0x%04x\n", ev.opcode);
+	} else {
+		printf("  FAIL: poll_event after START_ADV: %s\n", strerror(errno));
+	}
+
+	/* 4. Stop advertising (generates another event) */
+	ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
+
+	/* Drain remaining events */
+	for (int i = 0; i < 16; i++) {
+		memset(&ev, 0, sizeof(ev));
+		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) < 0)
+			break;
+	}
+	printf("  OK:   event queue drained\n");
+}
+
+static void test_dli_routing(int fd)
+{
+	test_header("DLI Controller Routing Verification");
+
+	/* Drain any leftover DLI events */
+	struct sle_dli_event ev;
+	for (int i = 0; i < 32; i++) {
+		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) < 0)
+			break;
+	}
+
+	/* 1. START_SCAN → EnableScan command → CommandComplete event */
+	struct sle_scan_params sp;
+	memset(&sp, 0, sizeof(sp));
+	sp.window_ms = 10;
+	sp.interval_ms = 20;
+	int ret = ioctl(fd, SL_IOCTL_START_SCAN, &sp);
+	if (ret == 0) {
+		printf("  OK:   START_SCAN routed to DLI\n");
+		memset(&ev, 0, sizeof(ev));
+		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) == 0 && ev.event_type == 0x01)
+			printf("  OK:   scan EnableScan event received\n");
+		else
+			printf("  WARN: no EnableScan event\n");
+	} else {
+		printf("  FAIL: START_SCAN: %s\n", strerror(errno));
+	}
+
+	ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+	/* Drain stop event */
+	ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev);
+
+	/* 2. CONNECT → CreateConnection command → CommandComplete event */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xBB;
+	cp.peer_addr[5] = 0x01;
+	cp.gt_role = 0;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret >= 0) {
+		uint16_t handle = (uint16_t)ret;
+		printf("  OK:   CONNECT routed to DLI (handle=%u)\n", handle);
+		memset(&ev, 0, sizeof(ev));
+		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) == 0 && ev.event_type == 0x01)
+			printf("  OK:   CreateConnection event received\n");
+		else
+			printf("  WARN: no CreateConnection event\n");
+
+		/* 3. DISCONNECT → Disconnect command */
+		ioctl(fd, SL_IOCTL_DISCONNECT, &handle);
+		memset(&ev, 0, sizeof(ev));
+		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) == 0 && ev.event_type == 0x01)
+			printf("  OK:   Disconnect event received\n");
+		else
+			printf("  WARN: no Disconnect event\n");
+	} else {
+		printf("  FAIL: CONNECT: %s\n", strerror(errno));
+	}
+
+	/* 4. PHY SET_MCS → SetCodingModulation command */
+	struct sle_phy_mcs_cmd mcs_cmd;
+	memset(&mcs_cmd, 0, sizeof(mcs_cmd));
+	mcs_cmd.mcs_index = 2;
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_MCS, &mcs_cmd);
+	if (ret == 0) {
+		printf("  OK:   PHY_SET_MCS routed to DLI\n");
+		memset(&ev, 0, sizeof(ev));
+		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) == 0 && ev.event_type == 0x01)
+			printf("  OK:   SetCodingModulation event received\n");
+		else
+			printf("  WARN: no SetCodingModulation event\n");
+	} else {
+		printf("  FAIL: PHY_SET_MCS: %s\n", strerror(errno));
+	}
+
+	/* 5. DLI_RESET */
+	ret = ioctl(fd, SL_IOCTL_DLI_RESET, NULL);
+	if (ret == 0)
+		printf("  OK:   DLI_RESET succeeded\n");
+	else
+		printf("  FAIL: DLI_RESET: %s\n", strerror(errno));
+
+	/* Restore PHY MCS to default (4) since we changed it above */
+	mcs_cmd.mcs_index = 4;
+	ioctl(fd, SL_IOCTL_PHY_SET_MCS, &mcs_cmd);
+
+	/* Drain all remaining */
+	for (int i = 0; i < 32; i++) {
+		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) < 0)
+			break;
+	}
+}
+
 static void test_poll_epoll(int fd)
 {
 	test_header("poll/epoll event notification");
@@ -2363,6 +2530,8 @@ int main(void)
 	test_event_stats(fd);
 	test_dli_info(fd);
 	test_usb_discovery(fd);
+	test_dli_event_poll(fd);
+	test_dli_routing(fd);
 	test_poll_epoll(fd);
 	test_ring_buffer_stress(fd);
 	test_multi_conn_concurrent(fd);

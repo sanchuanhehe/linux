@@ -43,8 +43,8 @@ The subsystem is organized in a layered architecture:
     codec   adv/scan  multi    SM3/SM4  pairing   SSAP     PM     event queue
                      conn
     +-------------------------------------------------------+
-    |               sle_phy (PHY layer)                    |
-    |   MCS table - freq hopping - MIMO - power control    |
+    |               sle_phy (PHY layer)                     |
+    |   MCS table - freq hopping - MIMO - power control     |
     +-------------------------------------------------------+
     |                  sle_dli (DLI)                        |
     |  SleController trait - opcode/event model (10003)     |
@@ -752,6 +752,91 @@ Hardware drivers implement the ``SleController`` trait::
 
 The built-in ``VirtualController`` implements this trait for loopback
 testing without physical hardware.
+
+Ioctl-to-DLI routing
+---------------------
+
+The ioctl dispatcher in ``sparklink_core.rs`` routes all hardware-facing
+operations through the active ``SleController``. Each ``SparkLinkCtl``
+instance holds a controller reference; on ``open()`` the controller is
+powered on, and on ``close()`` (PinnedDrop) it is shut down.
+
+The mapping from SCI ioctls to DLI opcodes:
+
+.. list-table::
+   :widths: 25 25 50
+   :header-rows: 1
+
+   * - SCI ioctl
+     - DLI opcode
+     - Description
+   * - ``START_ADV``
+     - ``EnableBroadcast(1)``
+     - Enable broadcast with parameters
+   * - ``STOP_ADV``
+     - ``EnableBroadcast(0)``
+     - Disable broadcast
+   * - ``START_SCAN``
+     - ``EnableScan(1)``
+     - Enable discovery scanning
+   * - ``STOP_SCAN``
+     - ``EnableScan(0)``
+     - Disable scanning
+   * - ``CONNECT``
+     - ``CreateConnection``
+     - Initiate connection to peer address
+   * - ``DISCONNECT``
+     - ``Disconnect``
+     - Terminate connection by handle
+   * - ``CONN_SEND``
+     - ``send_data()``
+     - Async unicast data transmission
+   * - ``SEC_PAIR``
+     - ``RequestPair``
+     - Initiate pairing with method
+   * - ``SEC_ENCRYPT_ON``
+     - ``StartEncrypt``
+     - Enable link-layer encryption
+   * - ``PHY_SET_MCS``
+     - ``SetCodingModulation``
+     - Change MCS index
+   * - ``PHY_SET_TXPOWER``
+     - ``SetPhyParam(0x01)``
+     - Set TX power level
+   * - ``PHY_SET_BW``
+     - ``SetPhyParam(0x02)``
+     - Set channel bandwidth
+
+Dual-path architecture: the ioctl handler first updates local host-side
+state (AdvScanInner, ConnManager, etc.), then issues the corresponding
+DLI command. This ensures the host protocol stack tracks state even if
+the controller is virtual or disconnected.
+
+DLI event polling
+-----------------
+
+The ``DLI_POLL_EVENT`` ioctl (0x82) dequeues the next pending event from
+the controller. Returns ``EAGAIN`` when no events are available.
+
+The ``VirtualController`` generates ``CommandComplete`` events for each
+``send_command()`` call, enabling full loopback testing of the event
+pipeline without hardware.
+
+.. code-block:: c
+
+    struct sle_dli_event {
+        uint8_t  event_type;    /* 1=CmdComplete, 2=CmdStatus, 3=AdvReport, ... */
+        uint8_t  status;        /* 0=Success */
+        uint16_t handle;
+        uint16_t opcode;
+        uint16_t data_len;
+        uint8_t  data[240];
+        uint8_t  addr[6];
+        uint8_t  _pad[2];
+    };
+
+The ``DLI_RESET`` ioctl (0x83) resets the controller to a known-good
+state.
 
 USB transport module
 --------------------

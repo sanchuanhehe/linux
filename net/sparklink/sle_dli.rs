@@ -23,6 +23,7 @@
 use kernel::prelude::*;
 use kernel::alloc::KVec;
 use core::cell::Cell;
+use core::cell::RefCell;
 
 // ---------------------------------------------------------------------------
 // DLI packet type indicators (T/XS 10003-2025 section 5.1)
@@ -779,9 +780,12 @@ pub trait SleController: Send + Sync {
 pub struct VirtualController {
     addr: [u8; 6],
     opened: Cell<bool>,
+    pending_events: RefCell<[Option<SleEvent>; 8]>,
+    event_head: Cell<usize>,
+    event_tail: Cell<usize>,
 }
 
-// SAFETY: VirtualController is always accessed behind a Mutex, so Cell<bool>
+// SAFETY: VirtualController is always accessed behind a Mutex, so Cell/RefCell
 // interior mutability is safe. The Mutex provides the necessary synchronization.
 unsafe impl Send for VirtualController {}
 unsafe impl Sync for VirtualController {}
@@ -789,7 +793,23 @@ unsafe impl Sync for VirtualController {}
 impl VirtualController {
     /// Create a new virtual controller with the given address.
     pub fn new(addr: [u8; 6]) -> Self {
-        Self { addr, opened: Cell::new(false) }
+        Self {
+            addr,
+            opened: Cell::new(false),
+            pending_events: RefCell::new([const { None }; 8]),
+            event_head: Cell::new(0),
+            event_tail: Cell::new(0),
+        }
+    }
+
+    fn enqueue_event(&self, ev: SleEvent) {
+        let tail = self.event_tail.get();
+        let next = (tail + 1) % 8;
+        if next == self.event_head.get() {
+            return; // queue full, drop
+        }
+        self.pending_events.borrow_mut()[tail] = Some(ev);
+        self.event_tail.set(next);
     }
 }
 
@@ -826,6 +846,12 @@ impl SleController for VirtualController {
 
     fn send_command(&self, opcode: SleOpcode, _params: &[u8]) -> Result {
         pr_debug!("sparklink-virtual: cmd {:?} (0x{:04x})\n", opcode, opcode as u16);
+        // Generate a CommandComplete event for loopback testing
+        self.enqueue_event(SleEvent::CommandComplete {
+            opcode,
+            status: SleStatus::Success,
+            data: KVec::new(),
+        });
         Ok(())
     }
 
@@ -835,11 +861,108 @@ impl SleController for VirtualController {
     }
 
     fn poll_event(&self) -> Option<SleEvent> {
-        None
+        let head = self.event_head.get();
+        if head == self.event_tail.get() {
+            return None;
+        }
+        let ev = self.pending_events.borrow_mut()[head].take();
+        self.event_head.set((head + 1) % 8);
+        ev
     }
 
     fn reset(&self) -> Result {
         pr_info!("sparklink-virtual: controller reset\n");
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Controller dispatch enum (avoids trait objects)
+// ---------------------------------------------------------------------------
+
+/// Concrete controller selector used by the core module.
+///
+/// This enum wraps all supported controller backends, allowing static
+/// dispatch without heap-allocated trait objects.
+pub enum ControllerBackend {
+    Virtual(VirtualController),
+    Uart(super::sle_uart::UartController),
+    Spi(super::sle_spi::SpiController),
+}
+
+// SAFETY: ControllerBackend is only accessed behind a Mutex (SparkLinkCtl
+// ensures this). VirtualController's Cell/RefCell are safe under Mutex.
+unsafe impl Send for ControllerBackend {}
+unsafe impl Sync for ControllerBackend {}
+
+impl ControllerBackend {
+    pub fn new_virtual(addr: [u8; 6]) -> Self {
+        Self::Virtual(VirtualController::new(addr))
+    }
+
+    pub fn new_uart(addr: [u8; 6], config: super::sle_uart::UartConfig) -> Self {
+        Self::Uart(super::sle_uart::UartController::new(addr, config))
+    }
+
+    pub fn new_spi(addr: [u8; 6], config: super::sle_spi::SpiConfig) -> Self {
+        Self::Spi(super::sle_spi::SpiController::new(addr, config))
+    }
+}
+
+impl SleController for ControllerBackend {
+    fn info(&self) -> SleControllerInfo {
+        match self {
+            Self::Virtual(c) => c.info(),
+            Self::Uart(c) => c.info(),
+            Self::Spi(c) => c.info(),
+        }
+    }
+
+    fn open(&self) -> Result {
+        match self {
+            Self::Virtual(c) => c.open(),
+            Self::Uart(c) => c.open(),
+            Self::Spi(c) => c.open(),
+        }
+    }
+
+    fn close(&self) {
+        match self {
+            Self::Virtual(c) => c.close(),
+            Self::Uart(c) => c.close(),
+            Self::Spi(c) => c.close(),
+        }
+    }
+
+    fn send_command(&self, opcode: SleOpcode, params: &[u8]) -> Result {
+        match self {
+            Self::Virtual(c) => c.send_command(opcode, params),
+            Self::Uart(c) => c.send_command(opcode, params),
+            Self::Spi(c) => c.send_command(opcode, params),
+        }
+    }
+
+    fn send_data(&self, handle: u16, data: &[u8]) -> Result {
+        match self {
+            Self::Virtual(c) => c.send_data(handle, data),
+            Self::Uart(c) => c.send_data(handle, data),
+            Self::Spi(c) => c.send_data(handle, data),
+        }
+    }
+
+    fn poll_event(&self) -> Option<SleEvent> {
+        match self {
+            Self::Virtual(c) => c.poll_event(),
+            Self::Uart(c) => c.poll_event(),
+            Self::Spi(c) => c.poll_event(),
+        }
+    }
+
+    fn reset(&self) -> Result {
+        match self {
+            Self::Virtual(c) => c.reset(),
+            Self::Uart(c) => c.reset(),
+            Self::Spi(c) => c.reset(),
+        }
     }
 }

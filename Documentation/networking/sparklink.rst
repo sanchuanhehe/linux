@@ -92,9 +92,10 @@ Module descriptions:
 **sle_ssap** (``net/sparklink/sle_ssap.rs``)
   SSAP (SLE Service Access Profile) layer, functionally equivalent to
   Bluetooth GATT. Implements property read/write, notifications, and
-  service discovery per T/XS 20001-2025 section 7.4.  Currently only
-  the built-in Device Information Service is registered; dynamic
-  service registration from userspace is not yet implemented.
+  service discovery per T/XS 20001-2025 section 7.4.  Supports both
+  the built-in Device Information Service and dynamic service
+  registration from userspace via ``SSAP_ADD_SVC``, ``SSAP_ADD_PROP``,
+  and ``SSAP_REMOVE_SVC`` ioctls.
 
 **sle_power** (``net/sparklink/sle_power.rs``)
   Power management module with automatic state transitions
@@ -406,7 +407,7 @@ Security (0x40 -- 0x46)
      - Write/Read (SleHmacTest)
      - HMAC-SM3 computation and verification
 
-SSAP service layer (0x50 -- 0x56)
+SSAP service layer (0x50 -- 0x59)
 ---------------------------------
 
 .. list-table::
@@ -445,6 +446,18 @@ SSAP service layer (0x50 -- 0x56)
      - ``SSAP_DEQUEUE_NTF``
      - Read (SsapNotification)
      - Dequeue one pending notification
+   * - 0x57
+     - ``SSAP_ADD_SVC``
+     - Write/Read (SsapAddService)
+     - Register a custom service (16-bit or 128-bit UUID), returns start_handle
+   * - 0x58
+     - ``SSAP_ADD_PROP``
+     - Write/Read (SsapAddProperty)
+     - Add property to current service with operation mask and initial value
+   * - 0x59
+     - ``SSAP_REMOVE_SVC``
+     - Write (u16)
+     - Remove a service by its start_handle
 
 Power management (0x60 -- 0x65)
 -------------------------------
@@ -1164,11 +1177,13 @@ Attributes
    * - ``adv_interval_ms``
      - RW
      - ``100``
-     - Default advertising interval in milliseconds (valid range: 20--10240)
+     - Default advertising interval in milliseconds (valid range: 20--10240).
+       When ``START_ADV`` ioctl receives ``interval_ms=0``, this value is used.
    * - ``scan_window_ms``
      - RW
      - ``200``
-     - Default scan window in milliseconds (valid range: 10--10240)
+     - Default scan window in milliseconds (valid range: 10--10240).
+       When ``START_SCAN`` ioctl receives ``window_ms=0``, this value is used.
    * - ``power_mode``
      - RW
      - ``active``
@@ -1273,12 +1288,13 @@ sparklink_test
 
 Integration test program at
 ``tools/testing/selftests/sparklink/sparklink_test.c``.
-Covers all subsystem ioctl interfaces with 28 test cases:
+Covers all subsystem ioctl interfaces with 30 test cases:
 
 - Device management: count, info, register
 - Advertising: start/stop, duplicate detection
 - Scanning: start/stop, result count
 - Mutual exclusion: advertising blocks scanning
+- Role management: SET_ROLE/GET_ROLE, role-gate ADV/SCAN
 - Loopback: inject advertising PDU, filter by discovery level
 - Multi-connection: connect to multiple peers, CONN_COUNT, CONN_LIST
 - Connection rejection: handle-based access response
@@ -1286,13 +1302,17 @@ Covers all subsystem ioctl interfaces with 28 test cases:
 - Event notification: read events after connect/inject
 - Event statistics: EVENT_STATS ioctl verification
 - DLI controller info: DLI_INFO ioctl verification
+- DLI event polling: event drain, CommandComplete verification
 - poll/epoll: poll readiness with event trigger and drain
 - Ring buffer stress: overflow handling with 80 events in 64-slot buffer
 - SM3 hash: test vector verification
 - Security: PSK pairing, encryption, SM4 roundtrip
 - SSAP: service registration, property read/write, notifications
+- SSAP dynamic registration: ADD_SVC (16/128-bit UUID), ADD_PROP, REMOVE_SVC
 - Power management: state transitions, intervals, force-active
 - Configfs: mount, default readback, write/readback, boundary validation
+- Configfs-ioctl integration: interval_ms=0 / window_ms=0 fallback
+- Performance benchmarks: ioctl throughput (10k iterations), ADV cycle latency
 - USB hardware discovery: device count query
 - Generic Netlink: family lookup, GET_DEV_INFO, GET_VERSION
 - PHY layer: MCS set/get, bandwidth, TX power, adaptive MCS selection,
@@ -1634,29 +1654,29 @@ Code statistics
 
     Component                  Lines
     ─────────────────────────  ─────
-    sparklink_core.rs           ~2100
-    sle_dli.rs                  ~1020
-    sle_ssap.rs                  ~880
-    sle_conn.rs                  ~850
-    sle_usb.rs                   ~650
-    sle_uart.rs                  ~500
-    sle_phy.rs                   ~500
+    sparklink_core.rs           ~2270
+    sle_dli.rs                  ~1030
+    sle_ssap.rs                  ~870
+    sle_conn.rs                  ~710
+    sle_usb.rs                   ~670
+    sle_phy.rs                   ~580
+    sle_pdu.rs                   ~530
+    sle_uart.rs                  ~520
     sle_crypto.rs                ~480
-    sle_spi.rs                   ~440
-    sle_pdu.rs                   ~400
-    sle_netlink.rs               ~360
+    sle_spi.rs                   ~450
     sle_adv.rs                   ~380
-    sle_event.rs                 ~300
-    sparklink_genl.c             ~300
-    sle_configfs.rs              ~200
-    sle_power.rs                 ~220
-    sle_security.rs              ~200
+    sle_event.rs                 ~360
+    sle_netlink.rs               ~360
+    sle_power.rs                 ~300
+    sle_security.rs              ~280
+    sparklink_genl.c             ~260
+    sle_configfs.rs              ~220
     ─────────────────────────  ─────
-    Kernel total                ~9680
-    Test + tools                ~3600
-    UAPI header                  ~254
-    Documentation               ~1700
-    Grand total                ~15234
+    Kernel total                ~10270
+    Test + tools                ~2990
+    UAPI header                  ~263
+    Documentation               ~1690
+    Grand total                ~15213
 
 References
 ==========

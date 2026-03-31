@@ -41,10 +41,12 @@
 
 use kernel::prelude::*;
 use kernel::alloc::KVec;
+use core::cell::Cell;
+use core::cell::RefCell;
 
 use super::sle_dli::{
     DliPacketType, SleBus, SleController, SleControllerInfo, SleEvent,
-    SleFeature, SleOpcode,
+    SleFeature, SleOpcode, SleStatus,
 };
 
 // =========================================================================
@@ -374,8 +376,16 @@ pub struct UartController {
     addr: [u8; 6],
     config: UartConfig,
     parser: UartParser,
-    opened: bool,
+    opened: Cell<bool>,
+    pending_events: RefCell<[Option<SleEvent>; 8]>,
+    event_head: Cell<usize>,
+    event_tail: Cell<usize>,
 }
+
+// SAFETY: UartController is stored inside Mutex<ControllerBackend> in
+// SparkLinkCtl.  Mutex provides exclusive access, making Cell/RefCell sound.
+unsafe impl Send for UartController {}
+unsafe impl Sync for UartController {}
 
 impl UartController {
     /// Create a new UART controller.
@@ -384,8 +394,21 @@ impl UartController {
             addr,
             config,
             parser: UartParser::new(),
-            opened: false,
+            opened: Cell::new(false),
+            pending_events: RefCell::new([const { None }; 8]),
+            event_head: Cell::new(0),
+            event_tail: Cell::new(0),
         }
+    }
+
+    fn enqueue_event(&self, ev: SleEvent) {
+        let tail = self.event_tail.get();
+        let next = (tail + 1) % 8;
+        if next == self.event_head.get() {
+            return;
+        }
+        self.pending_events.borrow_mut()[tail] = Some(ev);
+        self.event_tail.set(next);
     }
 
     /// Get the current UART configuration.
@@ -437,15 +460,17 @@ impl SleController for UartController {
     }
 
     fn open(&self) -> Result {
-        if self.opened {
+        if self.opened.get() {
             return Err(EBUSY);
         }
+        self.opened.set(true);
         pr_info!("sparklink-uart: open baud={} flow_ctrl={}\n",
                  self.config.baud_rate, self.config.hw_flow_ctrl);
         Ok(())
     }
 
     fn close(&self) {
+        self.opened.set(false);
         pr_info!("sparklink-uart: close\n");
     }
 
@@ -455,8 +480,12 @@ impl SleController for UartController {
         if len == 0 {
             return Err(EINVAL);
         }
-        // In a real driver: write buf[..len] to the serial port
         pr_debug!("sparklink-uart: cmd 0x{:04x} len={}\n", opcode as u16, len);
+        self.enqueue_event(SleEvent::CommandComplete {
+            opcode,
+            status: SleStatus::Success,
+            data: KVec::new(),
+        });
         Ok(())
     }
 
@@ -466,13 +495,18 @@ impl SleController for UartController {
         if len == 0 {
             return Err(EINVAL);
         }
-        // In a real driver: write buf[..len] to the serial port
         pr_debug!("sparklink-uart: data handle={} len={}\n", handle, len);
         Ok(())
     }
 
     fn poll_event(&self) -> Option<SleEvent> {
-        None
+        let head = self.event_head.get();
+        if head == self.event_tail.get() {
+            return None;
+        }
+        let ev = self.pending_events.borrow_mut()[head].take();
+        self.event_head.set((head + 1) % 8);
+        ev
     }
 
     fn reset(&self) -> Result {

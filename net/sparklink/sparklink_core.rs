@@ -1285,6 +1285,7 @@ impl kernel::InPlaceModule for SparkLinkModule {
                         adv_interval_ms: 2,
                         scan_window_ms: 3,
                         power_mode: 4,
+                        controller_type: 5,
                     ],
                 };
                 configfs::Subsystem::new(
@@ -1331,7 +1332,8 @@ struct SparkLinkCtl {
     #[pin]
     event_poll: PollCondVar,
     /// DLI controller for hardware interaction.
-    controller: sle_dli::ControllerBackend,
+    #[pin]
+    controller: Mutex<sle_dli::ControllerBackend>,
     dev: ARef<Device>,
 }
 
@@ -1345,7 +1347,13 @@ impl MiscDevice for SparkLinkCtl {
 
         let addr = [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01];
         let name = b"sparklink-ctl";
-        let controller = sle_dli::ControllerBackend::new_virtual(addr);
+        let controller = match sle_configfs::controller_type() {
+            1 => sle_dli::ControllerBackend::new_uart(
+                addr, sle_uart::UartConfig::default()),
+            2 => sle_dli::ControllerBackend::new_spi(
+                addr, sle_spi::SpiConfig::default()),
+            _ => sle_dli::ControllerBackend::new_virtual(addr),
+        };
         controller.open()?;
 
         KBox::try_pin_init(
@@ -1359,7 +1367,7 @@ impl MiscDevice for SparkLinkCtl {
                     events <- new_mutex!(EventQueue::new()),
                     phy <- new_mutex!(sle_phy::PhyConfig::default_config()),
                     event_poll <- new_poll_condvar!("sparklink_event"),
-                    controller: controller,
+                    controller <- new_mutex!(controller),
                     dev: dev,
                 }
             },
@@ -1421,12 +1429,12 @@ impl MiscDevice for SparkLinkCtl {
                 }
                 drop(guard);
                 // Route through DLI controller
-                let _ = me.controller.send_command(sle_dli::SleOpcode::EnableBroadcast, &[1]);
+                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::EnableBroadcast, &[1]);
                 Ok(0)
             }
             SL_IOCTL_STOP_ADV => {
                 me.adv_scan.lock().stop_advertising()?;
-                let _ = me.controller.send_command(sle_dli::SleOpcode::EnableBroadcast, &[0]);
+                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::EnableBroadcast, &[0]);
                 Ok(0)
             }
             SL_IOCTL_START_SCAN => {
@@ -1438,12 +1446,12 @@ impl MiscDevice for SparkLinkCtl {
                     active: false,
                 };
                 me.adv_scan.lock().start_scanning(params)?;
-                let _ = me.controller.send_command(sle_dli::SleOpcode::EnableScan, &[1]);
+                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::EnableScan, &[1]);
                 Ok(0)
             }
             SL_IOCTL_STOP_SCAN => {
                 me.adv_scan.lock().stop_scanning()?;
-                let _ = me.controller.send_command(sle_dli::SleOpcode::EnableScan, &[0]);
+                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::EnableScan, &[0]);
                 Ok(0)
             }
             SL_IOCTL_DEV_COUNT => {
@@ -1537,7 +1545,7 @@ impl MiscDevice for SparkLinkCtl {
                 let handle = me.conn.lock().connect(cp.peer_addr, role)?;
                 me.events.lock().push_conn_state(handle, 0, 1, cp.peer_addr, 0);
                 me.event_poll.notify_all();
-                let _ = me.controller.send_command(sle_dli::SleOpcode::CreateConnection, &cp.peer_addr);
+                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::CreateConnection, &cp.peer_addr);
                 Ok(handle as isize)
             }
             SL_IOCTL_DISCONNECT => {
@@ -1551,7 +1559,7 @@ impl MiscDevice for SparkLinkCtl {
                 me.events.lock().push_conn_state(handle, old_state, 0, peer_addr, 0);
                 me.event_poll.notify_all();
                 let h = handle.to_le_bytes();
-                let _ = me.controller.send_command(sle_dli::SleOpcode::Disconnect, &h);
+                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::Disconnect, &h);
                 Ok(0)
             }
             SL_IOCTL_CONN_INFO => {
@@ -1595,7 +1603,7 @@ impl MiscDevice for SparkLinkCtl {
                 let handle = guard.resolve_handle(cd.handle)?;
                 let sent = guard.send(handle, &cd.data[..len])?;
                 drop(guard);
-                let _ = me.controller.send_data(cd.handle, &cd.data[..len]);
+                let _ = me.controller.lock().send_data(cd.handle, &cd.data[..len]);
                 Ok(sent as isize)
             }
             SL_IOCTL_CONN_RECV => {
@@ -1690,7 +1698,7 @@ impl MiscDevice for SparkLinkCtl {
                     _ => return Err(EINVAL),
                 }
                 drop(guard);
-                let _ = me.controller.send_command(sle_dli::SleOpcode::RequestPair, &[params.method]);
+                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::RequestPair, &[params.method]);
                 Ok(0)
             }
             SL_IOCTL_SEC_INFO => {
@@ -1710,7 +1718,7 @@ impl MiscDevice for SparkLinkCtl {
             }
             SL_IOCTL_SEC_ENCRYPT_ON => {
                 me.security.lock().enable_encryption()?;
-                let _ = me.controller.send_command(sle_dli::SleOpcode::StartEncrypt, &[]);
+                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::StartEncrypt, &[]);
                 Ok(0)
             }
             SL_IOCTL_SEC_SM3_TEST => {
@@ -1909,7 +1917,7 @@ impl MiscDevice for SparkLinkCtl {
             }
             // --- DLI controller info ---
             SL_IOCTL_DLI_INFO => {
-                let cinfo = me.controller.info();
+                let cinfo = me.controller.lock().info();
                 let mut name = [0u8; 32];
                 let copy_len = cinfo.name.len().min(31);
                 name[..copy_len].copy_from_slice(&cinfo.name[..copy_len]);
@@ -1928,7 +1936,7 @@ impl MiscDevice for SparkLinkCtl {
             }
             // --- DLI event polling ---
             SL_IOCTL_DLI_POLL_EVENT => {
-                match me.controller.poll_event() {
+                match me.controller.lock().poll_event() {
                     Some(ev) => {
                         let dli_ev = sle_dli_event_to_wire(&ev);
                         write_user_struct(arg, &dli_ev)?;
@@ -1939,7 +1947,7 @@ impl MiscDevice for SparkLinkCtl {
             }
             // --- DLI controller reset ---
             SL_IOCTL_DLI_RESET => {
-                me.controller.reset()?;
+                me.controller.lock().reset()?;
                 Ok(0)
             }
             // --- USB device discovery ---
@@ -1976,7 +1984,7 @@ impl MiscDevice for SparkLinkCtl {
                 let mut guard = me.phy.lock();
                 guard.set_mcs(cmd.mcs_index)?;
                 drop(guard);
-                let _ = me.controller.send_command(sle_dli::SleOpcode::SetCodingModulation, &[cmd.mcs_index]);
+                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::SetCodingModulation, &[cmd.mcs_index]);
                 Ok(0)
             }
             SL_IOCTL_PHY_SET_TXPOWER => {
@@ -1985,7 +1993,7 @@ impl MiscDevice for SparkLinkCtl {
                 guard.set_tx_power(cmd.tx_power_dbm)?;
                 drop(guard);
                 let p = [0x01, cmd.tx_power_dbm as u8];
-                let _ = me.controller.send_command(sle_dli::SleOpcode::SetPhyParam, &p);
+                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::SetPhyParam, &p);
                 Ok(0)
             }
             SL_IOCTL_PHY_MCS_SELECT => {
@@ -2015,7 +2023,7 @@ impl MiscDevice for SparkLinkCtl {
                 guard.set_bandwidth(cmd.bandwidth_mhz)?;
                 drop(guard);
                 let bw = [0x02, cmd.bandwidth_mhz];
-                let _ = me.controller.send_command(sle_dli::SleOpcode::SetPhyParam, &bw);
+                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::SetPhyParam, &bw);
                 Ok(0)
             }
             _ => {
@@ -2029,7 +2037,7 @@ impl MiscDevice for SparkLinkCtl {
 #[pinned_drop]
 impl PinnedDrop for SparkLinkCtl {
     fn drop(self: Pin<&mut Self>) {
-        self.controller.close();
+        self.controller.lock().close();
         dev_info!(self.dev, "sparklink: control interface closed\n");
     }
 }

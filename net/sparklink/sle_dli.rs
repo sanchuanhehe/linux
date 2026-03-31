@@ -785,8 +785,8 @@ pub struct VirtualController {
     event_tail: Cell<usize>,
 }
 
-// SAFETY: VirtualController is always accessed behind a Mutex, so Cell/RefCell
-// interior mutability is safe. The Mutex provides the necessary synchronization.
+// SAFETY: VirtualController is only used inside Mutex<ControllerBackend> in
+// SparkLinkCtl.  The Mutex ensures exclusive access, making Cell/RefCell safe.
 unsafe impl Send for VirtualController {}
 unsafe impl Sync for VirtualController {}
 
@@ -890,8 +890,9 @@ pub enum ControllerBackend {
     Spi(super::sle_spi::SpiController),
 }
 
-// SAFETY: ControllerBackend is only accessed behind a Mutex (SparkLinkCtl
-// ensures this). VirtualController's Cell/RefCell are safe under Mutex.
+// SAFETY: ControllerBackend is always stored inside Mutex<ControllerBackend>
+// in SparkLinkCtl.  The Mutex provides exclusive access, so Cell/RefCell
+// interior mutability in the contained controllers is sound.
 unsafe impl Send for ControllerBackend {}
 unsafe impl Sync for ControllerBackend {}
 

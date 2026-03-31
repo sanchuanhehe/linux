@@ -43,10 +43,12 @@
 
 use kernel::prelude::*;
 use kernel::alloc::KVec;
+use core::cell::Cell;
+use core::cell::RefCell;
 
 use super::sle_dli::{
     DliPacketType, SleBus, SleController, SleControllerInfo, SleEvent,
-    SleFeature, SleOpcode,
+    SleFeature, SleOpcode, SleStatus,
 };
 
 // =========================================================================
@@ -275,8 +277,16 @@ impl Default for SpiConfig {
 pub struct SpiController {
     addr: [u8; 6],
     config: SpiConfig,
-    opened: bool,
+    opened: Cell<bool>,
+    pending_events: RefCell<[Option<SleEvent>; 8]>,
+    event_head: Cell<usize>,
+    event_tail: Cell<usize>,
 }
+
+// SAFETY: SpiController is stored inside Mutex<ControllerBackend> in
+// SparkLinkCtl.  Mutex provides exclusive access, making Cell/RefCell sound.
+unsafe impl Send for SpiController {}
+unsafe impl Sync for SpiController {}
 
 impl SpiController {
     /// Create a new SPI controller.
@@ -284,8 +294,21 @@ impl SpiController {
         Self {
             addr,
             config,
-            opened: false,
+            opened: Cell::new(false),
+            pending_events: RefCell::new([const { None }; 8]),
+            event_head: Cell::new(0),
+            event_tail: Cell::new(0),
         }
+    }
+
+    fn enqueue_event(&self, ev: SleEvent) {
+        let tail = self.event_tail.get();
+        let next = (tail + 1) % 8;
+        if next == self.event_head.get() {
+            return;
+        }
+        self.pending_events.borrow_mut()[tail] = Some(ev);
+        self.event_tail.set(next);
     }
 
     /// Get the current SPI configuration.
@@ -366,20 +389,21 @@ impl SleController for SpiController {
     }
 
     fn open(&self) -> Result {
-        if self.opened {
+        if self.opened.get() {
             return Err(EBUSY);
         }
+        self.opened.set(true);
         pr_info!("sparklink-spi: open freq={}Hz mode={}\n",
                  self.config.freq_hz, self.config.mode);
         Ok(())
     }
 
     fn close(&self) {
+        self.opened.set(false);
         pr_info!("sparklink-spi: close\n");
     }
 
     fn send_command(&self, opcode: SleOpcode, params: &[u8]) -> Result {
-        // In a real driver: perform SPI transfers
         let mut hdr_buf = [0u8; 8];
         let mut data_buf = [0u8; 260];
         let (hdr_len, data_len) = self.prepare_command(
@@ -389,6 +413,11 @@ impl SleController for SpiController {
         }
         pr_debug!("sparklink-spi: cmd 0x{:04x} hdr={} data={}\n",
                   opcode as u16, hdr_len, data_len);
+        self.enqueue_event(SleEvent::CommandComplete {
+            opcode,
+            status: SleStatus::Success,
+            data: KVec::new(),
+        });
         Ok(())
     }
 
@@ -406,7 +435,13 @@ impl SleController for SpiController {
     }
 
     fn poll_event(&self) -> Option<SleEvent> {
-        None
+        let head = self.event_head.get();
+        if head == self.event_tail.get() {
+            return None;
+        }
+        let ev = self.pending_events.borrow_mut()[head].take();
+        self.event_head.set((head + 1) % 8);
+        ev
     }
 
     fn reset(&self) -> Result {

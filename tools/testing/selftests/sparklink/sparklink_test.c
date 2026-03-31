@@ -2361,6 +2361,11 @@ static void test_configfs(void)
 	else
 		printf("  FAIL: cannot read power_mode\n");
 
+	if (read_configfs_attr("controller_type", buf, sizeof(buf)) == 0)
+		printf("  OK:   controller_type = %s (default)\n", buf);
+	else
+		printf("  FAIL: cannot read controller_type\n");
+
 	test_header("configfs: write and readback");
 	if (write_configfs_attr("max_connections", "4") == 0 &&
 	    read_configfs_attr("max_connections", buf, sizeof(buf)) == 0 &&
@@ -2415,11 +2420,33 @@ static void test_configfs(void)
 	else
 		printf("  FAIL: power_mode=turbo should be rejected\n");
 
+	/* controller_type: write and readback */
+	if (write_configfs_attr("controller_type", "uart") == 0 &&
+	    read_configfs_attr("controller_type", buf, sizeof(buf)) == 0 &&
+	    strcmp(buf, "uart") == 0)
+		printf("  OK:   controller_type set to uart\n");
+	else
+		printf("  FAIL: controller_type uart write/readback\n");
+
+	if (write_configfs_attr("controller_type", "spi") == 0 &&
+	    read_configfs_attr("controller_type", buf, sizeof(buf)) == 0 &&
+	    strcmp(buf, "spi") == 0)
+		printf("  OK:   controller_type set to spi\n");
+	else
+		printf("  FAIL: controller_type spi write/readback\n");
+
+	/* Invalid controller_type */
+	if (write_configfs_attr("controller_type", "i2c") != 0)
+		printf("  OK:   controller_type=i2c rejected\n");
+	else
+		printf("  FAIL: controller_type=i2c should be rejected\n");
+
 	/* Restore defaults */
 	write_configfs_attr("max_connections", "8");
 	write_configfs_attr("adv_interval_ms", "100");
 	write_configfs_attr("scan_window_ms", "200");
 	write_configfs_attr("power_mode", "active");
+	write_configfs_attr("controller_type", "virtual");
 }
 
 static void test_genetlink(void)

@@ -30,12 +30,12 @@ The subsystem is organized in a layered architecture:
     |                    USER SPACE                         |
     |   sparklink_ctl / sparklink_test / custom app         |
     +------------------------------------------------------+
-            |  ioctl + read()         |  Generic Netlink
-            v                         v
+            |  ioctl + read()  |  Generic Netlink  |  configfs
+            v                  v                    v
     +------------------------------------------------------+
     |              sparklink_core (SCI)                     |
     |  misc device - ioctl dispatch - event queue - debugfs |
-    |                    sparklink_genl.c (genetlink family) |
+    |  sparklink_genl.c (genetlink) - sle_configfs (config) |
     +--+------+------+------+------+------+------+------+--+
        |      |      |      |      |      |      |      |
        v      v      v      v      v      v      v      v
@@ -47,8 +47,8 @@ The subsystem is organized in a layered architecture:
     |  SleController trait - opcode/event model (10003)     |
     +------+-----------------------+-----------------------+
            |                       |
-    VirtualController        USB / UART / SPI driver
-       (loopback)              (future hardware)
+    VirtualController        sle_usb (USB driver)
+       (loopback)            hardware discovery
 
 Module descriptions:
 
@@ -99,11 +99,24 @@ Module descriptions:
   changes, power changes, hardware errors) to userspace via ``read()``
   on the device file descriptor.
 
+**sle_configfs** (``net/sparklink/sle_configfs.rs``)
+  Configfs-based runtime configuration interface. Registers the
+  ``sparklink`` subsystem under ``/sys/kernel/config/`` and exposes
+  tunable parameters (max connections, advertising interval, scan
+  window, power mode) as configfs attributes.
+
 **sle_dli** (``net/sparklink/sle_dli.rs``)
   Driver Layer Interface following T/XS 10003-2025. Defines the
   ``SleController`` trait that hardware drivers implement, with
   standard DLI opcode encoding (OGF/OCF), event codes, and feature
   bits from the 80-bit feature set.
+
+**sle_usb** (``net/sparklink/sle_usb.rs``)
+  USB transport implementation for SLE DLI controllers. Provides DLI
+  packet framing (command/event/data), ``UsbController`` implementing
+  the ``SleController`` trait, and a USB driver (``usb::Driver``) for
+  automatic hardware discovery of devices matching interface class
+  0xE0/0x01/0x05.
 
 **sparklink_virtual** (``drivers/sparklink/sparklink_virtual.rs``)
   Virtual controller driver for testing without physical hardware.
@@ -127,7 +140,9 @@ Source code layout
     ├── sle_power.rs             # Power management
     ├── sle_event.rs             # Event notification
     ├── sle_netlink.rs           # Netlink protocol types
-    └── sle_dli.rs               # Driver layer interface
+    ├── sle_configfs.rs          # Configfs runtime configuration
+    ├── sle_dli.rs               # Driver layer interface
+    └── sle_usb.rs               # USB transport + hardware discovery
 
     drivers/sparklink/
     ├── Kconfig
@@ -151,6 +166,7 @@ The following options must be enabled:
     CONFIG_SPARKLINK_GENL=y        # Generic Netlink control plane
     CONFIG_SPARKLINK_DRIVERS=y     # SparkLink driver framework
     CONFIG_SPARKLINK_VIRTUAL=y     # Virtual controller (testing)
+    CONFIG_CONFIGFS_FS=y           # configfs filesystem (runtime config)
 
 Find these options in ``make menuconfig`` at::
 
@@ -460,8 +476,8 @@ Event notification (0x70-0x71)
         uint64_t total_delivered;  /* delivered to userspace */
     };
 
-DLI controller info (0x80)
---------------------------
+DLI controller info (0x80 -- 0x81)
+----------------------------------
 
 .. list-table::
    :widths: 8 25 15 52
@@ -475,6 +491,10 @@ DLI controller info (0x80)
      - ``DLI_INFO``
      - Read
      - Return DLI controller information (SleDliInfo)
+   * - 0x81
+     - ``USB_DEV_COUNT``
+     - None (retval)
+     - Return number of currently attached USB SLE controllers
 
 ``SleDliInfo`` structure:
 
@@ -697,6 +717,99 @@ hardware drivers are registered. A separate ``sparklink_usb`` kernel
 module implementing ``usb::Driver`` will register the USB transport
 when hardware is available.
 
+USB hardware discovery
+----------------------
+
+The ``sle_usb.rs`` module registers a USB driver that automatically
+detects SLE controllers when plugged in. The driver matches USB
+interfaces with the following descriptor:
+
+.. code-block:: none
+
+    bInterfaceClass    = 0xE0  (Wireless Controller)
+    bInterfaceSubClass = 0x01  (RF Controller)
+    bInterfaceProtocol = 0x05  (SparkLink DLI)
+
+When a matching interface is found, the driver's ``probe()`` callback
+increments an atomic device counter. On ``disconnect()``, the counter
+is decremented. Userspace can query the current count via the
+``SL_IOCTL_USB_DEV_COUNT`` (0x81) ioctl.
+
+The USB driver is registered at module init time along with the main
+SparkLink subsystem. No separate module loading is required.
+
+Example:
+
+.. code-block:: shell
+
+    # Check if any USB SLE controllers are attached
+    sparklink_ctl dli usb-count
+    # Or via ioctl (returns count as ioctl retval)
+    #   ioctl(fd, SL_IOCTL_USB_DEV_COUNT)
+
+configfs runtime configuration
+==============================
+
+The SparkLink subsystem registers a configfs subsystem at
+``/sys/kernel/config/sparklink/`` for runtime parameter tuning.
+This requires ``CONFIG_CONFIGFS_FS=y``.
+
+Mounting configfs (if not already mounted):
+
+.. code-block:: shell
+
+    mount -t configfs none /sys/kernel/config
+
+Attributes
+----------
+
+.. list-table::
+   :widths: 20 10 15 55
+   :header-rows: 1
+
+   * - Name
+     - Mode
+     - Default
+     - Description
+   * - ``version``
+     - RO
+     - ``0.3.0``
+     - Protocol stack version string
+   * - ``max_connections``
+     - RW
+     - ``8``
+     - Maximum simultaneous SLE connections (valid range: 1--8)
+   * - ``adv_interval_ms``
+     - RW
+     - ``100``
+     - Default advertising interval in milliseconds (valid range: 20--10240)
+   * - ``scan_window_ms``
+     - RW
+     - ``200``
+     - Default scan window in milliseconds (valid range: 10--10240)
+   * - ``power_mode``
+     - RW
+     - ``active``
+     - Power management mode: ``active``, ``sniff``, or ``idle``
+       (also accepts numeric: 0, 1, 2)
+
+Usage:
+
+.. code-block:: shell
+
+    # Read current max connections
+    cat /sys/kernel/config/sparklink/max_connections
+    # Set advertising interval to 200ms
+    echo 200 > /sys/kernel/config/sparklink/adv_interval_ms
+    # Set power mode
+    echo sniff > /sys/kernel/config/sparklink/power_mode
+
+Implementation notes: configuration values are stored in module-level
+``AtomicU8``/``AtomicU16`` variables rather than per-subsystem instance
+data, due to a known address calculation issue in the kernel configfs
+Rust framework's ``get_group_data()`` for root group subsystems. This
+workaround is functionally equivalent and thread-safe.
+
 Generic Netlink interface
 =========================
 
@@ -778,7 +891,7 @@ sparklink_test
 
 Integration test program at
 ``tools/testing/selftests/sparklink/sparklink_test.c``.
-Covers all subsystem ioctl interfaces with 21 test cases:
+Covers all subsystem ioctl interfaces with 27 test cases:
 
 - Device management: count, info, register
 - Advertising: start/stop, duplicate detection
@@ -797,6 +910,9 @@ Covers all subsystem ioctl interfaces with 21 test cases:
 - Security: PSK pairing, encryption, SM4 roundtrip
 - SSAP: service registration, property read/write, notifications
 - Power management: state transitions, intervals, force-active
+- Configfs: mount, default readback, write/readback, boundary validation
+- USB hardware discovery: device count query
+- Generic Netlink: family lookup, GET_DEV_INFO, GET_VERSION
 - Error handling: unknown ioctl
 
 Build and run:
@@ -832,7 +948,7 @@ The script:
 1. Builds ``sparklink_test`` as a static binary
 2. Creates a minimal initramfs with busybox and the test binary
 3. Boots the kernel in QEMU with KVM (if available)
-4. Waits for ``/dev/sparklink`` and runs all 21 test cases
+4. Waits for ``/dev/sparklink`` and runs all 27 test cases
 5. Parses console output for OK/FAIL/WARN counts and overall result
 
 sparklink_ctl
@@ -992,8 +1108,10 @@ Limitations and future work
 
 Current limitations:
 
-1. **No physical hardware driver** -- Only the virtual loopback
-   controller is available; all testing is done in loopback mode.
+1. **No physical hardware driver** -- The USB driver framework is in
+   place and can automatically detect SLE controllers, but actual USB
+   I/O (bulk/interrupt transfers) returns ``ENODEV`` until a physical
+   device is available for integration testing.
 
 2. **C bridge for genetlink** -- The Generic Netlink family is
    registered via a C bridge (``sparklink_genl.c``) because upstream
@@ -1003,12 +1121,16 @@ Current limitations:
 3. **Pure Rust crypto** -- SM3/SM4 are implemented in pure Rust
    without kernel crypto API hardware acceleration.
 
+4. **configfs framework workaround** -- The configfs Rust framework
+   has a ``container_of`` address calculation issue for root group
+   subsystems. Configuration parameters use module-level atomics
+   instead of per-instance data as a workaround.
+
 Planned work:
 
-- USB DLI driver for physical SLE radio controllers
+- USB bulk/interrupt I/O integration for physical SLE radio controllers
 - Pure Rust genetlink registration when upstream Rust bindings mature
 - Kernel crypto API integration for hardware-accelerated SM3/SM4
-- sysfs/configfs runtime configuration interface
 
 References
 ==========

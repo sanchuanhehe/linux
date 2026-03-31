@@ -1232,6 +1232,8 @@ struct SparkLinkCtl {
     phy: Mutex<sle_phy::PhyConfig>,
     #[pin]
     event_poll: PollCondVar,
+    /// DLI controller for hardware interaction.
+    controller: sle_dli::VirtualController,
     dev: ARef<Device>,
 }
 
@@ -1245,6 +1247,8 @@ impl MiscDevice for SparkLinkCtl {
 
         let addr = [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01];
         let name = b"sparklink-ctl";
+        let controller = sle_dli::VirtualController::new(addr);
+        controller.open()?;
 
         KBox::try_pin_init(
             try_pin_init! {
@@ -1257,6 +1261,7 @@ impl MiscDevice for SparkLinkCtl {
                     events <- new_mutex!(EventQueue::new()),
                     phy <- new_mutex!(sle_phy::PhyConfig::default_config()),
                     event_poll <- new_poll_condvar!("sparklink_event"),
+                    controller: controller,
                     dev: dev,
                 }
             },
@@ -1886,7 +1891,8 @@ impl MiscDevice for SparkLinkCtl {
     }
 }
 
-#[pinned_drop]
+#[pinnedself.controller.close();
+        _drop]
 impl PinnedDrop for SparkLinkCtl {
     fn drop(self: Pin<&mut Self>) {
         dev_info!(self.dev, "sparklink: control interface closed\n");

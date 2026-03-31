@@ -1805,8 +1805,15 @@ static void test_dli_event_poll(int fd)
 	/* Need GNode role for START_ADV below */
 	set_role(fd, 1);
 
-	/* 1. Empty queue should return EAGAIN */
+	/* Drain any leftover events from previous tests */
 	struct sle_dli_event ev;
+	for (int i = 0; i < 64; i++) {
+		memset(&ev, 0, sizeof(ev));
+		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) < 0)
+			break;
+	}
+
+	/* 1. Empty queue should return EAGAIN */
 	memset(&ev, 0, sizeof(ev));
 	int ret = ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev);
 	if (ret < 0 && errno == EAGAIN)

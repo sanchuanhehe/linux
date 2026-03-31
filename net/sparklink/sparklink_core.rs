@@ -1891,8 +1891,7 @@ impl MiscDevice for SparkLinkCtl {
     }
 }
 
-#[pinnedself.controller.close();
-        _drop]
+#[pinned_drop]
 impl PinnedDrop for SparkLinkCtl {
     fn drop(self: Pin<&mut Self>) {
         dev_info!(self.dev, "sparklink: control interface closed\n");

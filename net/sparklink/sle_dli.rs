@@ -910,6 +910,60 @@ impl ControllerBackend {
     }
 }
 
+// -- High-level convenience wrappers ----------------------------------------
+// These encapsulate DLI parameter encoding so the core layer never builds
+// transport-level byte arrays directly (T/XS 10003-2025 section 8).
+
+impl ControllerBackend {
+    /// Enable or disable broadcasting (section 8.2.4).
+    pub fn enable_broadcast(&self, enable: bool) -> Result {
+        self.send_command(SleOpcode::EnableBroadcast, &[enable as u8])
+    }
+
+    /// Enable or disable scanning (section 8.3.3).
+    pub fn enable_scan(&self, enable: bool) -> Result {
+        self.send_command(SleOpcode::EnableScan, &[enable as u8])
+    }
+
+    /// Set the coding & modulation scheme (MCS index, section 8.5.3).
+    pub fn set_coding_modulation(&self, mcs_index: u8) -> Result {
+        self.send_command(SleOpcode::SetCodingModulation, &[mcs_index])
+    }
+
+    /// Set transmit power in dBm (section 8.5.5, sub-type 0x01).
+    pub fn set_tx_power(&self, dbm: i8) -> Result {
+        let p = [0x01, dbm as u8];
+        self.send_command(SleOpcode::SetPhyParam, &p)
+    }
+
+    /// Set channel bandwidth in MHz (section 8.5.5, sub-type 0x02).
+    pub fn set_bandwidth(&self, mhz: u8) -> Result {
+        let p = [0x02, mhz];
+        self.send_command(SleOpcode::SetPhyParam, &p)
+    }
+
+    /// Initiate a connection to a peer (section 8.4.1).
+    pub fn create_connection(&self, peer_addr: &[u8; 6]) -> Result {
+        self.send_command(SleOpcode::CreateConnection, peer_addr)
+    }
+
+    /// Disconnect a link identified by `handle` (section 8.4.2).
+    pub fn disconnect(&self, handle: u16) -> Result {
+        let h = handle.to_le_bytes();
+        self.send_command(SleOpcode::Disconnect, &h)
+    }
+
+    /// Request pairing with the given method byte (section 8.6.1).
+    pub fn request_pair(&self, method: u8) -> Result {
+        self.send_command(SleOpcode::RequestPair, &[method])
+    }
+
+    /// Start link encryption (section 8.6.4).
+    pub fn start_encrypt(&self) -> Result {
+        self.send_command(SleOpcode::StartEncrypt, &[])
+    }
+}
+
 impl SleController for ControllerBackend {
     fn info(&self) -> SleControllerInfo {
         match self {

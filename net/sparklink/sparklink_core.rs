@@ -1434,7 +1434,7 @@ impl MiscDevice for SparkLinkCtl {
                             pdu.crc
                         );
                     }
-                    let _ = s.controller.send_command(sle_dli::SleOpcode::EnableBroadcast, &[1]);
+                    let _ = s.controller.enable_broadcast(true);
                 }
                 Ok(0)
             }
@@ -1442,7 +1442,7 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.adv_scan.stop_advertising()?;
-                let _ = s.controller.send_command(sle_dli::SleOpcode::EnableBroadcast, &[0]);
+                let _ = s.controller.enable_broadcast(false);
                 Ok(0)
             }
             SL_IOCTL_START_SCAN => {
@@ -1456,14 +1456,14 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.adv_scan.start_scanning(params)?;
-                let _ = s.controller.send_command(sle_dli::SleOpcode::EnableScan, &[1]);
+                let _ = s.controller.enable_scan(true);
                 Ok(0)
             }
             SL_IOCTL_STOP_SCAN => {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.adv_scan.stop_scanning()?;
-                let _ = s.controller.send_command(sle_dli::SleOpcode::EnableScan, &[0]);
+                let _ = s.controller.enable_scan(false);
                 Ok(0)
             }
             SL_IOCTL_DEV_COUNT => {
@@ -1561,7 +1561,7 @@ impl MiscDevice for SparkLinkCtl {
                     let mut ss = SUBSYSTEM.lock();
                     let s = ss.as_mut().ok_or(ENODEV)?;
                     let handle = s.conn.connect(cp.peer_addr, role)?;
-                    let _ = s.controller.send_command(sle_dli::SleOpcode::CreateConnection, &cp.peer_addr);
+                    let _ = s.controller.create_connection(&cp.peer_addr);
                     handle
                 };
                 me.events.lock().push_conn_state(handle, 0, 1, cp.peer_addr, 0);
@@ -1578,8 +1578,7 @@ impl MiscDevice for SparkLinkCtl {
                     let peer_addr = s.conn.info(handle).map(|e| e.peer_addr).unwrap_or([0u8; 6]);
                     let old_state = s.conn.info(handle).map(|e| e.state as u8).unwrap_or(0);
                     s.conn.disconnect(handle)?;
-                    let h = handle.to_le_bytes();
-                    let _ = s.controller.send_command(sle_dli::SleOpcode::Disconnect, &h);
+                    let _ = s.controller.disconnect(handle);
                     (handle, peer_addr, old_state)
                 };
                 me.events.lock().push_conn_state(handle, old_state, 0, peer_addr, 0);
@@ -1738,7 +1737,7 @@ impl MiscDevice for SparkLinkCtl {
                     2 => s.security.pair_psk()?,
                     _ => return Err(EINVAL),
                 }
-                let _ = s.controller.send_command(sle_dli::SleOpcode::RequestPair, &[params.method]);
+                let _ = s.controller.request_pair(params.method);
                 Ok(0)
             }
             SL_IOCTL_SEC_INFO => {
@@ -1761,7 +1760,7 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.security.enable_encryption()?;
-                let _ = s.controller.send_command(sle_dli::SleOpcode::StartEncrypt, &[]);
+                let _ = s.controller.start_encrypt();
                 Ok(0)
             }
             SL_IOCTL_SEC_SM3_TEST => {
@@ -2068,7 +2067,7 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.phy.set_mcs(cmd.mcs_index)?;
-                let _ = s.controller.send_command(sle_dli::SleOpcode::SetCodingModulation, &[cmd.mcs_index]);
+                let _ = s.controller.set_coding_modulation(cmd.mcs_index);
                 Ok(0)
             }
             SL_IOCTL_PHY_SET_TXPOWER => {
@@ -2076,8 +2075,7 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.phy.set_tx_power(cmd.tx_power_dbm)?;
-                let p = [0x01, cmd.tx_power_dbm as u8];
-                let _ = s.controller.send_command(sle_dli::SleOpcode::SetPhyParam, &p);
+                let _ = s.controller.set_tx_power(cmd.tx_power_dbm);
                 Ok(0)
             }
             SL_IOCTL_PHY_MCS_SELECT => {
@@ -2108,8 +2106,7 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.phy.set_bandwidth(cmd.bandwidth_mhz)?;
-                let bw = [0x02, cmd.bandwidth_mhz];
-                let _ = s.controller.send_command(sle_dli::SleOpcode::SetPhyParam, &bw);
+                let _ = s.controller.set_bandwidth(cmd.bandwidth_mhz);
                 Ok(0)
             }
             _ => {

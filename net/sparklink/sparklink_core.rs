@@ -330,6 +330,9 @@ const SL_IOCTL_EVENT_STATS: u32 = _IOR::<SleEventStats>(SL_MAGIC, 0x71);
 /// Get DLI controller information.
 const SL_IOCTL_DLI_INFO: u32 = _IOR::<SleDliInfo>(SL_MAGIC, 0x80);
 
+/// Get USB SLE device count (hardware discovery).
+const SL_IOCTL_USB_DEV_COUNT: u32 = _IO(SL_MAGIC, 0x81);
+
 // ---------------------------------------------------------------------------
 // SparkLink address (6 bytes, same as SLE MAC layer identifier)
 // ---------------------------------------------------------------------------
@@ -974,6 +977,8 @@ struct SparkLinkModule {
     _genl: genl_bridge::GenlGuard,
     #[pin]
     _configfs: configfs::Subsystem<sle_configfs::SparkLinkConfig>,
+    #[pin]
+    _usb: sle_usb::UsbRegistration,
 }
 
 impl kernel::InPlaceModule for SparkLinkModule {
@@ -1060,6 +1065,7 @@ impl kernel::InPlaceModule for SparkLinkModule {
                     SparkLinkConfig::new(),
                 )
             },
+            _usb <- sle_usb::UsbRegistration::new(c"sparklink_usb", _module),
         })
     }
 }
@@ -1673,6 +1679,10 @@ impl MiscDevice for SparkLinkCtl {
                 };
                 write_user_struct(arg, &info)?;
                 Ok(0)
+            }
+            // --- USB device discovery ---
+            SL_IOCTL_USB_DEV_COUNT => {
+                Ok(sle_usb::usb_device_count() as isize)
             }
             _ => {
                 dev_err!(me.dev, "sparklink: unknown ioctl 0x{:x}\n", cmd);

@@ -96,6 +96,9 @@
 /* DLI controller info */
 #define SL_IOCTL_DLI_INFO        _IOR(SL_MAGIC, 0x80, struct sle_dli_info)
 
+/* USB hardware discovery */
+#define SL_IOCTL_USB_DEV_COUNT   _IO(SL_MAGIC, 0x81)
+
 /* ------------------------------------------------------------------ */
 /* Userspace data structures — must match repr(C) in sparklink_core   */
 /* ------------------------------------------------------------------ */
@@ -1484,6 +1487,24 @@ static void test_dli_info(int fd)
 		printf("  FAIL: max_connections=0\n");
 }
 
+static void test_usb_discovery(int fd)
+{
+	test_header("USB DLI Hardware Discovery");
+
+	int ret = ioctl(fd, SL_IOCTL_USB_DEV_COUNT, NULL);
+	if (ret < 0) {
+		printf("  FAIL: USB_DEV_COUNT ioctl: %s\n", strerror(errno));
+		return;
+	}
+	printf("  OK:   USB SLE device count = %d\n", ret);
+
+	/* In QEMU without real USB SLE hardware, count should be 0 */
+	if (ret == 0)
+		printf("  OK:   no USB SLE controllers (expected in QEMU)\n");
+	else
+		printf("  OK:   %d USB SLE controller(s) attached\n", ret);
+}
+
 static void test_poll_epoll(int fd)
 {
 	test_header("poll/epoll event notification");
@@ -2122,6 +2143,7 @@ int main(void)
 	test_event_notification(fd);
 	test_event_stats(fd);
 	test_dli_info(fd);
+	test_usb_discovery(fd);
 	test_poll_epoll(fd);
 	test_ring_buffer_stress(fd);
 	test_multi_conn_concurrent(fd);

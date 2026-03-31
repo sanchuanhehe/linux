@@ -23,6 +23,10 @@
 
 use kernel::prelude::*;
 use kernel::alloc::KVec;
+use kernel::device;
+use kernel::usb;
+
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::sle_dli::{
     DliPacketType, SleBus, SleController, SleControllerInfo, SleEvent, SleFeature,
@@ -523,3 +527,62 @@ impl SleController for UsbController {
         self.send_command(SleOpcode::Reset, &[])
     }
 }
+
+// ---------------------------------------------------------------------------
+// USB driver integration — hardware discovery
+// ---------------------------------------------------------------------------
+
+/// Counter for discovered USB SLE devices.
+static USB_DEV_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// Returns the number of currently attached USB SLE controllers.
+pub fn usb_device_count() -> u32 {
+    USB_DEV_COUNT.load(Ordering::Relaxed)
+}
+
+kernel::usb_device_table!(
+    SLE_USB_IDS,
+    MODULE_SLE_USB_TABLE,
+    <SleUsbDriver as usb::Driver>::IdInfo,
+    [
+        // Match by interface class/subclass/protocol:
+        //   Wireless Controller (0xE0) / RF Controller (0x01) / SparkLink DLI (0x05)
+        (
+            usb::DeviceId::from_interface_info(
+                SLE_USB_CLASS,
+                SLE_USB_SUBCLASS,
+                SLE_USB_PROTOCOL,
+            ),
+            (),
+        ),
+    ]
+);
+
+/// Per-device state stored as driver data during probe.
+#[pin_data]
+pub(crate) struct SleUsbDriver {
+    _dummy: (),
+}
+
+impl usb::Driver for SleUsbDriver {
+    type IdInfo = ();
+    const ID_TABLE: usb::IdTable<Self::IdInfo> = &SLE_USB_IDS;
+
+    fn probe(
+        _interface: &usb::Interface<device::Core>,
+        _id: &usb::DeviceId,
+        _info: &Self::IdInfo,
+    ) -> impl PinInit<Self, Error> {
+        pr_info!("sparklink-usb: SLE controller discovered\n");
+        USB_DEV_COUNT.fetch_add(1, Ordering::Relaxed);
+        try_pin_init!(Self { _dummy: () })
+    }
+
+    fn disconnect(_interface: &usb::Interface<device::Core>, _data: Pin<&Self>) {
+        pr_info!("sparklink-usb: SLE controller removed\n");
+        USB_DEV_COUNT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Type alias for USB driver registration used by the core module.
+pub(crate) type UsbRegistration = kernel::driver::Registration<usb::Adapter<SleUsbDriver>>;

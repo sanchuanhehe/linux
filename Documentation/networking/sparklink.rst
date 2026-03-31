@@ -30,11 +30,12 @@ The subsystem is organized in a layered architecture:
     |                    USER SPACE                         |
     |   sparklink_ctl / sparklink_test / custom app         |
     +------------------------------------------------------+
-                    |  ioctl + read()
-                    v
+            |  ioctl + read()         |  Generic Netlink
+            v                         v
     +------------------------------------------------------+
     |              sparklink_core (SCI)                     |
     |  misc device - ioctl dispatch - event queue - debugfs |
+    |                    sparklink_genl.c (genetlink family) |
     +--+------+------+------+------+------+------+------+--+
        |      |      |      |      |      |      |      |
        v      v      v      v      v      v      v      v
@@ -116,6 +117,7 @@ Source code layout
     ├── Kconfig                  # Subsystem Kconfig
     ├── Makefile                 # Build rules
     ├── sparklink_core.rs        # Core module
+    ├── sparklink_genl.c         # Generic Netlink C bridge
     ├── sle_pdu.rs               # Frame codec
     ├── sle_adv.rs               # Advertising/scanning
     ├── sle_conn.rs              # Multi-connection manager
@@ -124,6 +126,7 @@ Source code layout
     ├── sle_ssap.rs              # Service access protocol
     ├── sle_power.rs             # Power management
     ├── sle_event.rs             # Event notification
+    ├── sle_netlink.rs           # Netlink protocol types
     └── sle_dli.rs               # Driver layer interface
 
     drivers/sparklink/
@@ -145,6 +148,7 @@ The following options must be enabled:
 
     CONFIG_RUST=y                  # Rust language support
     CONFIG_SPARKLINK=y             # SparkLink core protocol stack
+    CONFIG_SPARKLINK_GENL=y        # Generic Netlink control plane
     CONFIG_SPARKLINK_DRIVERS=y     # SparkLink driver framework
     CONFIG_SPARKLINK_VIRTUAL=y     # Virtual controller (testing)
 
@@ -339,6 +343,14 @@ Security (0x40 -- 0x46)
      - ``SEC_SM4_DEC_TEST``
      - Write/Read (SleConnData)
      - Decrypt data in-place with SM4-CTR
+   * - 0x47
+     - ``SEC_SM4_BLOCK_TEST``
+     - Write/Read (SleSm4BlockTest)
+     - Single-block SM4 encrypt/decrypt test (GB/T 32907-2016 A.1)
+   * - 0x48
+     - ``SEC_HMAC_TEST``
+     - Write/Read (SleHmacTest)
+     - HMAC-SM3 computation and verification
 
 SSAP service layer (0x50 -- 0x56)
 ---------------------------------
@@ -688,29 +700,57 @@ when hardware is available.
 Generic Netlink interface
 =========================
 
-The SparkLink subsystem defines a Generic Netlink family
+The SparkLink subsystem registers a Generic Netlink family
 ``"sparklink"`` (version 1) for structured kernel-userspace
 communication as an alternative to the ioctl interface.
 
+This is implemented via a C bridge (``sparklink_genl.c``) because
+the kernel Rust subsystem does not yet provide genetlink bindings.
+The C code handles family registration, command dispatch, and event
+multicast, while calling ``#[no_mangle]`` Rust FFI exports for data
+queries. Rust calls back into C for event broadcasting and
+registration lifecycle management via an RAII ``GenlGuard`` wrapper.
+
+Enable with ``CONFIG_SPARKLINK_GENL=y``.
+
 Protocol definitions are in ``include/uapi/linux/sparklink.h``.
 
-The netlink interface provides 28 commands covering all subsystem
-operations (device management, advertising, scanning, connections,
-security, SSAP, power management, DLI) with typed TLV attributes.
+Commands
+--------
 
-A multicast group ``"events"`` delivers async event notifications
-to subscribed userspace listeners via ``SPARKLINK_CMD_EVENT``.
+.. list-table::
+   :widths: 30 70
+   :header-rows: 1
 
-The ``sle_netlink.rs`` module provides:
+   * - Command
+     - Description
+   * - ``SPARKLINK_CMD_GET_DEV_INFO``
+     - Returns the number of currently registered SparkLink devices
+       via the ``SPARKLINK_ATTR_DEV_COUNT`` attribute.
+   * - ``SPARKLINK_CMD_GET_VERSION``
+     - Returns the protocol stack version (``SPARKLINK_ATTR_PROTO_VERSION``)
+       and the genetlink interface version (``SPARKLINK_ATTR_GENL_VERSION``).
+   * - ``SPARKLINK_CMD_EVENT``
+     - Multicast event notification sent to the ``"events"`` group
+       carrying ``SPARKLINK_ATTR_EVENT_TYPE``, optional
+       ``SPARKLINK_ATTR_HANDLE``, ``SPARKLINK_ATTR_ADDR``, and
+       ``SPARKLINK_ATTR_EVENT_PAYLOAD``.
+
+Multicast groups
+----------------
+
+The ``"events"`` multicast group delivers async event notifications
+to subscribed userspace listeners (connection state changes,
+advertising reports, security events, etc.).
+
+Rust integration
+----------------
+
+The ``sle_netlink.rs`` module provides complementary protocol types:
 
 - Command/attribute enumerations (``NlCmd``, ``NlAttr``)
 - Attribute TLV builder (``NlAttrBuilder``) for constructing messages
 - Attribute TLV parser (``parse_attrs()``) with type-safe extractors
-
-Full genetlink family registration requires kernel Rust genetlink
-bindings (``genl_register_family()``) which are not yet available.
-The current implementation provides protocol types and
-serialization ready for integration when bindings are added.
 
 debugfs interface
 =================
@@ -955,9 +995,10 @@ Current limitations:
 1. **No physical hardware driver** -- Only the virtual loopback
    controller is available; all testing is done in loopback mode.
 
-2. **No Generic Netlink interface** -- Kernel Rust does not yet
-   provide upstream Generic Netlink bindings; the control plane
-   uses ioctl + CLI tools as an interim solution.
+2. **C bridge for genetlink** -- The Generic Netlink family is
+   registered via a C bridge (``sparklink_genl.c``) because upstream
+   Rust genetlink bindings are not yet available. When they mature,
+   the bridge can be replaced with pure Rust registration.
 
 3. **Pure Rust crypto** -- SM3/SM4 are implemented in pure Rust
    without kernel crypto API hardware acceleration.
@@ -965,7 +1006,7 @@ Current limitations:
 Planned work:
 
 - USB DLI driver for physical SLE radio controllers
-- Generic Netlink control plane migration when Rust bindings mature
+- Pure Rust genetlink registration when upstream Rust bindings mature
 - Kernel crypto API integration for hardware-accelerated SM3/SM4
 - sysfs/configfs runtime configuration interface
 

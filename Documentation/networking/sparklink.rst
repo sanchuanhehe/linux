@@ -91,8 +91,10 @@ Module descriptions:
 
 **sle_ssap** (``net/sparklink/sle_ssap.rs``)
   SSAP (SLE Service Access Profile) layer, functionally equivalent to
-  Bluetooth GATT. Implements service registration, property read/write,
-  notifications, and service discovery per T/XS 20001-2025 section 7.4.
+  Bluetooth GATT. Implements property read/write, notifications, and
+  service discovery per T/XS 20001-2025 section 7.4.  Currently only
+  the built-in Device Information Service is registered; dynamic
+  service registration from userspace is not yet implemented.
 
 **sle_power** (``net/sparklink/sle_power.rs``)
   Power management module with automatic state transitions
@@ -115,7 +117,11 @@ Module descriptions:
   Driver Layer Interface following T/XS 10003-2025. Defines the
   ``SleController`` trait that hardware drivers implement, with
   standard DLI opcode encoding (OGF/OCF), event codes, and feature
-  bits from the 80-bit feature set.
+  bits from the 80-bit feature set.  ``ControllerBackend`` dispatches
+  to transport-specific implementations via enum match, and provides
+  convenience methods (``enable_broadcast``, ``set_tx_power``,
+  ``create_connection``, etc.) that encapsulate byte-level parameter
+  encoding so the core layer never constructs DLI payloads directly.
 
 **sle_phy** (``net/sparklink/sle_phy.rs``)
   PHY layer parameter management following T/XS 10002-2025. Includes
@@ -1555,15 +1561,18 @@ with kernel contexts where dynamic allocation is expensive or forbidden.
 The trade-off is that every new transport requires adding a variant to
 this enum, but transport types change infrequently.
 
-**Interior mutability with Mutex.**
-All mutable protocol state (``AdvScanInner``, ``ConnManager``,
-``SecurityInner``, ``SsapInner``, ``PowerInner``, ``EventQueue``,
-``PhyConfig``, ``ControllerBackend``) is held behind kernel ``Mutex``
-inside ``SparkLinkCtl``.  This is the standard pattern for Linux kernel
-Rust code where the ``MiscDevice`` framework delivers shared references
-(``Pin<&SparkLinkCtl>``) to multiple concurrent ioctl callers.
+**Global shared subsystem with ``global_lock!``.**
+All mutable protocol state (``ControllerBackend``, ``ConnManager``,
+``AdvScanInner``, ``SecurityInner``, ``SsapInner``, ``PowerInner``,
+``PhyConfig``) is held in a single ``SubsystemShared`` struct behind a
+global ``Mutex`` created via the kernel's ``global_lock!`` macro.
+The first ``open()`` lazily initialises this shared state; the last
+``close()`` tears it down.  A global ``Atomic<u32>`` tracks open fd
+count.  Per-fd state is limited to ``EventQueue`` and ``event_poll``.
+This avoids isolated per-fd protocol stacks and ensures all fds share
+the same radio controller, connection table, and security context.
 The per-backend ``Cell``/``RefCell`` fields (event ring buffer, opened
-flag) are sound only because the enclosing Mutex serialises access.
+flag) are sound because the enclosing global Mutex serialises access.
 
 **Three-way control plane.**
 Ioctl is the primary interface, mapping 1:1 to protocol operations.
@@ -1585,9 +1594,10 @@ the module self-contained.  Test vectors validate conformance to GB/T
 32905-2016 and GB/T 32907-2016.
 
 **Bounded resource limits.**
-Connections are capped at ``MAX_CONNECTIONS = 8``.  Event queue depth is
-finite with oldest-event eviction.  Scan results are capped at 64 with
-FIFO replacement.  No data structure in the module grows without bound.
+Connections are capped at ``MAX_CONNECTIONS`` (default 8, overridable
+via configfs ``max_connections``).  Event queue depth is finite with
+oldest-event eviction.  Scan results are capped at 64 with FIFO
+replacement.  No data structure in the module grows without bound.
 
 Identified risks and mitigations
 --------------------------------
@@ -1611,10 +1621,11 @@ Identified risks and mitigations
    effect only on the next ``open()``.  This is intentional to avoid
    mid-session transport disruption.
 
-4. **SSAP service registration.**  Only one built-in demonstration
-   service exists.  Dynamic service registration from userspace would
-   require a new ioctl or Netlink command set.  The framework supports
-   this but the API surface is not yet defined.
+4. **SSAP service registration.**  Only the built-in Device Information
+   Service exists.  Dynamic service registration from userspace is not
+   yet implemented; it would require a new ioctl or Netlink command set.
+   The internal ``SsapInner`` struct supports multiple services but the
+   userspace API surface is not yet defined.
 
 Code statistics
 ---------------
@@ -1623,8 +1634,8 @@ Code statistics
 
     Component                  Lines
     ─────────────────────────  ─────
-    sparklink_core.rs           ~2040
-    sle_dli.rs                   ~980
+    sparklink_core.rs           ~2100
+    sle_dli.rs                  ~1020
     sle_ssap.rs                  ~880
     sle_conn.rs                  ~850
     sle_usb.rs                   ~650

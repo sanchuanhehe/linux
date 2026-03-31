@@ -26,6 +26,7 @@ mod sle_event;
 mod sle_usb;
 mod sle_netlink;
 mod sle_configfs;
+mod sle_phy;
 
 use sle_dli::SleController;
 
@@ -332,6 +333,26 @@ const SL_IOCTL_DLI_INFO: u32 = _IOR::<SleDliInfo>(SL_MAGIC, 0x80);
 
 /// Get USB SLE device count (hardware discovery).
 const SL_IOCTL_USB_DEV_COUNT: u32 = _IO(SL_MAGIC, 0x81);
+
+// --- PHY layer ioctls ---
+
+/// Get PHY layer configuration.
+const SL_IOCTL_PHY_INFO: u32 = _IOR::<SlePhyInfo>(SL_MAGIC, 0x90);
+
+/// Set MCS index.
+const SL_IOCTL_PHY_SET_MCS: u32 = _IOW::<SlePhyMcsCmd>(SL_MAGIC, 0x91);
+
+/// Set TX power.
+const SL_IOCTL_PHY_SET_TXPOWER: u32 = _IOW::<SlePhyTxPowerCmd>(SL_MAGIC, 0x92);
+
+/// Select best MCS for given requirements.
+const SL_IOCTL_PHY_MCS_SELECT: u32 = _IOWR::<SlePhyMcsSelect>(SL_MAGIC, 0x93);
+
+/// Get frequency hopping next channel.
+const SL_IOCTL_PHY_HOP_NEXT: u32 = _IOR::<SlePhyHopInfo>(SL_MAGIC, 0x94);
+
+/// Set bandwidth.
+const SL_IOCTL_PHY_SET_BW: u32 = _IOW::<SlePhyBwCmd>(SL_MAGIC, 0x95);
 
 // ---------------------------------------------------------------------------
 // SparkLink address (6 bytes, same as SLE MAC layer identifier)
@@ -908,6 +929,113 @@ pub struct SleDliInfo {
 }
 
 // ---------------------------------------------------------------------------
+// PHY layer ioctl structures
+// ---------------------------------------------------------------------------
+
+/// PHY layer information returned to userspace.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SlePhyInfo {
+    /// Current MCS index (0-12).
+    pub mcs_index: u8,
+    /// Bandwidth in MHz (1, 2, or 4).
+    pub bandwidth_mhz: u8,
+    /// Pilot density (0=4:1, 1=8:1, 2=16:1, 3=none).
+    pub pilot_density: u8,
+    /// TX power in dBm (signed).
+    pub tx_power_dbm: i8,
+    /// MIMO mode (0=SISO, 1=SpatialMux2x2, ...).
+    pub mimo_mode: u8,
+    /// Number of TX antennas.
+    pub num_tx_ant: u8,
+    /// Number of RX antennas.
+    pub num_rx_ant: u8,
+    /// Whether OFDM is used for current MCS.
+    pub ofdm: u8,
+    /// Effective data rate in kbps.
+    pub data_rate_kbps: u32,
+    /// Current frequency hopping channel.
+    pub hop_channel: u8,
+    /// Hopping increment.
+    pub hop_increment: u8,
+    /// Number of used hopping channels.
+    pub hop_used_channels: u8,
+    _pad: u8,
+    /// Modulation type for current MCS.
+    pub modulation: u8,
+    /// Code rate numerator.
+    pub code_rate_num: u8,
+    /// Code rate denominator.
+    pub code_rate_den: u8,
+    _reserved: [u8; 5],
+}
+
+/// Set MCS index command.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SlePhyMcsCmd {
+    /// MCS index (0-12).
+    pub mcs_index: u8,
+    _reserved: [u8; 3],
+}
+
+/// Set TX power command.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SlePhyTxPowerCmd {
+    /// TX power in dBm.
+    pub tx_power_dbm: i8,
+    _reserved: [u8; 3],
+}
+
+/// MCS selection request/response.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SlePhyMcsSelect {
+    /// Input: minimum required data rate in kbps.
+    pub min_kbps: u32,
+    /// Output: effective data rate in kbps.
+    pub effective_kbps: u32,
+    /// Input: available SINR in dB x10 (signed).
+    pub sinr_db_x10: i16,
+    /// Input: bandwidth in MHz.
+    pub bandwidth_mhz: u8,
+    /// Output: selected MCS index.
+    pub selected_mcs: u8,
+}
+
+/// Frequency hopping channel info.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SlePhyHopInfo {
+    /// Channel index (0-78).
+    pub channel: u8,
+    _pad: u8,
+    /// RF frequency in MHz.
+    pub freq_mhz: u16,
+    /// Event counter after hop.
+    pub event_counter: u16,
+    _reserved: [u8; 2],
+}
+
+/// Set bandwidth command.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SlePhyBwCmd {
+    /// Bandwidth in MHz (1, 2, or 4).
+    pub bandwidth_mhz: u8,
+    _reserved: [u8; 3],
+}
+
+// SAFETY: All PHY ioctl structs are repr(C) with only primitive fields.
+unsafe impl FromBytes for SlePhyInfo {}
+unsafe impl FromBytes for SlePhyMcsCmd {}
+unsafe impl FromBytes for SlePhyTxPowerCmd {}
+unsafe impl FromBytes for SlePhyMcsSelect {}
+unsafe impl FromBytes for SlePhyHopInfo {}
+unsafe impl FromBytes for SlePhyBwCmd {}
+
+// ---------------------------------------------------------------------------
 // SCI bus types
 // ---------------------------------------------------------------------------
 
@@ -1099,6 +1227,8 @@ struct SparkLinkCtl {
     #[pin]
     events: Mutex<EventQueue>,
     #[pin]
+    phy: Mutex<sle_phy::PhyConfig>,
+    #[pin]
     event_poll: PollCondVar,
     dev: ARef<Device>,
 }
@@ -1123,6 +1253,7 @@ impl MiscDevice for SparkLinkCtl {
                     ssap <- new_mutex!(SsapInner::new()),
                     power <- new_mutex!(PowerInner::new()),
                     events <- new_mutex!(EventQueue::new()),
+                    phy <- new_mutex!(sle_phy::PhyConfig::default_config()),
                     event_poll <- new_poll_condvar!("sparklink_event"),
                     dev: dev,
                 }
@@ -1680,6 +1811,70 @@ impl MiscDevice for SparkLinkCtl {
             // --- USB device discovery ---
             SL_IOCTL_USB_DEV_COUNT => {
                 Ok(sle_usb::usb_device_count() as isize)
+            }
+            // --- PHY layer ---
+            SL_IOCTL_PHY_INFO => {
+                let guard = me.phy.lock();
+                let mcs = sle_phy::mcs_lookup(guard.mcs_index);
+                let info = SlePhyInfo {
+                    mcs_index: guard.mcs_index,
+                    bandwidth_mhz: guard.bandwidth_mhz,
+                    pilot_density: guard.pilot_density,
+                    tx_power_dbm: guard.tx_power_dbm,
+                    mimo_mode: guard.antenna.mode as u8,
+                    num_tx_ant: guard.antenna.num_tx,
+                    num_rx_ant: guard.antenna.num_rx,
+                    ofdm: if mcs.map_or(false, |m| m.ofdm) { 1 } else { 0 },
+                    data_rate_kbps: guard.effective_data_rate_kbps(),
+                    hop_channel: guard.hopping.last_channel,
+                    hop_increment: guard.hopping.hop_increment,
+                    hop_used_channels: guard.hopping.channel_map.used_count(),
+                    modulation: mcs.map_or(0, |m| m.modulation as u8),
+                    code_rate_num: mcs.map_or(0, |m| m.code_rate.num),
+                    code_rate_den: mcs.map_or(0, |m| m.code_rate.den),
+                    ..Default::default()
+                };
+                write_user_struct(arg, &info)?;
+                Ok(0)
+            }
+            SL_IOCTL_PHY_SET_MCS => {
+                let cmd: SlePhyMcsCmd = read_user_struct(arg)?;
+                let mut guard = me.phy.lock();
+                guard.set_mcs(cmd.mcs_index)?;
+                Ok(0)
+            }
+            SL_IOCTL_PHY_SET_TXPOWER => {
+                let cmd: SlePhyTxPowerCmd = read_user_struct(arg)?;
+                let mut guard = me.phy.lock();
+                guard.set_tx_power(cmd.tx_power_dbm)?;
+                Ok(0)
+            }
+            SL_IOCTL_PHY_MCS_SELECT => {
+                let mut sel: SlePhyMcsSelect = read_user_struct(arg)?;
+                let best = sle_phy::mcs_select(sel.min_kbps, sel.bandwidth_mhz, sel.sinr_db_x10);
+                sel.selected_mcs = best;
+                sel.effective_kbps = sle_phy::data_rate_kbps(best, sel.bandwidth_mhz)
+                    .unwrap_or(0);
+                write_user_struct(arg, &sel)?;
+                Ok(0)
+            }
+            SL_IOCTL_PHY_HOP_NEXT => {
+                let mut guard = me.phy.lock();
+                let ch = guard.hopping.next_channel();
+                let info = SlePhyHopInfo {
+                    channel: ch,
+                    freq_mhz: sle_phy::HoppingState::channel_to_freq(ch),
+                    event_counter: guard.hopping.event_counter,
+                    ..Default::default()
+                };
+                write_user_struct(arg, &info)?;
+                Ok(0)
+            }
+            SL_IOCTL_PHY_SET_BW => {
+                let cmd: SlePhyBwCmd = read_user_struct(arg)?;
+                let mut guard = me.phy.lock();
+                guard.set_bandwidth(cmd.bandwidth_mhz)?;
+                Ok(0)
             }
             _ => {
                 dev_err!(me.dev, "sparklink: unknown ioctl 0x{:x}\n", cmd);

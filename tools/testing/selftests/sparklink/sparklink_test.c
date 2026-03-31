@@ -99,6 +99,14 @@
 /* USB hardware discovery */
 #define SL_IOCTL_USB_DEV_COUNT   _IO(SL_MAGIC, 0x81)
 
+/* PHY layer */
+#define SL_IOCTL_PHY_INFO        _IOR(SL_MAGIC, 0x90, struct sle_phy_info)
+#define SL_IOCTL_PHY_SET_MCS     _IOW(SL_MAGIC, 0x91, struct sle_phy_mcs_cmd)
+#define SL_IOCTL_PHY_SET_TXPOWER _IOW(SL_MAGIC, 0x92, struct sle_phy_txpower_cmd)
+#define SL_IOCTL_PHY_MCS_SELECT  _IOWR(SL_MAGIC, 0x93, struct sle_phy_mcs_select)
+#define SL_IOCTL_PHY_HOP_NEXT   _IOR(SL_MAGIC, 0x94, struct sle_phy_hop_info)
+#define SL_IOCTL_PHY_SET_BW      _IOW(SL_MAGIC, 0x95, struct sle_phy_bw_cmd)
+
 /* ------------------------------------------------------------------ */
 /* Userspace data structures — must match repr(C) in sparklink_core   */
 /* ------------------------------------------------------------------ */
@@ -329,6 +337,58 @@ struct sle_dli_info {
 	uint8_t  max_adv_sets;
 	uint8_t  name[32];
 	uint8_t  _reserved[14];
+} __attribute__((packed));
+
+/* PHY layer information */
+struct sle_phy_info {
+	uint8_t  mcs_index;
+	uint8_t  bandwidth_mhz;
+	uint8_t  pilot_density;
+	int8_t   tx_power_dbm;
+	uint8_t  mimo_mode;
+	uint8_t  num_tx_ant;
+	uint8_t  num_rx_ant;
+	uint8_t  ofdm;
+	uint32_t data_rate_kbps;
+	uint8_t  hop_channel;
+	uint8_t  hop_increment;
+	uint8_t  hop_used_channels;
+	uint8_t  _pad;
+	uint8_t  modulation;
+	uint8_t  code_rate_num;
+	uint8_t  code_rate_den;
+	uint8_t  _reserved[5];
+} __attribute__((packed));
+
+struct sle_phy_mcs_cmd {
+	uint8_t  mcs_index;
+	uint8_t  _reserved[3];
+} __attribute__((packed));
+
+struct sle_phy_txpower_cmd {
+	int8_t   tx_power_dbm;
+	uint8_t  _reserved[3];
+} __attribute__((packed));
+
+struct sle_phy_mcs_select {
+	uint32_t min_kbps;
+	uint32_t effective_kbps;
+	int16_t  sinr_db_x10;
+	uint8_t  bandwidth_mhz;
+	uint8_t  selected_mcs;
+} __attribute__((packed));
+
+struct sle_phy_hop_info {
+	uint8_t  channel;
+	uint8_t  _pad;
+	uint16_t freq_mhz;
+	uint16_t event_counter;
+	uint8_t  _reserved[2];
+} __attribute__((packed));
+
+struct sle_phy_bw_cmd {
+	uint8_t  bandwidth_mhz;
+	uint8_t  _reserved[3];
 } __attribute__((packed));
 
 /* ------------------------------------------------------------------ */
@@ -1935,6 +1995,165 @@ static int write_configfs_attr(const char *name, const char *val)
 	return n > 0 ? 0 : -1;
 }
 
+static void test_phy_layer(int fd)
+{
+	test_header("PHY layer: info, MCS, hopping");
+
+	/* 1. Get default PHY info */
+	struct sle_phy_info info;
+	memset(&info, 0, sizeof(info));
+	int ret = ioctl(fd, SL_IOCTL_PHY_INFO, &info);
+	check("PHY_INFO", ret);
+	/* Default: MCS 4, BW 1 MHz, TX power 10 dBm */
+	if (info.mcs_index == 4 && info.bandwidth_mhz == 1 &&
+	    info.tx_power_dbm == 10) {
+		printf("  OK:   PHY default params: MCS=%u BW=%u TX=%d dBm\n",
+		       info.mcs_index, info.bandwidth_mhz, info.tx_power_dbm);
+	} else {
+		printf("  FAIL: PHY default params: MCS=%u BW=%u TX=%d (expected 4/1/10)\n",
+		       info.mcs_index, info.bandwidth_mhz, info.tx_power_dbm);
+	}
+
+	/* Data rate should be 500 kbps for MCS4 @ 1 MHz BW */
+	if (info.data_rate_kbps == 500) {
+		printf("  OK:   PHY data rate: %u kbps\n", info.data_rate_kbps);
+	} else {
+		printf("  FAIL: PHY data rate: %u (expected 500)\n", info.data_rate_kbps);
+	}
+
+	/* Check hopping: 79 channels all used */
+	if (info.hop_used_channels == 79 && info.hop_increment == 7) {
+		printf("  OK:   PHY hopping: %u channels, increment=%u\n",
+		       info.hop_used_channels, info.hop_increment);
+	} else {
+		printf("  FAIL: PHY hopping: ch=%u inc=%u (expected 79/7)\n",
+		       info.hop_used_channels, info.hop_increment);
+	}
+
+	/* 2. Set MCS to 9 (16QAM 1/2 OFDM) */
+	struct sle_phy_mcs_cmd mcs_cmd = { .mcs_index = 9 };
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_MCS, &mcs_cmd);
+	check("PHY_SET_MCS(9)", ret);
+
+	/* Verify */
+	memset(&info, 0, sizeof(info));
+	ret = ioctl(fd, SL_IOCTL_PHY_INFO, &info);
+	check("PHY_INFO after MCS set", ret);
+	if (info.mcs_index == 9 && info.ofdm == 1) {
+		printf("  OK:   PHY MCS updated: index=%u ofdm=%u\n", info.mcs_index, info.ofdm);
+	} else {
+		printf("  FAIL: PHY MCS update: index=%u ofdm=%u (expected 9/1)\n",
+		       info.mcs_index, info.ofdm);
+	}
+
+	/* 3. Invalid MCS (13) should fail */
+	mcs_cmd.mcs_index = 13;
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_MCS, &mcs_cmd);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   PHY_SET_MCS(13) rejected: EINVAL\n");
+	} else {
+		printf("  FAIL: PHY_SET_MCS(13) should fail: ret=%d errno=%d\n", ret, errno);
+	}
+
+	/* 4. Set bandwidth to 2 MHz */
+	struct sle_phy_bw_cmd bw_cmd = { .bandwidth_mhz = 2 };
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_BW, &bw_cmd);
+	check("PHY_SET_BW(2)", ret);
+
+	memset(&info, 0, sizeof(info));
+	ioctl(fd, SL_IOCTL_PHY_INFO, &info);
+	/* MCS9 @ 2 MHz -> 2000 kbps */
+	if (info.bandwidth_mhz == 2 && info.data_rate_kbps == 2000) {
+		printf("  OK:   PHY BW=2MHz rate=%u kbps\n", info.data_rate_kbps);
+	} else {
+		printf("  FAIL: PHY BW=%u rate=%u (expected 2/2000)\n",
+		       info.bandwidth_mhz, info.data_rate_kbps);
+	}
+
+	/* 5. Invalid bandwidth (3) should fail */
+	bw_cmd.bandwidth_mhz = 3;
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_BW, &bw_cmd);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   PHY_SET_BW(3) rejected: EINVAL\n");
+	} else {
+		printf("  FAIL: PHY_SET_BW(3) should fail: ret=%d errno=%d\n", ret, errno);
+	}
+
+	/* 6. Set TX power */
+	struct sle_phy_txpower_cmd txp = { .tx_power_dbm = -10 };
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_TXPOWER, &txp);
+	check("PHY_SET_TXPOWER(-10)", ret);
+
+	memset(&info, 0, sizeof(info));
+	ioctl(fd, SL_IOCTL_PHY_INFO, &info);
+	if (info.tx_power_dbm == -10) {
+		printf("  OK:   PHY TX power: %d dBm\n", info.tx_power_dbm);
+	} else {
+		printf("  FAIL: PHY TX power: %d (expected -10)\n", info.tx_power_dbm);
+	}
+
+	/* Invalid TX power (+30) should fail */
+	txp.tx_power_dbm = 30;
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_TXPOWER, &txp);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   PHY_SET_TXPOWER(30) rejected: EINVAL\n");
+	} else {
+		printf("  FAIL: PHY_SET_TXPOWER(30) should fail: ret=%d errno=%d\n", ret, errno);
+	}
+
+	/* 7. MCS selection */
+	struct sle_phy_mcs_select sel;
+	memset(&sel, 0, sizeof(sel));
+	sel.min_kbps = 600;
+	sel.bandwidth_mhz = 1;
+	sel.sinr_db_x10 = 100; /* 10.0 dB */
+	ret = ioctl(fd, SL_IOCTL_PHY_MCS_SELECT, &sel);
+	check("PHY_MCS_SELECT", ret);
+	if (sel.selected_mcs <= 12 && sel.effective_kbps >= 600) {
+		printf("  OK:   PHY MCS select: mcs=%u rate=%u kbps (min 600)\n",
+		       sel.selected_mcs, sel.effective_kbps);
+	} else {
+		printf("  FAIL: PHY MCS select: mcs=%u rate=%u\n",
+		       sel.selected_mcs, sel.effective_kbps);
+	}
+
+	/* 8. Frequency hopping: advance channel */
+	struct sle_phy_hop_info hop;
+	memset(&hop, 0, sizeof(hop));
+	ret = ioctl(fd, SL_IOCTL_PHY_HOP_NEXT, &hop);
+	check("PHY_HOP_NEXT(1)", ret);
+	if (hop.channel < 79 && hop.freq_mhz >= 2402 && hop.freq_mhz <= 2480) {
+		printf("  OK:   PHY hop: ch=%u freq=%u MHz counter=%u\n",
+		       hop.channel, hop.freq_mhz, hop.event_counter);
+	} else {
+		printf("  FAIL: PHY hop: ch=%u freq=%u (invalid)\n", hop.channel, hop.freq_mhz);
+	}
+
+	/* Hop multiple times and verify channel changes */
+	uint8_t prev_ch = hop.channel;
+	int hops_changed = 0;
+	for (int i = 0; i < 10; i++) {
+		memset(&hop, 0, sizeof(hop));
+		ioctl(fd, SL_IOCTL_PHY_HOP_NEXT, &hop);
+		if (hop.channel != prev_ch)
+			hops_changed++;
+		prev_ch = hop.channel;
+	}
+	if (hops_changed > 0) {
+		printf("  OK:   PHY hop sequence: %d channel changes in 10 hops\n", hops_changed);
+	} else {
+		printf("  FAIL: PHY hop sequence: no channel changes in 10 hops\n");
+	}
+
+	/* Restore defaults for other tests */
+	mcs_cmd.mcs_index = 4;
+	ioctl(fd, SL_IOCTL_PHY_SET_MCS, &mcs_cmd);
+	bw_cmd.bandwidth_mhz = 1;
+	ioctl(fd, SL_IOCTL_PHY_SET_BW, &bw_cmd);
+	txp.tx_power_dbm = 10;
+	ioctl(fd, SL_IOCTL_PHY_SET_TXPOWER, &txp);
+}
+
 static void test_configfs(void)
 {
 	char buf[128];
@@ -2147,6 +2366,7 @@ int main(void)
 	test_poll_epoll(fd);
 	test_ring_buffer_stress(fd);
 	test_multi_conn_concurrent(fd);
+	test_phy_layer(fd);
 	test_configfs();
 	test_genetlink();
 

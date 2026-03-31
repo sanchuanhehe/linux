@@ -1290,9 +1290,19 @@ static void test_power_management(int fd)
 	}
 }
 
+static void drain_event_queue(int fd)
+{
+	struct sle_wire_event tmp;
+	while (read(fd, &tmp, sizeof(tmp)) > 0)
+		;
+}
+
 static void test_event_notification(int fd)
 {
 	test_header("Event notification: read() and EVENT_COUNT");
+
+	/* Drain leftover events from previous tests */
+	drain_event_queue(fd);
 
 	/* Step 1: Verify empty event queue */
 	int ret = ioctl(fd, SL_IOCTL_EVENT_COUNT, NULL);
@@ -1359,7 +1369,7 @@ static void test_event_notification(int fd)
 	/* Step 5: Read events via read() */
 	int total_read = 0;
 	int got_conn = 0, got_adv = 0;
-	while (total_read < 10) {
+	while (total_read < 128) {
 		memset(&evt, 0, sizeof(evt));
 		n = read(fd, &evt, sizeof(evt));
 		if (n < 0) {
@@ -1472,6 +1482,9 @@ static void test_dli_info(int fd)
 static void test_poll_epoll(int fd)
 {
 	test_header("poll/epoll event notification");
+
+	/* Drain leftover events from previous tests */
+	drain_event_queue(fd);
 
 	/* Step 1: poll on empty queue — should timeout immediately */
 	struct pollfd pfd = { .fd = fd, .events = POLLIN };
@@ -1760,7 +1773,7 @@ int main(void)
 	printf("SparkLink userspace test program\n");
 	printf("Device: %s\n", DEVICE);
 
-	int fd = open(DEVICE, O_RDWR);
+	int fd = open(DEVICE, O_RDWR | O_NONBLOCK);
 	if (fd < 0) {
 		fprintf(stderr, "Cannot open %s: %s\n", DEVICE, strerror(errno));
 		fprintf(stderr, "Make sure the sparklink module is loaded and "

@@ -1518,6 +1518,135 @@ Planned work:
 - Pure Rust genetlink registration when upstream Rust bindings mature
 - Kernel crypto API integration for hardware-accelerated SM3/SM4
 
+Architecture design review
+==========================
+
+Module dependency graph
+-----------------------
+
+.. code-block:: none
+
+    sparklink_core.rs (SCI entry, ioctl dispatch, MiscDevice)
+      ├── sle_dli.rs        SleController trait, opcodes, ControllerBackend
+      │     ├── sle_uart.rs     UartController (H4 framing)
+      │     ├── sle_spi.rs      SpiController (register I/O)
+      │     └── sle_usb.rs      UsbController (HID descriptor)
+      ├── sle_adv.rs        AdvScanInner, PDU advertising/scanning
+      ├── sle_conn.rs       ConnManager, DataRingBuffer, ARQ
+      ├── sle_crypto.rs     SM3/SM4 (pure Rust, no external deps)
+      ├── sle_security.rs   SecurityInner, pairing state machine
+      ├── sle_ssap.rs       Service framework (property/method/event)
+      ├── sle_power.rs      PowerInner, PM state machine
+      ├── sle_event.rs      EventQueue, typed events for userspace
+      ├── sle_phy.rs        MCS lookup, frequency hopping, MIMO
+      ├── sle_pdu.rs        PDU codec, CRC-12, advertising builder
+      ├── sle_netlink.rs    TLV encoding for Generic Netlink
+      ├── sle_configfs.rs   Runtime parameters via /sys/kernel/config/
+      └── sparklink_genl.c  C genetlink family (FFI bridge)
+
+Design decisions
+----------------
+
+**Static dispatch via enum instead of trait objects.**
+``ControllerBackend`` enumerates all transport backends (Virtual, UART,
+SPI) and dispatches ``SleController`` methods through ``match``.  This
+avoids heap-allocated ``dyn SleController`` and keeps the code compatible
+with kernel contexts where dynamic allocation is expensive or forbidden.
+The trade-off is that every new transport requires adding a variant to
+this enum, but transport types change infrequently.
+
+**Interior mutability with Mutex.**
+All mutable protocol state (``AdvScanInner``, ``ConnManager``,
+``SecurityInner``, ``SsapInner``, ``PowerInner``, ``EventQueue``,
+``PhyConfig``, ``ControllerBackend``) is held behind kernel ``Mutex``
+inside ``SparkLinkCtl``.  This is the standard pattern for Linux kernel
+Rust code where the ``MiscDevice`` framework delivers shared references
+(``Pin<&SparkLinkCtl>``) to multiple concurrent ioctl callers.
+The per-backend ``Cell``/``RefCell`` fields (event ring buffer, opened
+flag) are sound only because the enclosing Mutex serialises access.
+
+**Three-way control plane.**
+Ioctl is the primary interface, mapping 1:1 to protocol operations.
+Generic Netlink provides attribute-based access for structured tools and
+multicast event delivery.  ConfigFS allows persistent runtime tuning
+without opening the device node.  All three are optional in different
+build configurations.
+
+**Zero-copy connection buffer.**
+``DataRingBuffer`` in ``sle_conn.rs`` pre-allocates a single ``KVec``
+backing store with fixed slot metadata (64 slots, 255 bytes per message
+max).  This avoids per-message heap allocation under high data
+throughput and prevents kernel memory fragmentation.
+
+**Pure-Rust cryptography.**
+SM3 and SM4 are implemented without external C libraries.  This
+eliminates a dependency chain on the kernel crypto subsystem and keeps
+the module self-contained.  Test vectors validate conformance to GB/T
+32905-2016 and GB/T 32907-2016.
+
+**Bounded resource limits.**
+Connections are capped at ``MAX_CONNECTIONS = 8``.  Event queue depth is
+finite with oldest-event eviction.  Scan results are capped at 64 with
+FIFO replacement.  No data structure in the module grows without bound.
+
+Identified risks and mitigations
+--------------------------------
+
+1. **configfs static atomics.**  Because the kernel ``configfs.rs``
+   binding does not yet support ``container_of!()`` for data retrieval,
+   configfs attributes use global ``AtomicU8``/``AtomicU32`` statics.
+   When multiple SparkLink instances exist, they would share the same
+   configfs values.  Mitigation: awaiting upstream configfs API
+   improvement; current usage is single-instance.
+
+2. **Event ring buffer size.**  The 8-slot ring in each controller
+   backend can overflow under burst command traffic, silently dropping
+   events.  For the virtual loopback test path this is acceptable.
+   Real hardware drivers should implement flow control or larger
+   buffers.
+
+3. **No runtime transport hot-swap.**  The controller backend is
+   selected at ``open()`` based on the configfs ``controller_type``
+   value.  Changing the type while a file descriptor is open takes
+   effect only on the next ``open()``.  This is intentional to avoid
+   mid-session transport disruption.
+
+4. **SSAP service registration.**  Only one built-in demonstration
+   service exists.  Dynamic service registration from userspace would
+   require a new ioctl or Netlink command set.  The framework supports
+   this but the API surface is not yet defined.
+
+Code statistics
+---------------
+
+.. code-block:: none
+
+    Component                  Lines
+    ─────────────────────────  ─────
+    sparklink_core.rs           ~2040
+    sle_dli.rs                   ~980
+    sle_ssap.rs                  ~880
+    sle_conn.rs                  ~850
+    sle_usb.rs                   ~650
+    sle_uart.rs                  ~500
+    sle_phy.rs                   ~500
+    sle_crypto.rs                ~480
+    sle_spi.rs                   ~440
+    sle_pdu.rs                   ~400
+    sle_netlink.rs               ~360
+    sle_adv.rs                   ~380
+    sle_event.rs                 ~300
+    sparklink_genl.c             ~300
+    sle_configfs.rs              ~200
+    sle_power.rs                 ~220
+    sle_security.rs              ~200
+    ─────────────────────────  ─────
+    Kernel total                ~9680
+    Test + tools                ~3600
+    UAPI header                  ~254
+    Documentation               ~1700
+    Grand total                ~15234
+
 References
 ==========
 

@@ -434,6 +434,8 @@ pub struct ConnManager {
     connections: KVec<ConnEntry>,
     /// Next handle to allocate.
     next_handle: u16,
+    /// Runtime connection limit (from configfs or default).
+    max_connections: usize,
     /// Total connections created (lifetime counter).
     pub total_created: u64,
     /// Total connections completed (lifetime counter).
@@ -447,9 +449,15 @@ impl ConnManager {
             local_addr,
             connections: KVec::new(),
             next_handle: 1,
+            max_connections: MAX_CONNECTIONS,
             total_created: 0,
             total_completed: 0,
         }
+    }
+
+    /// Set the maximum number of concurrent connections (from configfs).
+    pub fn set_max_connections(&mut self, max: usize) {
+        self.max_connections = max.min(MAX_CONNECTIONS);
     }
 
     /// Allocate a handle and return it.
@@ -503,8 +511,8 @@ impl ConnManager {
     /// Allocates a new connection handle and transitions to Connecting.
     /// Returns the assigned handle on success.
     pub fn connect(&mut self, peer_addr: [u8; 6], role: GtRole) -> Result<u16> {
-        if self.connections.len() >= MAX_CONNECTIONS {
-            pr_err!("sparklink: max connections ({}) reached\n", MAX_CONNECTIONS);
+        if self.connections.len() >= self.max_connections {
+            pr_err!("sparklink: max connections ({}) reached\n", self.max_connections);
             return Err(EBUSY);
         }
         // Check for duplicate peer address among active connections

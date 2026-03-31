@@ -50,7 +50,7 @@ use kernel::{
         aref::ARef,
         atomic::Atomic,
         poll::{PollCondVar, PollTable},
-        Arc, Mutex,
+        Mutex,
     },
     transmute::FromBytes,
     uaccess::{UserPtr, UserSlice},
@@ -1155,15 +1155,37 @@ pub enum SciBus {
 }
 
 // ---------------------------------------------------------------------------
-// Global device registry (placeholder for future multi-device support)
+// Global shared subsystem state
 // ---------------------------------------------------------------------------
+// The SparkLink subsystem uses a single shared controller and protocol state
+// that is shared across all open file descriptors.  Each fd gets its own
+// event queue for per-listener event delivery, but the radio controller,
+// connection table, advertising state, PHY config, security context, SSAP
+// services, and power management are shared.
+//
+// This matches the hardware model: there is one physical radio, one set of
+// connections, one advertising state.  Multiple userspace processes opening
+// /dev/sparklink see the SAME radio and connection table.
 
-/// Global state: placeholder for future multi-device support.
-/// Multi-device registry will be integrated when the kernel MiscDevice API
-/// supports passing user data from module init to the open() callback.
-struct SparkLinkState {
-    #[allow(dead_code)]
-    next_index: u16,
+kernel::sync::global_lock! {
+    // SAFETY: Initialized in module_init before any MiscDevice open() call.
+    unsafe(uninit) static SUBSYSTEM: Mutex<Option<SubsystemShared>> = None;
+}
+
+/// Number of currently open file descriptors.
+static OPEN_FD_COUNT: kernel::sync::atomic::Atomic<u32> =
+    kernel::sync::atomic::Atomic::new(0);
+
+/// Shared state across all open file descriptors.
+/// Protected by the SUBSYSTEM global mutex.
+struct SubsystemShared {
+    controller: sle_dli::ControllerBackend,
+    conn: ConnManager,
+    adv_scan: AdvScanInner,
+    security: SecurityInner,
+    ssap: SsapInner,
+    power: PowerInner,
+    phy: sle_phy::PhyConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -1182,8 +1204,6 @@ module! {
 struct SparkLinkModule {
     #[pin]
     _miscdev: MiscDeviceRegistration<SparkLinkCtl>,
-    #[pin]
-    state: Arc<Mutex<SparkLinkState>>,
     // debugfs: /sys/kernel/debug/sparklink/
     _debugfs: Dir,
     #[pin]
@@ -1213,12 +1233,8 @@ impl kernel::InPlaceModule for SparkLinkModule {
     fn init(_module: &'static ThisModule) -> impl PinInit<Self, Error> {
         pr_info!("sparklink: initialising SparkLink subsystem v0.3.0\n");
 
-        let state = Arc::pin_init(
-            new_mutex!(SparkLinkState {
-                next_index: 0,
-            }),
-            GFP_KERNEL,
-        );
+        // SAFETY: Called exactly once during module init.
+        unsafe { SUBSYSTEM.init() };
 
         let options = MiscDeviceOptions {
             name: c"sparklink",
@@ -1228,7 +1244,6 @@ impl kernel::InPlaceModule for SparkLinkModule {
 
         try_pin_init!(Self {
             _miscdev <- MiscDeviceRegistration::register(options),
-            state <- state,
             _version <- debugfs.read_only_file(
                 c"version",
                 CString::try_from_fmt(fmt!("sparklink 0.3.0"))?,
@@ -1300,40 +1315,18 @@ impl kernel::InPlaceModule for SparkLinkModule {
 }
 
 // ---------------------------------------------------------------------------
-// Global state accessor — store a clone of the Arc in each open file handle
-// ---------------------------------------------------------------------------
-// The MiscDevice trait doesn't give us access to SparkLinkModule directly,
-// so we store the global state Arc inside each SparkLinkCtl instance.
-// For now, since MiscDeviceRegistration doesn't carry user data to open(),
-// we use a simpler approach: each SparkLinkCtl gets its own per-fd state.
-// Full global registry integration will follow when the kernel API supports
-// registering user data on MiscDeviceRegistration.
-
-// ---------------------------------------------------------------------------
 // Misc device implementation: /dev/sparklink control interface
 // ---------------------------------------------------------------------------
+// Each open fd gets its own event queue for per-listener event delivery.
+// All protocol state (controller, connections, advertising, security, SSAP,
+// power, PHY) is shared across fds via the SUBSYSTEM global mutex.
 
 #[pin_data(PinnedDrop)]
 struct SparkLinkCtl {
     #[pin]
-    adv_scan: Mutex<AdvScanInner>,
-    #[pin]
-    conn: Mutex<ConnManager>,
-    #[pin]
-    security: Mutex<SecurityInner>,
-    #[pin]
-    ssap: Mutex<SsapInner>,
-    #[pin]
-    power: Mutex<PowerInner>,
-    #[pin]
     events: Mutex<EventQueue>,
     #[pin]
-    phy: Mutex<sle_phy::PhyConfig>,
-    #[pin]
     event_poll: PollCondVar,
-    /// DLI controller for hardware interaction.
-    #[pin]
-    controller: Mutex<sle_dli::ControllerBackend>,
     dev: ARef<Device>,
 }
 
@@ -1345,29 +1338,42 @@ impl MiscDevice for SparkLinkCtl {
         let dev = ARef::from(misc.device());
         dev_info!(dev, "sparklink: control interface opened\n");
 
-        let addr = [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01];
-        let name = b"sparklink-ctl";
-        let controller = match sle_configfs::controller_type() {
-            1 => sle_dli::ControllerBackend::new_uart(
-                addr, sle_uart::UartConfig::default()),
-            2 => sle_dli::ControllerBackend::new_spi(
-                addr, sle_spi::SpiConfig::default()),
-            _ => sle_dli::ControllerBackend::new_virtual(addr),
-        };
-        controller.open()?;
+        // Lazily initialise the shared subsystem on first open.
+        {
+            let mut ss = SUBSYSTEM.lock();
+            if ss.is_none() {
+                let addr = [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01];
+                let controller = match sle_configfs::controller_type() {
+                    1 => sle_dli::ControllerBackend::new_uart(
+                        addr, sle_uart::UartConfig::default()),
+                    2 => sle_dli::ControllerBackend::new_spi(
+                        addr, sle_spi::SpiConfig::default()),
+                    _ => sle_dli::ControllerBackend::new_virtual(addr),
+                };
+                controller.open()?;
+
+                let mut conn = ConnManager::new(addr);
+                conn.set_max_connections(sle_configfs::max_connections() as usize);
+
+                *ss = Some(SubsystemShared {
+                    controller,
+                    conn,
+                    adv_scan: AdvScanInner::new(addr, b"sparklink-ctl"),
+                    security: SecurityInner::new(),
+                    ssap: SsapInner::new(),
+                    power: PowerInner::new(),
+                    phy: sle_phy::PhyConfig::default_config(),
+                });
+                pr_info!("sparklink: shared subsystem initialised\n");
+            }
+        }
+        OPEN_FD_COUNT.fetch_add(1u32, Relaxed);
 
         KBox::try_pin_init(
             try_pin_init! {
                 SparkLinkCtl {
-                    adv_scan <- new_mutex!(AdvScanInner::new(addr, name)),
-                    conn <- new_mutex!(ConnManager::new(addr)),
-                    security <- new_mutex!(SecurityInner::new()),
-                    ssap <- new_mutex!(SsapInner::new()),
-                    power <- new_mutex!(PowerInner::new()),
                     events <- new_mutex!(EventQueue::new()),
-                    phy <- new_mutex!(sle_phy::PhyConfig::default_config()),
                     event_poll <- new_poll_condvar!("sparklink_event"),
-                    controller <- new_mutex!(controller),
                     dev: dev,
                 }
             },
@@ -1412,29 +1418,31 @@ impl MiscDevice for SparkLinkCtl {
                 let uparams: SleAdvParams = read_user_struct(arg)?;
                 let params = AdvParams {
                     discovery_level: uparams.discovery_level,
-                    interval_slots: (uparams.interval_ms as u32) * 8, // ms to 125us slots
+                    interval_slots: (uparams.interval_ms as u32) * 8,
                     broadcast_type: sle_pdu::BroadcastType::AccessibleScannable,
                     tx_power: 0,
                 };
-                let mut guard = me.adv_scan.lock();
-                guard.start_advertising(params)?;
-                // Build and log the first PDU as a sanity check
-                if let Some(pdu) = guard.build_adv_pdu() {
-                    dev_info!(
-                        me.dev,
-                        "sparklink: ADV PDU built, {} bytes data, CRC=0x{:03x}\n",
-                        pdu.data_len,
-                        pdu.crc
-                    );
+                {
+                    let mut ss = SUBSYSTEM.lock();
+                    let s = ss.as_mut().ok_or(ENODEV)?;
+                    s.adv_scan.start_advertising(params)?;
+                    if let Some(pdu) = s.adv_scan.build_adv_pdu() {
+                        dev_info!(
+                            me.dev,
+                            "sparklink: ADV PDU built, {} bytes data, CRC=0x{:03x}\n",
+                            pdu.data_len,
+                            pdu.crc
+                        );
+                    }
+                    let _ = s.controller.send_command(sle_dli::SleOpcode::EnableBroadcast, &[1]);
                 }
-                drop(guard);
-                // Route through DLI controller
-                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::EnableBroadcast, &[1]);
                 Ok(0)
             }
             SL_IOCTL_STOP_ADV => {
-                me.adv_scan.lock().stop_advertising()?;
-                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::EnableBroadcast, &[0]);
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.adv_scan.stop_advertising()?;
+                let _ = s.controller.send_command(sle_dli::SleOpcode::EnableBroadcast, &[0]);
                 Ok(0)
             }
             SL_IOCTL_START_SCAN => {
@@ -1445,25 +1453,29 @@ impl MiscDevice for SparkLinkCtl {
                     filter_level: uparams.filter_discovery_level,
                     active: false,
                 };
-                me.adv_scan.lock().start_scanning(params)?;
-                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::EnableScan, &[1]);
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.adv_scan.start_scanning(params)?;
+                let _ = s.controller.send_command(sle_dli::SleOpcode::EnableScan, &[1]);
                 Ok(0)
             }
             SL_IOCTL_STOP_SCAN => {
-                me.adv_scan.lock().stop_scanning()?;
-                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::EnableScan, &[0]);
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.adv_scan.stop_scanning()?;
+                let _ = s.controller.send_command(sle_dli::SleOpcode::EnableScan, &[0]);
                 Ok(0)
             }
             SL_IOCTL_DEV_COUNT => {
-                // Per-fd design: each open fd has exactly one virtual controller.
                 Ok(1)
             }
             SL_IOCTL_DEV_INFO => {
-                let guard = me.adv_scan.lock();
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
                 // SAFETY: SciDevInfo is repr(C) with only primitive fields.
                 let mut info: SciDevInfo = unsafe { core::mem::zeroed() };
                 info.index = 0;
-                info.state = match (guard.is_advertising(), guard.is_scanning()) {
+                info.state = match (s.adv_scan.is_advertising(), s.adv_scan.is_scanning()) {
                     (true, _) => SciState::Advertising as u8,
                     (_, true) => SciState::Scanning as u8,
                     _ => SciState::Idle as u8,
@@ -1472,7 +1484,7 @@ impl MiscDevice for SparkLinkCtl {
                 info.addr = SleAddr { b: [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01] };
                 let name = b"sparklink-ctl";
                 info.name[..name.len()].copy_from_slice(name);
-                drop(guard);
+                drop(ss);
                 write_user_struct(arg, &info)?;
                 Ok(0)
             }
@@ -1494,7 +1506,6 @@ impl MiscDevice for SparkLinkCtl {
             SL_IOCTL_INJECT_ADV => {
                 let inject: SleInjectAdv = read_user_struct(arg)?;
 
-                // Build a fake AdvPdu from the injected data
                 let mut builder = sle_pdu::AdvDataBuilder::new();
                 let _ = builder.push_discovery_level(inject.discovery_level);
                 let _ = builder.push_sle_addr(&inject.addr);
@@ -1509,9 +1520,11 @@ impl MiscDevice for SparkLinkCtl {
                     &builder,
                 );
 
-                let mut guard = me.adv_scan.lock();
-                guard.process_adv_pdu(&pdu, inject.rssi)?;
-                drop(guard);
+                {
+                    let mut ss = SUBSYSTEM.lock();
+                    let s = ss.as_mut().ok_or(ENODEV)?;
+                    s.adv_scan.process_adv_pdu(&pdu, inject.rssi)?;
+                }
                 let name_len = (inject.name_len as usize).min(31);
                 me.events.lock().push_adv_report(
                     inject.addr,
@@ -1531,7 +1544,9 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             SL_IOCTL_SCAN_RESULT_COUNT => {
-                let count = me.adv_scan.lock().scan_result_count();
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let count = s.adv_scan.scan_result_count();
                 Ok(count as isize)
             }
             // --- Connection management ---
@@ -1542,32 +1557,42 @@ impl MiscDevice for SparkLinkCtl {
                 } else {
                     GtRole::TNode
                 };
-                let handle = me.conn.lock().connect(cp.peer_addr, role)?;
+                let handle = {
+                    let mut ss = SUBSYSTEM.lock();
+                    let s = ss.as_mut().ok_or(ENODEV)?;
+                    let handle = s.conn.connect(cp.peer_addr, role)?;
+                    let _ = s.controller.send_command(sle_dli::SleOpcode::CreateConnection, &cp.peer_addr);
+                    handle
+                };
                 me.events.lock().push_conn_state(handle, 0, 1, cp.peer_addr, 0);
                 me.event_poll.notify_all();
-                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::CreateConnection, &cp.peer_addr);
+                genl_bridge::notify_event(0x01, handle, &cp.peer_addr);
                 Ok(handle as isize)
             }
             SL_IOCTL_DISCONNECT => {
                 let handle: u16 = read_user_struct(arg)?;
-                let mut guard = me.conn.lock();
-                let handle = guard.resolve_handle(handle)?;
-                let peer_addr = guard.info(handle).map(|e| e.peer_addr).unwrap_or([0u8; 6]);
-                let old_state = guard.info(handle).map(|e| e.state as u8).unwrap_or(0);
-                guard.disconnect(handle)?;
-                drop(guard);
+                let (handle, peer_addr, old_state) = {
+                    let mut ss = SUBSYSTEM.lock();
+                    let s = ss.as_mut().ok_or(ENODEV)?;
+                    let handle = s.conn.resolve_handle(handle)?;
+                    let peer_addr = s.conn.info(handle).map(|e| e.peer_addr).unwrap_or([0u8; 6]);
+                    let old_state = s.conn.info(handle).map(|e| e.state as u8).unwrap_or(0);
+                    s.conn.disconnect(handle)?;
+                    let h = handle.to_le_bytes();
+                    let _ = s.controller.send_command(sle_dli::SleOpcode::Disconnect, &h);
+                    (handle, peer_addr, old_state)
+                };
                 me.events.lock().push_conn_state(handle, old_state, 0, peer_addr, 0);
                 me.event_poll.notify_all();
-                let h = handle.to_le_bytes();
-                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::Disconnect, &h);
+                genl_bridge::notify_event(0x01, handle, &peer_addr);
                 Ok(0)
             }
             SL_IOCTL_CONN_INFO => {
                 let req: SleConnInfo = read_user_struct(arg)?;
-                let guard = me.conn.lock();
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
                 let handle = if req.handle == 0 {
-                    // Legacy: find first active
-                    let (handles, count) = guard.active_handles();
+                    let (handles, count) = s.conn.active_handles();
                     if count == 0 {
                         return Err(EPIPE);
                     }
@@ -1575,7 +1600,7 @@ impl MiscDevice for SparkLinkCtl {
                 } else {
                     req.handle
                 };
-                let entry = guard.info(handle)?;
+                let entry = s.conn.info(handle)?;
                 // SAFETY: SleConnInfo is repr(C) with no uninitialized padding.
                 let mut info: SleConnInfo = unsafe { core::mem::zeroed() };
                 info.handle = entry.handle;
@@ -1592,30 +1617,34 @@ impl MiscDevice for SparkLinkCtl {
                 info.rx_pending = entry.rx_queue.len() as u16;
                 info.tx_bytes = entry.tx_bytes;
                 info.rx_bytes = entry.rx_bytes;
-                drop(guard);
+                drop(ss);
                 write_user_struct(arg, &info)?;
                 Ok(0)
             }
             SL_IOCTL_CONN_SEND => {
                 let cd: SleConnData = read_user_struct(arg)?;
                 let len = (cd.length as usize).min(CONN_DATA_MAX);
-                let mut guard = me.conn.lock();
-                let handle = guard.resolve_handle(cd.handle)?;
-                let sent = guard.send(handle, &cd.data[..len])?;
-                drop(guard);
-                let _ = me.controller.lock().send_data(cd.handle, &cd.data[..len]);
+                let sent = {
+                    let mut ss = SUBSYSTEM.lock();
+                    let s = ss.as_mut().ok_or(ENODEV)?;
+                    let handle = s.conn.resolve_handle(cd.handle)?;
+                    let sent = s.conn.send(handle, &cd.data[..len])?;
+                    let _ = s.controller.send_data(cd.handle, &cd.data[..len]);
+                    sent
+                };
                 Ok(sent as isize)
             }
             SL_IOCTL_CONN_RECV => {
                 let cd: SleConnData = read_user_struct(arg)?;
-                let mut guard = me.conn.lock();
-                let handle = guard.resolve_handle(cd.handle)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let handle = s.conn.resolve_handle(cd.handle)?;
                 // SAFETY: SleConnData is repr(C), zeroed gives all-zero which is valid.
                 let mut out: SleConnData = unsafe { core::mem::zeroed() };
                 out.handle = handle;
-                let recv_len = guard.recv(handle, &mut out.data)?;
+                let recv_len = s.conn.recv(handle, &mut out.data)?;
                 out.length = recv_len.min(CONN_DATA_MAX) as u16;
-                drop(guard);
+                drop(ss);
                 write_user_struct(arg, &out)?;
                 Ok(0)
             }
@@ -1627,11 +1656,14 @@ impl MiscDevice for SparkLinkCtl {
                 params.bandwidth_mhz = resp.bandwidth_mhz;
                 params.mcs_index = resp.mcs_index;
                 params.supervision_timeout = resp.supervision_timeout;
-                let mut guard = me.conn.lock();
-                let handle = guard.resolve_handle(resp.handle)?;
-                let peer_addr = guard.info(handle).map(|e| e.peer_addr).unwrap_or([0u8; 6]);
-                let result = guard.process_access_response(handle, resp_type, params);
-                drop(guard);
+                let (handle, peer_addr, result) = {
+                    let mut ss = SUBSYSTEM.lock();
+                    let s = ss.as_mut().ok_or(ENODEV)?;
+                    let handle = s.conn.resolve_handle(resp.handle)?;
+                    let peer_addr = s.conn.info(handle).map(|e| e.peer_addr).unwrap_or([0u8; 6]);
+                    let result = s.conn.process_access_response(handle, resp_type, params);
+                    (handle, peer_addr, result)
+                };
                 match &result {
                     Ok(()) => {
                         me.events.lock().push_conn_state(handle, 1, 2, peer_addr, 0);
@@ -1647,31 +1679,37 @@ impl MiscDevice for SparkLinkCtl {
             SL_IOCTL_INJECT_CONN_DATA => {
                 let cd: SleConnData = read_user_struct(arg)?;
                 let len = (cd.length as usize).min(CONN_DATA_MAX);
-                let mut guard = me.conn.lock();
-                let handle = guard.resolve_handle(cd.handle)?;
-                let seq = {
-                    let entry = guard.info(handle)?;
-                    entry.seq.rx_seq
-                };
-                guard.receive_data(handle, &cd.data[..len], seq)?;
-                drop(guard);
-                me.events.lock().push_data_received(handle, len as u16);
+                {
+                    let mut ss = SUBSYSTEM.lock();
+                    let s = ss.as_mut().ok_or(ENODEV)?;
+                    let handle = s.conn.resolve_handle(cd.handle)?;
+                    let seq = {
+                        let entry = s.conn.info(handle)?;
+                        entry.seq.rx_seq
+                    };
+                    s.conn.receive_data(handle, &cd.data[..len], seq)?;
+                }
+                // Use cd.handle (unresolved) for the event since handle is local
+                me.events.lock().push_data_received(cd.handle, len as u16);
                 me.event_poll.notify_all();
                 dev_info!(
                     me.dev,
                     "sparklink: injected {} bytes connection data (handle={})\n",
                     len,
-                    handle
+                    cd.handle
                 );
                 Ok(0)
             }
             SL_IOCTL_CONN_COUNT => {
-                let count = me.conn.lock().active_count();
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let count = s.conn.active_count();
                 Ok(count as isize)
             }
             SL_IOCTL_CONN_LIST => {
-                let guard = me.conn.lock();
-                let (handles, count) = guard.active_handles();
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let (handles, count) = s.conn.active_handles();
                 // SAFETY: SleConnList is repr(C).
                 let mut list: SleConnList = unsafe { core::mem::zeroed() };
                 let count = count.min(8);
@@ -1679,46 +1717,51 @@ impl MiscDevice for SparkLinkCtl {
                 for i in 0..count {
                     list.handles[i] = handles[i];
                 }
-                drop(guard);
+                drop(ss);
                 write_user_struct(arg, &list)?;
                 Ok(0)
             }
             // --- Security management ---
             SL_IOCTL_SEC_SET_PSK => {
                 let params: SlePskParams = read_user_struct(arg)?;
-                me.security.lock().set_psk(params.psk);
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.security.set_psk(params.psk);
                 Ok(0)
             }
             SL_IOCTL_SEC_PAIR => {
                 let params: SlePairParams = read_user_struct(arg)?;
-                let mut guard = me.security.lock();
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
                 match params.method {
-                    1 => guard.pair_just_works()?,
-                    2 => guard.pair_psk()?,
+                    1 => s.security.pair_just_works()?,
+                    2 => s.security.pair_psk()?,
                     _ => return Err(EINVAL),
                 }
-                drop(guard);
-                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::RequestPair, &[params.method]);
+                let _ = s.controller.send_command(sle_dli::SleOpcode::RequestPair, &[params.method]);
                 Ok(0)
             }
             SL_IOCTL_SEC_INFO => {
                 let info = {
-                    let guard = me.security.lock();
+                    let ss = SUBSYSTEM.lock();
+                    let s = ss.as_ref().ok_or(ENODEV)?;
                     // SAFETY: SleSecInfo is repr(C) with all u8 fields, no padding.
                     let mut info: SleSecInfo = unsafe { core::mem::zeroed() };
-                    info.state = guard.state as u8;
-                    info.method = guard.method as u8;
-                    info.mode = guard.mode as u8;
-                    info.enc_enabled = if guard.is_encrypted() { 1 } else { 0 };
-                    info.enc_key_fingerprint = guard.enc_key_fingerprint();
+                    info.state = s.security.state as u8;
+                    info.method = s.security.method as u8;
+                    info.mode = s.security.mode as u8;
+                    info.enc_enabled = if s.security.is_encrypted() { 1 } else { 0 };
+                    info.enc_key_fingerprint = s.security.enc_key_fingerprint();
                     info
                 };
                 write_user_struct(arg, &info)?;
                 Ok(0)
             }
             SL_IOCTL_SEC_ENCRYPT_ON => {
-                me.security.lock().enable_encryption()?;
-                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::StartEncrypt, &[]);
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.security.enable_encryption()?;
+                let _ = s.controller.send_command(sle_dli::SleOpcode::StartEncrypt, &[]);
                 Ok(0)
             }
             SL_IOCTL_SEC_SM3_TEST => {
@@ -1732,14 +1775,22 @@ impl MiscDevice for SparkLinkCtl {
             SL_IOCTL_SEC_SM4_ENC_TEST => {
                 let mut cd: SleConnData = read_user_struct(arg)?;
                 let len = (cd.length as usize).min(CONN_DATA_MAX);
-                me.security.lock().encrypt_test(&mut cd.data[..len])?;
+                {
+                    let mut ss = SUBSYSTEM.lock();
+                    let s = ss.as_mut().ok_or(ENODEV)?;
+                    s.security.encrypt_test(&mut cd.data[..len])?;
+                }
                 write_user_struct(arg, &cd)?;
                 Ok(0)
             }
             SL_IOCTL_SEC_SM4_DEC_TEST => {
                 let mut cd: SleConnData = read_user_struct(arg)?;
                 let len = (cd.length as usize).min(CONN_DATA_MAX);
-                me.security.lock().decrypt_test(&mut cd.data[..len])?;
+                {
+                    let mut ss = SUBSYSTEM.lock();
+                    let s = ss.as_mut().ok_or(ENODEV)?;
+                    s.security.decrypt_test(&mut cd.data[..len])?;
+                }
                 write_user_struct(arg, &cd)?;
                 Ok(0)
             }
@@ -1764,19 +1815,22 @@ impl MiscDevice for SparkLinkCtl {
             }
             // --- SSAP service layer ---
             SL_IOCTL_SSAP_REGISTER_SVC => {
-                me.ssap.lock().register_device_info_service()?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.ssap.register_device_info_service()?;
                 Ok(0)
             }
             SL_IOCTL_SSAP_INFO => {
                 let info = {
-                    let guard = me.ssap.lock();
+                    let ss = SUBSYSTEM.lock();
+                    let s = ss.as_ref().ok_or(ENODEV)?;
                     // SAFETY: SsapSummary is repr(C) with primitive fields.
                     let mut info: SsapSummary = unsafe { core::mem::zeroed() };
-                    info.service_count = guard.service_count() as u16;
-                    info.property_count = guard.property_count() as u16;
-                    info.total_entries = guard.total_entries() as u16;
-                    info.mtu = guard.negotiated.mtu;
-                    info.notification_count = guard.notification_count() as u16;
+                    info.service_count = s.ssap.service_count() as u16;
+                    info.property_count = s.ssap.property_count() as u16;
+                    info.total_entries = s.ssap.total_entries() as u16;
+                    info.mtu = s.ssap.negotiated.mtu;
+                    info.notification_count = s.ssap.notification_count() as u16;
                     info
                 };
                 write_user_struct(arg, &info)?;
@@ -1784,26 +1838,31 @@ impl MiscDevice for SparkLinkCtl {
             }
             SL_IOCTL_SSAP_READ => {
                 let rw: SsapReadWrite = read_user_struct(arg)?;
-                let data = me.ssap.lock().read_property(rw.handle)?;
-
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let data = s.ssap.read_property(rw.handle)?;
                 // SAFETY: SsapReadWrite is repr(C).
                 let mut out: SsapReadWrite = unsafe { core::mem::zeroed() };
                 out.handle = rw.handle;
                 let copy_len = data.len().min(252);
                 out.length = copy_len as u16;
                 out.data[..copy_len].copy_from_slice(&data[..copy_len]);
+                drop(ss);
                 write_user_struct(arg, &out)?;
                 Ok(0)
             }
             SL_IOCTL_SSAP_WRITE => {
                 let rw: SsapReadWrite = read_user_struct(arg)?;
                 let len = (rw.length as usize).min(252);
-                me.ssap.lock().write_property(rw.handle, &rw.data[..len])?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.ssap.write_property(rw.handle, &rw.data[..len])?;
                 Ok(0)
             }
             SL_IOCTL_SSAP_FIND_SVC => {
-                let services = me.ssap.lock().find_primary_services();
-
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let services = s.ssap.find_primary_services();
                 // SAFETY: SsapServiceList is repr(C).
                 let mut list: SsapServiceList = unsafe { core::mem::zeroed() };
                 let count = services.len().min(15);
@@ -1814,17 +1873,21 @@ impl MiscDevice for SparkLinkCtl {
                     list.services[i].uuid16 = uuid.as_u16().unwrap_or(0);
                     list.services[i].primary = 1;
                 }
-
+                drop(ss);
                 write_user_struct(arg, &list)?;
                 Ok(0)
             }
             SL_IOCTL_SSAP_NOTIFY => {
                 let handle: u16 = read_user_struct(arg)?;
-                me.ssap.lock().notify(handle)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.ssap.notify(handle)?;
                 Ok(0)
             }
             SL_IOCTL_SSAP_DEQUEUE_NTF => {
-                let ntf = me.ssap.lock().dequeue_notification();
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let ntf = s.ssap.dequeue_notification();
                 match ntf {
                     Some(n) => {
                         // SAFETY: SsapNotification is repr(C).
@@ -1834,6 +1897,7 @@ impl MiscDevice for SparkLinkCtl {
                         let copy_len = n.data.len().min(252);
                         out.length = copy_len as u8;
                         out.data[..copy_len].copy_from_slice(&n.data[..copy_len]);
+                        drop(ss);
                         write_user_struct(arg, &out)?;
                         Ok(0)
                     }
@@ -1843,20 +1907,21 @@ impl MiscDevice for SparkLinkCtl {
             // --- Power management ---
             SL_IOCTL_PM_INFO => {
                 let info = {
-                    let guard = me.power.lock();
+                    let ss = SUBSYSTEM.lock();
+                    let s = ss.as_ref().ok_or(ENODEV)?;
                     // SAFETY: SlePmInfo is repr(C).
                     let mut info: SlePmInfo = unsafe { core::mem::zeroed() };
-                    info.state = guard.state as u8;
-                    info.force_active = if guard.is_forced_active() { 1 } else { 0 };
-                    info.power_pct = guard.estimated_power_pct();
-                    info.current_interval = guard.interval.current_interval;
-                    info.supervision_timeout = guard.interval.supervision_timeout;
-                    info.latency = guard.interval.latency;
-                    info.idle_count = guard.stats.active_events.min(u16::MAX as u64) as u16;
-                    info.transitions = guard.stats.transitions;
-                    info.active_events = guard.stats.active_events;
-                    info.sniff_events = guard.stats.sniff_events;
-                    info.idle_events = guard.stats.idle_events;
+                    info.state = s.power.state as u8;
+                    info.force_active = if s.power.is_forced_active() { 1 } else { 0 };
+                    info.power_pct = s.power.estimated_power_pct();
+                    info.current_interval = s.power.interval.current_interval;
+                    info.supervision_timeout = s.power.interval.supervision_timeout;
+                    info.latency = s.power.interval.latency;
+                    info.idle_count = s.power.stats.active_events.min(u16::MAX as u64) as u16;
+                    info.transitions = s.power.stats.transitions;
+                    info.active_events = s.power.stats.active_events;
+                    info.sniff_events = s.power.stats.sniff_events;
+                    info.idle_events = s.power.stats.idle_events;
                     info
                 };
                 write_user_struct(arg, &info)?;
@@ -1864,11 +1929,12 @@ impl MiscDevice for SparkLinkCtl {
             }
             SL_IOCTL_PM_SET_STATE => {
                 let cmd_data: SlePmStateCmd = read_user_struct(arg)?;
-                let mut guard = me.power.lock();
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
                 match cmd_data.target_state {
-                    0 => { guard.resume(); Ok(0) }
-                    1 => { guard.on_activity(); guard.force_active(false); Ok(0) }
-                    3 => { guard.suspend()?; Ok(0) }
+                    0 => { s.power.resume(); Ok(0) }
+                    1 => { s.power.on_activity(); s.power.force_active(false); Ok(0) }
+                    3 => { s.power.suspend()?; Ok(0) }
                     _ => Err(EINVAL),
                 }
             }
@@ -1881,20 +1947,28 @@ impl MiscDevice for SparkLinkCtl {
                     latency: params.latency,
                     supervision_timeout: params.supervision_timeout,
                 };
-                me.power.lock().update_interval(interval)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.power.update_interval(interval)?;
                 Ok(0)
             }
             SL_IOCTL_PM_FORCE_ACTIVE => {
                 let enable: u8 = read_user_struct(arg)?;
-                me.power.lock().force_active(enable != 0);
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.power.force_active(enable != 0);
                 Ok(0)
             }
             SL_IOCTL_PM_TICK => {
-                me.power.lock().on_tick();
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.power.on_tick();
                 Ok(0)
             }
             SL_IOCTL_PM_ACTIVITY => {
-                me.power.lock().on_activity();
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.power.on_activity();
                 Ok(0)
             }
             // --- Event notification ---
@@ -1917,7 +1991,9 @@ impl MiscDevice for SparkLinkCtl {
             }
             // --- DLI controller info ---
             SL_IOCTL_DLI_INFO => {
-                let cinfo = me.controller.lock().info();
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let cinfo = s.controller.info();
                 let mut name = [0u8; 32];
                 let copy_len = cinfo.name.len().min(31);
                 name[..copy_len].copy_from_slice(&cinfo.name[..copy_len]);
@@ -1931,14 +2007,18 @@ impl MiscDevice for SparkLinkCtl {
                     name,
                     _reserved: [0u8; 14],
                 };
+                drop(ss);
                 write_user_struct(arg, &info)?;
                 Ok(0)
             }
             // --- DLI event polling ---
             SL_IOCTL_DLI_POLL_EVENT => {
-                match me.controller.lock().poll_event() {
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                match s.controller.poll_event() {
                     Some(ev) => {
                         let dli_ev = sle_dli_event_to_wire(&ev);
+                        drop(ss);
                         write_user_struct(arg, &dli_ev)?;
                         Ok(0)
                     }
@@ -1947,7 +2027,9 @@ impl MiscDevice for SparkLinkCtl {
             }
             // --- DLI controller reset ---
             SL_IOCTL_DLI_RESET => {
-                me.controller.lock().reset()?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.controller.reset()?;
                 Ok(0)
             }
             // --- USB device discovery ---
@@ -1956,44 +2038,46 @@ impl MiscDevice for SparkLinkCtl {
             }
             // --- PHY layer ---
             SL_IOCTL_PHY_INFO => {
-                let guard = me.phy.lock();
-                let mcs = sle_phy::mcs_lookup(guard.mcs_index);
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let mcs = sle_phy::mcs_lookup(s.phy.mcs_index);
                 let info = SlePhyInfo {
-                    mcs_index: guard.mcs_index,
-                    bandwidth_mhz: guard.bandwidth_mhz,
-                    pilot_density: guard.pilot_density,
-                    tx_power_dbm: guard.tx_power_dbm,
-                    mimo_mode: guard.antenna.mode as u8,
-                    num_tx_ant: guard.antenna.num_tx,
-                    num_rx_ant: guard.antenna.num_rx,
+                    mcs_index: s.phy.mcs_index,
+                    bandwidth_mhz: s.phy.bandwidth_mhz,
+                    pilot_density: s.phy.pilot_density,
+                    tx_power_dbm: s.phy.tx_power_dbm,
+                    mimo_mode: s.phy.antenna.mode as u8,
+                    num_tx_ant: s.phy.antenna.num_tx,
+                    num_rx_ant: s.phy.antenna.num_rx,
                     ofdm: if mcs.map_or(false, |m| m.ofdm) { 1 } else { 0 },
-                    data_rate_kbps: guard.effective_data_rate_kbps(),
-                    hop_channel: guard.hopping.last_channel,
-                    hop_increment: guard.hopping.hop_increment,
-                    hop_used_channels: guard.hopping.channel_map.used_count(),
+                    data_rate_kbps: s.phy.effective_data_rate_kbps(),
+                    hop_channel: s.phy.hopping.last_channel,
+                    hop_increment: s.phy.hopping.hop_increment,
+                    hop_used_channels: s.phy.hopping.channel_map.used_count(),
                     modulation: mcs.map_or(0, |m| m.modulation as u8),
                     code_rate_num: mcs.map_or(0, |m| m.code_rate.num),
                     code_rate_den: mcs.map_or(0, |m| m.code_rate.den),
                     ..Default::default()
                 };
+                drop(ss);
                 write_user_struct(arg, &info)?;
                 Ok(0)
             }
             SL_IOCTL_PHY_SET_MCS => {
                 let cmd: SlePhyMcsCmd = read_user_struct(arg)?;
-                let mut guard = me.phy.lock();
-                guard.set_mcs(cmd.mcs_index)?;
-                drop(guard);
-                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::SetCodingModulation, &[cmd.mcs_index]);
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.phy.set_mcs(cmd.mcs_index)?;
+                let _ = s.controller.send_command(sle_dli::SleOpcode::SetCodingModulation, &[cmd.mcs_index]);
                 Ok(0)
             }
             SL_IOCTL_PHY_SET_TXPOWER => {
                 let cmd: SlePhyTxPowerCmd = read_user_struct(arg)?;
-                let mut guard = me.phy.lock();
-                guard.set_tx_power(cmd.tx_power_dbm)?;
-                drop(guard);
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.phy.set_tx_power(cmd.tx_power_dbm)?;
                 let p = [0x01, cmd.tx_power_dbm as u8];
-                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::SetPhyParam, &p);
+                let _ = s.controller.send_command(sle_dli::SleOpcode::SetPhyParam, &p);
                 Ok(0)
             }
             SL_IOCTL_PHY_MCS_SELECT => {
@@ -2006,24 +2090,26 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             SL_IOCTL_PHY_HOP_NEXT => {
-                let mut guard = me.phy.lock();
-                let ch = guard.hopping.next_channel();
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let ch = s.phy.hopping.next_channel();
                 let info = SlePhyHopInfo {
                     channel: ch,
                     freq_mhz: sle_phy::HoppingState::channel_to_freq(ch),
-                    event_counter: guard.hopping.event_counter,
+                    event_counter: s.phy.hopping.event_counter,
                     ..Default::default()
                 };
+                drop(ss);
                 write_user_struct(arg, &info)?;
                 Ok(0)
             }
             SL_IOCTL_PHY_SET_BW => {
                 let cmd: SlePhyBwCmd = read_user_struct(arg)?;
-                let mut guard = me.phy.lock();
-                guard.set_bandwidth(cmd.bandwidth_mhz)?;
-                drop(guard);
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.phy.set_bandwidth(cmd.bandwidth_mhz)?;
                 let bw = [0x02, cmd.bandwidth_mhz];
-                let _ = me.controller.lock().send_command(sle_dli::SleOpcode::SetPhyParam, &bw);
+                let _ = s.controller.send_command(sle_dli::SleOpcode::SetPhyParam, &bw);
                 Ok(0)
             }
             _ => {
@@ -2037,7 +2123,16 @@ impl MiscDevice for SparkLinkCtl {
 #[pinned_drop]
 impl PinnedDrop for SparkLinkCtl {
     fn drop(self: Pin<&mut Self>) {
-        self.controller.lock().close();
+        let prev = OPEN_FD_COUNT.fetch_add(u32::MAX, Relaxed); // wrapping decrement
+        if prev <= 1 {
+            // Last fd closed — tear down shared subsystem.
+            let mut ss = SUBSYSTEM.lock();
+            if let Some(ref shared) = *ss {
+                shared.controller.close();
+            }
+            *ss = None;
+            pr_info!("sparklink: shared subsystem destroyed (last fd closed)\n");
+        }
         dev_info!(self.dev, "sparklink: control interface closed\n");
     }
 }

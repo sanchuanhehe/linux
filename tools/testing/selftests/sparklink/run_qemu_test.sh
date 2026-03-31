@@ -234,10 +234,10 @@ if [[ -z "$RESULT_LINE" ]]; then
     exit 1
 fi
 
-# Count OK/FAIL/WARN lines
-OK_COUNT=$(grep -c "  OK:" "$CONSOLE_LOG" 2>/dev/null || true)
-FAIL_COUNT=$(grep -c "  FAIL:" "$CONSOLE_LOG" 2>/dev/null || true)
-WARN_COUNT=$(grep -c "  WARN:" "$CONSOLE_LOG" 2>/dev/null || true)
+# Count OK/FAIL/WARN lines (anchor to line start to avoid kernel log noise)
+OK_COUNT=$(grep -c "^  OK:" "$CONSOLE_LOG" 2>/dev/null || true)
+FAIL_COUNT=$(grep -c "^  FAIL:" "$CONSOLE_LOG" 2>/dev/null || true)
+WARN_COUNT=$(grep -c "^  WARN:" "$CONSOLE_LOG" 2>/dev/null || true)
 
 echo ""
 echo "Test results: ${OK_COUNT} OK, ${FAIL_COUNT} FAIL, ${WARN_COUNT} WARN"

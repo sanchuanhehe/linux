@@ -33,6 +33,23 @@ pub(crate) fn controller_type() -> u8 {
     CONTROLLER_TYPE.load(Ordering::Relaxed)
 }
 
+/// Get the configured maximum number of connections (1..8).
+pub(crate) fn max_connections() -> u8 {
+    MAX_CONNECTIONS.load(Ordering::Relaxed)
+}
+
+/// Get the configured default advertising interval in milliseconds.
+#[allow(dead_code)]
+pub(crate) fn adv_interval_ms() -> u16 {
+    ADV_INTERVAL_MS.load(Ordering::Relaxed)
+}
+
+/// Get the configured default scan window in milliseconds.
+#[allow(dead_code)]
+pub(crate) fn scan_window_ms() -> u16 {
+    SCAN_WINDOW_MS.load(Ordering::Relaxed)
+}
+
 #[pin_data]
 pub(crate) struct SparkLinkConfig {
     #[pin]

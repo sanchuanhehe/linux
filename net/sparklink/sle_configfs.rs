@@ -39,13 +39,11 @@ pub(crate) fn max_connections() -> u8 {
 }
 
 /// Get the configured default advertising interval in milliseconds.
-#[allow(dead_code)]
 pub(crate) fn adv_interval_ms() -> u16 {
     ADV_INTERVAL_MS.load(Ordering::Relaxed)
 }
 
 /// Get the configured default scan window in milliseconds.
-#[allow(dead_code)]
 pub(crate) fn scan_window_ms() -> u16 {
     SCAN_WINDOW_MS.load(Ordering::Relaxed)
 }

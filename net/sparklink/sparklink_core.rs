@@ -1472,9 +1472,14 @@ impl MiscDevice for SparkLinkCtl {
         match cmd {
             SL_IOCTL_START_ADV => {
                 let uparams: SleAdvParams = read_user_struct(arg)?;
+                let interval = if uparams.interval_ms == 0 {
+                    sle_configfs::adv_interval_ms()
+                } else {
+                    uparams.interval_ms
+                };
                 let params = AdvParams {
                     discovery_level: uparams.discovery_level,
-                    interval_slots: (uparams.interval_ms as u32) * 8,
+                    interval_slots: (interval as u32) * 8,
                     broadcast_type: sle_pdu::BroadcastType::AccessibleScannable,
                     tx_power: 0,
                 };
@@ -1507,9 +1512,19 @@ impl MiscDevice for SparkLinkCtl {
             }
             SL_IOCTL_START_SCAN => {
                 let uparams: SleScanParams = read_user_struct(arg)?;
+                let window = if uparams.window_ms == 0 {
+                    sle_configfs::scan_window_ms()
+                } else {
+                    uparams.window_ms
+                };
+                let interval = if uparams.interval_ms == 0 {
+                    window * 2 // default: interval = 2x window
+                } else {
+                    uparams.interval_ms
+                };
                 let params = ScanParams {
-                    window_slots: (uparams.window_ms as u32) * 8,
-                    interval_slots: (uparams.interval_ms as u32) * 8,
+                    window_slots: (window as u32) * 8,
+                    interval_slots: (interval as u32) * 8,
                     filter_level: uparams.filter_discovery_level,
                     active: false,
                 };

@@ -2681,6 +2681,57 @@ static void test_configfs(void)
 	write_configfs_attr("controller_type", "virtual");
 }
 
+static void test_configfs_ioctl_integration(int fd)
+{
+	test_header("configfs-ioctl integration: default parameter fallback");
+
+	/* Set configfs adv_interval_ms to 250 */
+	if (write_configfs_attr("adv_interval_ms", "250") != 0) {
+		printf("  FAIL: cannot set adv_interval_ms=250\n");
+		return;
+	}
+	printf("  OK:   configfs adv_interval_ms set to 250\n");
+
+	/* Set configfs scan_window_ms to 150 */
+	if (write_configfs_attr("scan_window_ms", "150") != 0) {
+		printf("  FAIL: cannot set scan_window_ms=150\n");
+		return;
+	}
+	printf("  OK:   configfs scan_window_ms set to 150\n");
+
+	/* START_ADV with interval_ms=0 should use configfs default (250) */
+	set_role(fd, 1); /* GNode */
+	struct sle_adv_params adv;
+	memset(&adv, 0, sizeof(adv));
+	adv.discovery_level = 1;
+	adv.interval_ms = 0; /* trigger configfs fallback */
+	int ret = ioctl(fd, SL_IOCTL_START_ADV, &adv);
+	check("START_ADV (interval_ms=0, configfs fallback)", ret);
+	ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
+
+	/* START_SCAN with window_ms=0 should use configfs default (150) */
+	set_role(fd, 0); /* TNode */
+	struct sle_scan_params scan;
+	memset(&scan, 0, sizeof(scan));
+	scan.window_ms = 0; /* trigger configfs fallback */
+	scan.interval_ms = 0; /* trigger configfs fallback (2x window) */
+	scan.filter_discovery_level = 0;
+	ret = ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+	check("START_SCAN (window_ms=0, configfs fallback)", ret);
+	ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+
+	/* Restore configfs defaults */
+	write_configfs_attr("adv_interval_ms", "100");
+	write_configfs_attr("scan_window_ms", "200");
+
+	/* Drain DLI events */
+	struct sle_dli_event ev;
+	for (int i = 0; i < 32; i++) {
+		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) < 0)
+			break;
+	}
+}
+
 /* ---------------------------------------------------------------------------
  * Elapsed time helper (nanoseconds)
  * ---------------------------------------------------------------------------
@@ -2924,6 +2975,7 @@ int main(void)
 	test_phy_layer(fd);
 	test_ioctl_throughput(fd);
 	test_configfs();
+	test_configfs_ioctl_integration(fd);
 	test_genetlink();
 
 	printf("\n=== All tests completed ===\n");

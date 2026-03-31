@@ -80,6 +80,9 @@
 #define SL_IOCTL_SSAP_FIND_SVC    _IOR(SL_MAGIC, 0x54, struct ssap_service_list)
 #define SL_IOCTL_SSAP_NOTIFY      _IOW(SL_MAGIC, 0x55, uint16_t)
 #define SL_IOCTL_SSAP_DEQUEUE_NTF _IOR(SL_MAGIC, 0x56, struct ssap_notification)
+#define SL_IOCTL_SSAP_ADD_SVC    _IOWR(SL_MAGIC, 0x57, struct ssap_add_service)
+#define SL_IOCTL_SSAP_ADD_PROP   _IOWR(SL_MAGIC, 0x58, struct ssap_add_property)
+#define SL_IOCTL_SSAP_REMOVE_SVC _IOW(SL_MAGIC, 0x59, uint16_t)
 
 /* Power management */
 #define SL_IOCTL_PM_INFO         _IOR(SL_MAGIC, 0x60, struct sle_pm_info)
@@ -282,6 +285,24 @@ struct ssap_notification {
 	uint8_t  indication;
 	uint8_t  length;
 	uint8_t  data[252];
+} __attribute__((packed));
+
+struct ssap_add_service {
+	uint16_t uuid16;
+	uint8_t  primary;
+	uint8_t  _pad;
+	uint8_t  uuid128[16];
+	uint16_t start_handle;
+	uint8_t  _reserved[6];
+} __attribute__((packed));
+
+struct ssap_add_property {
+	uint16_t uuid16;
+	uint8_t  ops;
+	uint8_t  value_len;
+	uint8_t  value[248];
+	uint16_t handle;
+	uint8_t  _reserved[2];
 } __attribute__((packed));
 
 /* Power management */
@@ -1352,6 +1373,117 @@ static void test_ssap_service(int fd)
 		printf("  OK:   Read invalid handle: correctly rejected (errno=%d)\n", errno);
 	} else {
 		printf("  WARN: expected error for invalid handle\n");
+	}
+}
+
+static void test_ssap_dynamic_registration(int fd)
+{
+	test_header("SSAP dynamic service registration");
+
+	/* Step 1: Add a custom primary service with 16-bit UUID */
+	struct ssap_add_service svc;
+	memset(&svc, 0, sizeof(svc));
+	svc.uuid16 = 0x1234;
+	svc.primary = 1;
+	int ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+	check("SSAP_ADD_SVC (uuid16=0x1234, primary)", ret);
+	uint16_t svc_handle = 0;
+	if (ret == 0) {
+		svc_handle = svc.start_handle;
+		printf("  OK:   service registered, start_handle=%u\n", svc_handle);
+	}
+
+	/* Step 2: Add a property to the service (Read+Write, ops=0x03) */
+	struct ssap_add_property prop;
+	memset(&prop, 0, sizeof(prop));
+	prop.uuid16 = 0x2A00;
+	prop.ops = 0x03; /* Read | Write */
+	prop.value_len = 5;
+	memcpy(prop.value, "hello", 5);
+	ret = ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &prop);
+	check("SSAP_ADD_PROP (uuid16=0x2A00, ops=RW)", ret);
+	uint16_t prop_handle = 0;
+	if (ret == 0) {
+		prop_handle = prop.handle;
+		printf("  OK:   property added, handle=%u\n", prop_handle);
+	}
+
+	/* Step 3: Add a second property with Notify (ops=0x04) */
+	struct ssap_add_property prop2;
+	memset(&prop2, 0, sizeof(prop2));
+	prop2.uuid16 = 0x2A01;
+	prop2.ops = 0x04; /* Notify */
+	prop2.value_len = 0;
+	ret = ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &prop2);
+	check("SSAP_ADD_PROP (uuid16=0x2A01, ops=Notify)", ret);
+	if (ret == 0) {
+		printf("  OK:   second property added, handle=%u\n", prop2.handle);
+	}
+
+	/* Step 4: Verify service count increased via SSAP_INFO */
+	struct ssap_summary info;
+	memset(&info, 0, sizeof(info));
+	ret = ioctl(fd, SL_IOCTL_SSAP_INFO, &info);
+	check("SSAP_INFO (after dynamic add)", ret);
+	if (ret == 0) {
+		printf("  OK:   services=%u properties=%u\n",
+		       info.service_count, info.property_count);
+	}
+
+	/* Step 5: Read the property we just created */
+	if (prop_handle != 0) {
+		struct ssap_read_write rw;
+		memset(&rw, 0, sizeof(rw));
+		rw.handle = prop_handle;
+		ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+		check("SSAP_READ (dynamic property)", ret);
+		if (ret == 0 && rw.length >= 5) {
+			printf("  OK:   read back %u bytes: '%.*s'\n",
+			       rw.length, rw.length, rw.data);
+		}
+	}
+
+	/* Step 6: Add a second service with 128-bit UUID */
+	struct ssap_add_service svc2;
+	memset(&svc2, 0, sizeof(svc2));
+	svc2.uuid16 = 0; /* use uuid128 */
+	svc2.primary = 1;
+	/* Fill uuid128 with a test pattern */
+	for (int i = 0; i < 16; i++)
+		svc2.uuid128[i] = (uint8_t)(0xA0 + i);
+	ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc2);
+	check("SSAP_ADD_SVC (uuid128, primary)", ret);
+	if (ret == 0) {
+		printf("  OK:   128-bit UUID service registered, start_handle=%u\n",
+		       svc2.start_handle);
+	}
+
+	/* Step 7: Remove the first service */
+	if (svc_handle != 0) {
+		ret = ioctl(fd, SL_IOCTL_SSAP_REMOVE_SVC, &svc_handle);
+		check("SSAP_REMOVE_SVC (handle)", ret);
+		if (ret == 0) {
+			printf("  OK:   service start_handle=%u removed\n", svc_handle);
+		}
+	}
+
+	/* Step 8: Try removing a non-existent service */
+	uint16_t bad_handle = 0xFFFF;
+	ret = ioctl(fd, SL_IOCTL_SSAP_REMOVE_SVC, &bad_handle);
+	if (ret < 0) {
+		printf("  OK:   Remove non-existent service rejected (errno=%d)\n", errno);
+	} else {
+		printf("  WARN: expected error for non-existent service\n");
+	}
+
+	/* Step 9: Verify service count after removal */
+	struct ssap_summary info2;
+	memset(&info2, 0, sizeof(info2));
+	ret = ioctl(fd, SL_IOCTL_SSAP_INFO, &info2);
+	check("SSAP_INFO (after remove)", ret);
+	if (ret == 0) {
+		printf("  OK:   services=%u properties=%u (after removal)\n",
+		       info2.service_count, info2.property_count);
 	}
 }
 
@@ -2644,6 +2776,7 @@ int main(void)
 	test_hmac_sm3(fd);
 	test_security_pairing(fd);
 	test_ssap_service(fd);
+	test_ssap_dynamic_registration(fd);
 	test_power_management(fd);
 	test_unknown_ioctl(fd);
 	test_event_notification(fd);

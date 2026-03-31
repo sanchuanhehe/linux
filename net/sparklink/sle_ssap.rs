@@ -143,6 +143,11 @@ impl OpIndicator {
     pub const fn bits(self) -> u32 {
         self.0
     }
+
+    /// Construct from a raw bitmask value.
+    pub const fn from_raw(v: u32) -> Self {
+        Self(v)
+    }
 }
 
 impl core::ops::BitOr for OpIndicator {
@@ -492,6 +497,18 @@ impl SsapInner {
         };
         prop.descriptors.push(desc, GFP_KERNEL)?;
         Ok(())
+    }
+
+    /// Remove a service by its start handle.
+    pub fn remove_service(&mut self, start_handle: u16) -> Result {
+        let idx = self.services.iter().position(|s| s.start_handle == start_handle);
+        match idx {
+            Some(i) => {
+                let _ = self.services.remove(i);
+                Ok(())
+            }
+            None => Err(ENOENT),
+        }
     }
 
     // -----------------------------------------------------------------------

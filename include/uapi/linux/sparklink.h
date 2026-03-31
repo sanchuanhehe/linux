@@ -80,6 +80,11 @@ enum {
 	SPARKLINK_CMD_SET_ROLE,		/* Set local GT role (T/G) */
 	SPARKLINK_CMD_GET_ROLE,		/* Get current GT role */
 
+	/* Dynamic SSAP service registration */
+	SPARKLINK_CMD_SSAP_ADD_SVC,	/* Add SSAP service */
+	SPARKLINK_CMD_SSAP_ADD_PROP,	/* Add property to service */
+	SPARKLINK_CMD_SSAP_REMOVE_SVC,	/* Remove SSAP service */
+
 	__SPARKLINK_CMD_MAX,
 };
 #define SPARKLINK_CMD_MAX (__SPARKLINK_CMD_MAX - 1)

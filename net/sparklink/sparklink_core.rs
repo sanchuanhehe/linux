@@ -304,6 +304,15 @@ const SL_IOCTL_SSAP_NOTIFY: u32 = _IOW::<u16>(SL_MAGIC, 0x55);
 /// Dequeue one pending notification.
 const SL_IOCTL_SSAP_DEQUEUE_NTF: u32 = _IOR::<SsapNotification>(SL_MAGIC, 0x56);
 
+/// Register a dynamic SSAP service from userspace.
+const SL_IOCTL_SSAP_ADD_SVC: u32 = _IOWR::<SsapAddService>(SL_MAGIC, 0x57);
+
+/// Add a property to the last registered service.
+const SL_IOCTL_SSAP_ADD_PROP: u32 = _IOWR::<SsapAddProperty>(SL_MAGIC, 0x58);
+
+/// Remove a service by its start handle.
+const SL_IOCTL_SSAP_REMOVE_SVC: u32 = _IOW::<u16>(SL_MAGIC, 0x59);
+
 // --- Power management ioctls ---
 
 /// Get power management status.
@@ -835,6 +844,45 @@ pub struct SsapNotification {
     /// Notification data (max 252 bytes).
     pub data: [u8; 252],
 }
+
+/// Dynamic SSAP service registration from userspace.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SsapAddService {
+    /// Service UUID (16-bit, or 0 for 128-bit specified in uuid128).
+    pub uuid16: u16,
+    /// Whether primary (1) or secondary (0) service.
+    pub primary: u8,
+    _pad: u8,
+    /// 128-bit UUID (used when uuid16 == 0).
+    pub uuid128: [u8; 16],
+    /// Output: assigned start handle.
+    pub start_handle: u16,
+    _reserved: [u8; 6],
+}
+
+// SAFETY: SsapAddService is repr(C) with only primitive fields.
+unsafe impl FromBytes for SsapAddService {}
+
+/// Add a property to the last registered SSAP service.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SsapAddProperty {
+    /// Property UUID (16-bit).
+    pub uuid16: u16,
+    /// Operation indicator bitmask (bit0=Read, bit1=Write, bit2=Notify, etc.).
+    pub ops: u8,
+    /// Length of initial value data.
+    pub value_len: u8,
+    /// Initial value data (max 248 bytes).
+    pub value: [u8; 248],
+    /// Output: assigned property handle.
+    pub handle: u16,
+    _reserved: [u8; 2],
+}
+
+// SAFETY: SsapAddProperty is repr(C) with only primitive fields.
+unsafe impl FromBytes for SsapAddProperty {}
 
 // ---------------------------------------------------------------------------
 // Power management userspace data structures
@@ -1918,6 +1966,42 @@ impl MiscDevice for SparkLinkCtl {
                     }
                     None => Err(EAGAIN),
                 }
+            }
+            SL_IOCTL_SSAP_ADD_SVC => {
+                let mut cmd: SsapAddService = read_user_struct(arg)?;
+                let uuid = if cmd.uuid16 != 0 {
+                    sle_ssap::SsapUuid::Uuid16(cmd.uuid16)
+                } else {
+                    sle_ssap::SsapUuid::Uuid128(cmd.uuid128)
+                };
+                let primary = cmd.primary != 0;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let handle = s.ssap.register_service(uuid, primary)?;
+                cmd.start_handle = handle;
+                drop(ss);
+                write_user_struct(arg, &cmd)?;
+                Ok(0)
+            }
+            SL_IOCTL_SSAP_ADD_PROP => {
+                let mut cmd: SsapAddProperty = read_user_struct(arg)?;
+                let uuid = sle_ssap::SsapUuid::Uuid16(cmd.uuid16);
+                let ops = sle_ssap::OpIndicator::from_raw(cmd.ops as u32);
+                let len = (cmd.value_len as usize).min(248);
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let handle = s.ssap.add_property(uuid, ops, &cmd.value[..len])?;
+                cmd.handle = handle;
+                drop(ss);
+                write_user_struct(arg, &cmd)?;
+                Ok(0)
+            }
+            SL_IOCTL_SSAP_REMOVE_SVC => {
+                let start_handle: u16 = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.ssap.remove_service(start_handle)?;
+                Ok(0)
             }
             // --- Power management ---
             SL_IOCTL_PM_INFO => {

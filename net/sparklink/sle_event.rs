@@ -225,6 +225,15 @@ impl SleWireEvent {
         let payload = DataReceivedEvent { handle, rx_bytes };
         Self::from_payload(SleEventType::DataReceived, &payload)
     }
+
+    /// Build a hardware error wire event.
+    pub fn hardware_error(error_code: u8) -> Self {
+        let payload = HardwareErrorEvent {
+            error_code,
+            _pad: [0u8; 3],
+        };
+        Self::from_payload(SleEventType::HardwareError, &payload)
+    }
 }
 
 // ---------------------------------------------------------------------------

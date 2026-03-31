@@ -33,6 +33,7 @@ mod sle_spi;
 use sle_dli::SleController;
 
 use kernel::sync::atomic::Relaxed;
+use kernel::sync::Arc;
 use kernel::configfs_attrs;
 use kernel::{
     bindings,
@@ -52,8 +53,10 @@ use kernel::{
         poll::{PollCondVar, PollTable},
         Mutex,
     },
+    time::msecs_to_jiffies,
     transmute::FromBytes,
     uaccess::{UserPtr, UserSlice},
+    workqueue::{self, impl_has_delayed_work, new_delayed_work, DelayedWork, WorkItem},
 };
 
 use sle_adv::{AdvParams, AdvScanInner, ScanParams};
@@ -1243,6 +1246,100 @@ struct SubsystemShared {
     local_role: GtRole,
     /// Global event broadcast ring for multi-listener delivery.
     broadcast: sle_event::BroadcastRing,
+    /// Background event pump handle. Kept alive while subsystem is active.
+    _event_pump: Option<Arc<EventPump>>,
+}
+
+// ---------------------------------------------------------------------------
+// Background event pump
+// ---------------------------------------------------------------------------
+
+/// Interval between event pump polls (milliseconds).
+const EVENT_PUMP_INTERVAL_MS: u32 = 100;
+
+/// Background worker that periodically polls the controller for DLI events
+/// and publishes them to the global broadcast ring.
+///
+/// Without this, DLI events are only consumed when userspace calls the
+/// DLI_POLL_EVENT ioctl — an active polling model. The event pump turns
+/// this into passive delivery: events flow into the broadcast ring
+/// automatically, and per-fd readers pick them up on their next poll/read.
+#[pin_data]
+struct EventPump {
+    #[pin]
+    work: DelayedWork<EventPump>,
+}
+
+impl_has_delayed_work! {
+    impl HasDelayedWork<Self> for EventPump { self.work }
+}
+
+impl EventPump {
+    fn new() -> Result<Arc<Self>> {
+        Arc::pin_init(pin_init!(EventPump {
+            work <- new_delayed_work!("sparklink_event_pump"),
+        }), GFP_KERNEL)
+    }
+
+    /// Schedule the first pump cycle.
+    fn start(self: &Arc<Self>) {
+        let _ = workqueue::system().enqueue_delayed(
+            self.clone(),
+            msecs_to_jiffies(EVENT_PUMP_INTERVAL_MS),
+        );
+    }
+}
+
+impl WorkItem for EventPump {
+    type Pointer = Arc<EventPump>;
+
+    fn run(this: Arc<EventPump>) {
+        // Drain all pending controller events into the broadcast ring.
+        let mut pumped = 0u32;
+        {
+            let mut ss = SUBSYSTEM.lock();
+            if let Some(ref mut shared) = *ss {
+                while let Some(ev) = shared.controller.poll_event() {
+                    let wire = sle_dli_event_to_broadcast(&ev);
+                    shared.broadcast.publish(wire);
+                    pumped += 1;
+                    if pumped >= 32 {
+                        break; // yield after 32 events per cycle
+                    }
+                }
+            }
+        }
+        // Re-arm the delayed work for the next cycle.
+        let _ = workqueue::system().enqueue_delayed(
+            this,
+            msecs_to_jiffies(EVENT_PUMP_INTERVAL_MS),
+        );
+    }
+}
+
+/// Convert a DLI SleEvent into a SleWireEvent for broadcast ring insertion.
+fn sle_dli_event_to_broadcast(ev: &sle_dli::SleEvent) -> sle_event::SleWireEvent {
+    match ev {
+        sle_dli::SleEvent::ConnComplete { handle, addr, status } => {
+            let new_state = if *status == sle_dli::SleStatus::Success { 2u8 } else { 0u8 };
+            sle_event::SleWireEvent::conn_state(*handle, 1, new_state, *addr, *status as u8)
+        }
+        sle_dli::SleEvent::Disconnected { handle, reason } => {
+            sle_event::SleWireEvent::conn_state(*handle, 2, 0, [0u8; 6], *reason)
+        }
+        sle_dli::SleEvent::AdvReport { addr, rssi, data } => {
+            sle_event::SleWireEvent::adv_report(*addr, *rssi, 0, data.as_slice())
+        }
+        sle_dli::SleEvent::DataReceived { handle, data } => {
+            sle_event::SleWireEvent::data_received(*handle, data.len() as u16)
+        }
+        sle_dli::SleEvent::HardwareError { code } => {
+            sle_event::SleWireEvent::hardware_error(*code)
+        }
+        // Other events (CommandComplete, CommandStatus, EncryptionChanged,
+        // PairRequest) are controller-internal and not broadcast to userspace.
+        _ => sle_event::SleWireEvent::hardware_error(0),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1414,6 +1511,11 @@ impl MiscDevice for SparkLinkCtl {
                 let mut conn = ConnManager::new(addr);
                 conn.set_max_connections(sle_configfs::max_connections() as usize);
 
+                let pump = EventPump::new().ok();
+                if let Some(ref p) = pump {
+                    p.start();
+                }
+
                 *ss = Some(SubsystemShared {
                     controller,
                     conn,
@@ -1424,6 +1526,7 @@ impl MiscDevice for SparkLinkCtl {
                     phy: sle_phy::PhyConfig::default_config(),
                     local_role: GtRole::TNode,
                     broadcast: sle_event::BroadcastRing::new(),
+                    _event_pump: pump,
                 });
                 pr_info!("sparklink: shared subsystem initialised\n");
             }

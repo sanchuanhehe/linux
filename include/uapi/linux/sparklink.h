@@ -73,6 +73,9 @@ enum {
 	/* DLI controller */
 	SPARKLINK_CMD_GET_DLI_INFO,	/* Get DLI controller info */
 
+	/* Version query */
+	SPARKLINK_CMD_GET_VERSION,	/* Get protocol version info */
+
 	__SPARKLINK_CMD_MAX,
 };
 #define SPARKLINK_CMD_MAX (__SPARKLINK_CMD_MAX - 1)
@@ -91,6 +94,10 @@ enum {
 	SPARKLINK_ATTR_DEV_NAME,	/* NUL string: device name */
 	SPARKLINK_ATTR_DEV_BUS,	/* u8: transport bus type */
 	SPARKLINK_ATTR_DEV_COUNT,	/* u32: device count */
+
+	/* Version info */
+	SPARKLINK_ATTR_PROTO_VERSION,	/* u32: protocol stack version */
+	SPARKLINK_ATTR_GENL_VERSION,	/* u32: genetlink interface version */
 
 	/* Address */
 	SPARKLINK_ATTR_ADDR,		/* binary(6): local SLE address */

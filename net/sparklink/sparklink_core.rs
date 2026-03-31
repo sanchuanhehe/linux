@@ -28,6 +28,7 @@ mod sle_netlink;
 
 use sle_dli::SleController;
 
+use kernel::sync::atomic::Relaxed;
 use kernel::{
     bindings,
     debugfs::{Dir, File},
@@ -88,6 +89,93 @@ fn write_user_struct<T: Sized>(arg: usize, val: &T) -> Result {
     let slice = UserSlice::new(UserPtr::from_addr(arg), core::mem::size_of::<T>());
     slice.writer().write_slice(bytes)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Global device counter (shared with C genetlink code via FFI)
+// ---------------------------------------------------------------------------
+
+static GLOBAL_DEV_COUNT: kernel::sync::atomic::Atomic<i32> = kernel::sync::atomic::Atomic::new(0);
+
+/// Return the number of registered SparkLink devices (C FFI export).
+#[no_mangle]
+pub extern "C" fn sparklink_genl_get_dev_count() -> u32 {
+    GLOBAL_DEV_COUNT.load(Relaxed) as u32
+}
+
+/// Return the protocol stack version as a packed u32 (C FFI export).
+#[no_mangle]
+pub extern "C" fn sparklink_genl_get_proto_version() -> u32 {
+    0x000300 // v0.3.0
+}
+
+// ---------------------------------------------------------------------------
+// Generic Netlink C bridge (conditional on CONFIG_SPARKLINK_GENL)
+// ---------------------------------------------------------------------------
+
+#[cfg(CONFIG_SPARKLINK_GENL)]
+mod genl_bridge {
+    extern "C" {
+        pub(crate) fn sparklink_genl_register() -> core::ffi::c_int;
+        pub(crate) fn sparklink_genl_unregister();
+        pub(crate) fn sparklink_genl_send_event(
+            event_type: u8,
+            handle: u16,
+            addr: *const u8,
+            addr_len: u32,
+            payload: *const u8,
+            payload_len: u32,
+        ) -> core::ffi::c_int;
+    }
+
+    pub(crate) struct GenlGuard;
+
+    impl GenlGuard {
+        pub(crate) fn new() -> kernel::error::Result<Self> {
+            // SAFETY: sparklink_genl_register is defined in sparklink_genl.c
+            let ret = unsafe { sparklink_genl_register() };
+            if ret != 0 {
+                return Err(kernel::error::Error::from_errno(ret));
+            }
+            Ok(Self)
+        }
+    }
+
+    impl Drop for GenlGuard {
+        fn drop(&mut self) {
+            // SAFETY: sparklink_genl_unregister is defined in sparklink_genl.c
+            unsafe { sparklink_genl_unregister(); }
+        }
+    }
+
+    /// Broadcast an event via genetlink multicast.
+    pub(crate) fn notify_event(event_type: u8, handle: u16, addr: &[u8; 6]) {
+        // SAFETY: sparklink_genl_send_event is defined in sparklink_genl.c
+        unsafe {
+            sparklink_genl_send_event(
+                event_type,
+                handle,
+                addr.as_ptr(),
+                6,
+                core::ptr::null(),
+                0,
+            );
+        }
+    }
+}
+
+#[cfg(not(CONFIG_SPARKLINK_GENL))]
+mod genl_bridge {
+    pub(crate) struct GenlGuard;
+
+    impl GenlGuard {
+        pub(crate) fn new() -> kernel::error::Result<Self> {
+            Ok(Self)
+        }
+    }
+
+    #[inline]
+    pub(crate) fn notify_event(_event_type: u8, _handle: u16, _addr: &[u8; 6]) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -880,6 +968,7 @@ struct SparkLinkModule {
     ioctl_count: File<Atomic<usize>>,
     #[pin]
     _dli_info: File<CString>,
+    _genl: genl_bridge::GenlGuard,
 }
 
 impl kernel::InPlaceModule for SparkLinkModule {
@@ -946,6 +1035,7 @@ impl kernel::InPlaceModule for SparkLinkModule {
                 )
             },
             _debugfs: debugfs,
+            _genl: genl_bridge::GenlGuard::new()?,
         })
     }
 }
@@ -1107,11 +1197,18 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             SL_IOCTL_DEV_REGISTER => {
-                dev_info!(me.dev, "sparklink: DEV_REGISTER (stub)\n");
+                GLOBAL_DEV_COUNT.fetch_add(1i32, Relaxed);
+                dev_info!(me.dev, "sparklink: DEV_REGISTER (count={})\n",
+                    GLOBAL_DEV_COUNT.load(Relaxed));
                 Ok(0)
             }
             SL_IOCTL_DEV_UNREGISTER => {
-                dev_info!(me.dev, "sparklink: DEV_UNREGISTER (stub)\n");
+                let prev = GLOBAL_DEV_COUNT.load(Relaxed);
+                if prev > 0 {
+                    GLOBAL_DEV_COUNT.fetch_add(-1i32, Relaxed);
+                }
+                dev_info!(me.dev, "sparklink: DEV_UNREGISTER (count={})\n",
+                    GLOBAL_DEV_COUNT.load(Relaxed));
                 Ok(0)
             }
             SL_IOCTL_INJECT_ADV => {
@@ -1143,6 +1240,7 @@ impl MiscDevice for SparkLinkCtl {
                     &inject.name[..name_len],
                 );
                 me.event_poll.notify_all();
+                genl_bridge::notify_event(0x02, 0, &inject.addr);
                 dev_info!(
                     me.dev,
                     "sparklink: injected ADV from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} rssi={}\n",

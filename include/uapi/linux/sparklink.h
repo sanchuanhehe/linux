@@ -76,6 +76,10 @@ enum {
 	/* Version query */
 	SPARKLINK_CMD_GET_VERSION,	/* Get protocol version info */
 
+	/* Role management */
+	SPARKLINK_CMD_SET_ROLE,		/* Set local GT role (T/G) */
+	SPARKLINK_CMD_GET_ROLE,		/* Get current GT role */
+
 	__SPARKLINK_CMD_MAX,
 };
 #define SPARKLINK_CMD_MAX (__SPARKLINK_CMD_MAX - 1)

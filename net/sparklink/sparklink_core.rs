@@ -362,6 +362,12 @@ const SL_IOCTL_PHY_HOP_NEXT: u32 = _IOR::<SlePhyHopInfo>(SL_MAGIC, 0x94);
 /// Set bandwidth.
 const SL_IOCTL_PHY_SET_BW: u32 = _IOW::<SlePhyBwCmd>(SL_MAGIC, 0x95);
 
+/// Set local GT node role (0=TNode, 1=GNode).
+const SL_IOCTL_SET_ROLE: u32 = _IOW::<u8>(SL_MAGIC, 0xA0);
+
+/// Get current local GT node role.
+const SL_IOCTL_GET_ROLE: u32 = _IOR::<u8>(SL_MAGIC, 0xA1);
+
 // ---------------------------------------------------------------------------
 // SparkLink address (6 bytes, same as SLE MAC layer identifier)
 // ---------------------------------------------------------------------------
@@ -1186,6 +1192,7 @@ struct SubsystemShared {
     ssap: SsapInner,
     power: PowerInner,
     phy: sle_phy::PhyConfig,
+    local_role: GtRole,
 }
 
 // ---------------------------------------------------------------------------
@@ -1363,6 +1370,7 @@ impl MiscDevice for SparkLinkCtl {
                     ssap: SsapInner::new(),
                     power: PowerInner::new(),
                     phy: sle_phy::PhyConfig::default_config(),
+                    local_role: GtRole::TNode,
                 });
                 pr_info!("sparklink: shared subsystem initialised\n");
             }
@@ -1425,6 +1433,10 @@ impl MiscDevice for SparkLinkCtl {
                 {
                     let mut ss = SUBSYSTEM.lock();
                     let s = ss.as_mut().ok_or(ENODEV)?;
+                    if s.local_role != GtRole::GNode {
+                        dev_warn!(me.dev, "sparklink: advertising requires GNode role\n");
+                        return Err(EPERM);
+                    }
                     s.adv_scan.start_advertising(params)?;
                     if let Some(pdu) = s.adv_scan.build_adv_pdu() {
                         dev_info!(
@@ -1455,6 +1467,10 @@ impl MiscDevice for SparkLinkCtl {
                 };
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
+                if s.local_role != GtRole::TNode {
+                    dev_warn!(me.dev, "sparklink: scanning requires TNode role\n");
+                    return Err(EPERM);
+                }
                 s.adv_scan.start_scanning(params)?;
                 let _ = s.controller.enable_scan(true);
                 Ok(0)
@@ -2107,6 +2123,29 @@ impl MiscDevice for SparkLinkCtl {
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.phy.set_bandwidth(cmd.bandwidth_mhz)?;
                 let _ = s.controller.set_bandwidth(cmd.bandwidth_mhz);
+                Ok(0)
+            }
+            SL_IOCTL_SET_ROLE => {
+                let role_byte: u8 = read_user_struct(arg)?;
+                let role = match role_byte {
+                    0 => GtRole::TNode,
+                    1 => GtRole::GNode,
+                    _ => return Err(EINVAL),
+                };
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                if s.conn.active_handles().1 > 0 {
+                    dev_warn!(me.dev, "sparklink: cannot change role with active connections\n");
+                    return Err(EBUSY);
+                }
+                s.local_role = role;
+                dev_info!(me.dev, "sparklink: local role set to {:?}\n", role);
+                Ok(0)
+            }
+            SL_IOCTL_GET_ROLE => {
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                write_user_struct(arg, &(s.local_role as u8))?;
                 Ok(0)
             }
             _ => {

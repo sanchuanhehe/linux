@@ -113,6 +113,10 @@
 #define SL_IOCTL_PHY_HOP_NEXT   _IOR(SL_MAGIC, 0x94, struct sle_phy_hop_info)
 #define SL_IOCTL_PHY_SET_BW      _IOW(SL_MAGIC, 0x95, struct sle_phy_bw_cmd)
 
+/* Role management */
+#define SL_IOCTL_SET_ROLE        _IOW(SL_MAGIC, 0xA0, uint8_t)
+#define SL_IOCTL_GET_ROLE        _IOR(SL_MAGIC, 0xA1, uint8_t)
+
 /* ------------------------------------------------------------------ */
 /* Userspace data structures — must match repr(C) in sparklink_core   */
 /* ------------------------------------------------------------------ */
@@ -471,9 +475,20 @@ static void test_dev_register(int fd)
 	check("DEV_UNREGISTER", ret);
 }
 
+static void set_role(int fd, uint8_t role)
+{
+	int ret = ioctl(fd, SL_IOCTL_SET_ROLE, &role);
+	if (ret < 0) {
+		printf("  FAIL: SET_ROLE(%d): %s\n", role, strerror(errno));
+	}
+}
+
 static void test_advertising(int fd)
 {
 	test_header("START_ADV / STOP_ADV");
+
+	/* Advertising requires GNode role */
+	set_role(fd, 1);
 
 	struct sle_adv_params params;
 	memset(&params, 0, sizeof(params));
@@ -509,6 +524,9 @@ static void test_scanning(int fd)
 {
 	test_header("START_SCAN / STOP_SCAN");
 
+	/* Scanning requires TNode role */
+	set_role(fd, 0);
+
 	struct sle_scan_params params;
 	memset(&params, 0, sizeof(params));
 	params.dev_index = 0;
@@ -529,11 +547,14 @@ static void test_scanning(int fd)
 
 static void test_mutual_exclusion(int fd)
 {
-	test_header("Mutual exclusion: ADV then SCAN");
+	test_header("Role enforcement: GNode/TNode restrictions");
+
+	/* GNode should be able to advertise but not scan */
+	set_role(fd, 1);
 
 	struct sle_adv_params adv;
 	memset(&adv, 0, sizeof(adv));
-	adv.discovery_level = 2;  /* Priority */
+	adv.discovery_level = 2;
 	adv.interval_ms = 200;
 
 	struct sle_scan_params scan;
@@ -541,21 +562,74 @@ static void test_mutual_exclusion(int fd)
 	scan.window_ms = 30;
 	scan.interval_ms = 60;
 
-	/* Start advertising */
-	int ret = ioctl(fd, SL_IOCTL_START_ADV, &adv);
-	check("START_ADV", ret);
-
-	/* Try scanning while advertising — should fail */
-	ret = ioctl(fd, SL_IOCTL_START_SCAN, &scan);
-	if (ret < 0 && errno == EBUSY) {
-		printf("  OK:   START_SCAN (while adv): correctly rejected (EBUSY)\n");
+	int ret = ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+	if (ret < 0 && errno == EPERM) {
+		printf("  OK:   GNode cannot scan (EPERM)\n");
 	} else {
-		printf("  WARN: START_SCAN (while adv): expected EBUSY, got ret=%d errno=%d\n",
+		printf("  WARN: GNode scan: expected EPERM, got ret=%d errno=%d\n",
 		       ret, errno);
 	}
 
+	ret = ioctl(fd, SL_IOCTL_START_ADV, &adv);
+	check("GNode START_ADV", ret);
 	ret = ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
-	check("STOP_ADV", ret);
+	check("GNode STOP_ADV", ret);
+
+	/* TNode should be able to scan but not advertise */
+	set_role(fd, 0);
+
+	ret = ioctl(fd, SL_IOCTL_START_ADV, &adv);
+	if (ret < 0 && errno == EPERM) {
+		printf("  OK:   TNode cannot advertise (EPERM)\n");
+	} else {
+		printf("  WARN: TNode adv: expected EPERM, got ret=%d errno=%d\n",
+		       ret, errno);
+	}
+
+	ret = ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+	check("TNode START_SCAN", ret);
+	ret = ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+	check("TNode STOP_SCAN", ret);
+}
+
+static void test_role_management(int fd)
+{
+	test_header("GT Role Management");
+
+	/* Get initial role (should be TNode=0 by default) */
+	uint8_t role = 0xFF;
+	int ret = ioctl(fd, SL_IOCTL_GET_ROLE, &role);
+	check("GET_ROLE", ret);
+	if (role == 0)
+		printf("  OK:   default role is TNode (0)\n");
+	else
+		printf("  WARN: expected TNode(0), got %u\n", role);
+
+	/* Set role to GNode */
+	uint8_t gnode = 1;
+	ret = ioctl(fd, SL_IOCTL_SET_ROLE, &gnode);
+	check("SET_ROLE(GNode)", ret);
+
+	ret = ioctl(fd, SL_IOCTL_GET_ROLE, &role);
+	check("GET_ROLE after set", ret);
+	if (role == 1)
+		printf("  OK:   role is now GNode (1)\n");
+	else
+		printf("  FAIL: expected GNode(1), got %u\n", role);
+
+	/* Set back to TNode */
+	uint8_t tnode = 0;
+	ret = ioctl(fd, SL_IOCTL_SET_ROLE, &tnode);
+	check("SET_ROLE(TNode)", ret);
+
+	/* Invalid role should be rejected */
+	uint8_t bad = 3;
+	ret = ioctl(fd, SL_IOCTL_SET_ROLE, &bad);
+	if (ret < 0 && errno == EINVAL)
+		printf("  OK:   SET_ROLE(3) rejected with EINVAL\n");
+	else
+		printf("  WARN: SET_ROLE(3): expected EINVAL, got ret=%d errno=%d\n",
+		       ret, errno);
 }
 
 static void test_unknown_ioctl(int fd)
@@ -573,6 +647,9 @@ static void test_unknown_ioctl(int fd)
 static void test_loopback(int fd)
 {
 	test_header("Loopback: SCAN + INJECT_ADV");
+
+	/* Scanning requires TNode role */
+	set_role(fd, 0);
 
 	/* Start scanning */
 	struct sle_scan_params scan;
@@ -636,6 +713,9 @@ static void test_loopback(int fd)
 static void test_loopback_filter(int fd)
 {
 	test_header("Loopback with discovery level filter");
+
+	/* Scanning requires TNode role */
+	set_role(fd, 0);
 
 	struct sle_scan_params scan;
 	memset(&scan, 0, sizeof(scan));
@@ -1387,6 +1467,9 @@ static void test_event_notification(int fd)
 {
 	test_header("Event notification: read() and EVENT_COUNT");
 
+	/* Ensure TNode role for scanning later in the test */
+	set_role(fd, 0);
+
 	/* Drain leftover events from previous tests */
 	drain_event_queue(fd);
 
@@ -1587,6 +1670,9 @@ static void test_dli_event_poll(int fd)
 {
 	test_header("DLI Event Polling via Controller");
 
+	/* Need GNode role for START_ADV below */
+	set_role(fd, 1);
+
 	/* 1. Empty queue should return EAGAIN */
 	struct sle_dli_event ev;
 	memset(&ev, 0, sizeof(ev));
@@ -1642,6 +1728,9 @@ static void test_dli_event_poll(int fd)
 static void test_dli_routing(int fd)
 {
 	test_header("DLI Controller Routing Verification");
+
+	/* Scanning requires TNode role */
+	set_role(fd, 0);
 
 	/* Drain any leftover DLI events */
 	struct sle_dli_event ev;
@@ -1797,6 +1886,9 @@ static void test_poll_epoll(int fd)
 static void test_ring_buffer_stress(int fd)
 {
 	test_header("Ring buffer: stress fill and drain");
+
+	/* Scanning requires TNode role */
+	set_role(fd, 0);
 	int i, ret;
 	struct sle_wire_event evt;
 	ssize_t n;
@@ -2538,6 +2630,7 @@ int main(void)
 	test_dev_count(fd);
 	test_dev_info(fd);
 	test_dev_register(fd);
+	test_role_management(fd);
 	test_advertising(fd);
 	test_scanning(fd);
 	test_mutual_exclusion(fd);

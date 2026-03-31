@@ -18,6 +18,7 @@
 //!   - Hardware errors
 
 use kernel::prelude::*;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Event type codes
@@ -161,6 +162,68 @@ impl SleWireEvent {
         let size = core::mem::size_of::<Self>();
         // SAFETY: SleWireEvent is repr(C) with only primitive fields.
         unsafe { core::slice::from_raw_parts(self as *const Self as *const u8, size) }
+    }
+
+    /// Build a wire event from a typed payload.
+    fn from_payload<T: Sized>(event_type: SleEventType, payload: &T) -> Self {
+        let payload_size = core::mem::size_of::<T>();
+        let copy_len = payload_size.min(EVENT_PAYLOAD_MAX);
+        // SAFETY: T is repr(C) with only primitive fields.
+        let payload_bytes = unsafe {
+            core::slice::from_raw_parts(payload as *const T as *const u8, copy_len)
+        };
+        let mut wire = SleWireEvent {
+            event_type: event_type as u8,
+            payload_len: copy_len as u8,
+            payload: [0u8; EVENT_PAYLOAD_MAX],
+            _pad: [0u8; 2],
+        };
+        wire.payload[..copy_len].copy_from_slice(payload_bytes);
+        wire
+    }
+
+    /// Build a connection state change wire event.
+    pub fn conn_state(
+        handle: u16,
+        old_state: u8,
+        new_state: u8,
+        peer_addr: [u8; 6],
+        reason: u8,
+    ) -> Self {
+        let payload = ConnStateEvent {
+            handle,
+            new_state,
+            old_state,
+            peer_addr,
+            reason,
+            _pad: 0,
+        };
+        Self::from_payload(SleEventType::ConnStateChanged, &payload)
+    }
+
+    /// Build an advertising report wire event.
+    pub fn adv_report(
+        addr: [u8; 6],
+        rssi: i8,
+        discovery_level: u8,
+        name: &[u8],
+    ) -> Self {
+        let mut evt = AdvReportEvent {
+            addr,
+            rssi,
+            discovery_level,
+            name_len: name.len().min(31) as u8,
+            name: [0u8; 31],
+        };
+        let copy_len = name.len().min(31);
+        evt.name[..copy_len].copy_from_slice(&name[..copy_len]);
+        Self::from_payload(SleEventType::AdvReport, &evt)
+    }
+
+    /// Build a data received indication wire event.
+    pub fn data_received(handle: u16, rx_bytes: u16) -> Self {
+        let payload = DataReceivedEvent { handle, rx_bytes };
+        Self::from_payload(SleEventType::DataReceived, &payload)
     }
 }
 
@@ -327,6 +390,20 @@ impl EventQueue {
         offset
     }
 
+    /// Insert a pre-built wire event directly into the queue.
+    /// Used by the broadcast ring to copy events into per-fd queues.
+    pub fn push_raw(&mut self, wire: SleWireEvent) {
+        if self.count >= EVENT_QUEUE_MAX {
+            self.head = (self.head + 1) % EVENT_QUEUE_MAX;
+            self.count -= 1;
+            self.total_dropped += 1;
+        }
+        let tail = (self.head + self.count) % EVENT_QUEUE_MAX;
+        self.buf[tail] = wire;
+        self.count += 1;
+        self.total_enqueued += 1;
+    }
+
     // --- Internal ---
 
     /// O(1) ring buffer insertion. Drops oldest event if full.
@@ -359,5 +436,110 @@ impl EventQueue {
         self.buf[tail] = wire;
         self.count += 1;
         self.total_enqueued += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global broadcast ring: multi-listener event delivery
+// ---------------------------------------------------------------------------
+
+/// Size of the global broadcast ring (power of 2 for fast modulo).
+const BROADCAST_RING_SIZE: usize = 128;
+
+/// Monotonically increasing sequence counter for global events.
+///
+/// Each event written to the broadcast ring gets a unique sequence number.
+/// Per-fd readers track their own cursor (last_seq) and catch up on poll/read.
+static BROADCAST_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Entry in the broadcast ring: event + sequence number.
+#[derive(Copy, Clone)]
+pub struct BroadcastEntry {
+    pub seq: u64,
+    pub event: SleWireEvent,
+}
+
+/// Global broadcast ring buffer for multi-listener event delivery.
+///
+/// Design rationale: instead of maintaining a global list of per-fd event
+/// queue references (which would require Arc<PollCondVar> and complex
+/// lifetime management), we use a `/dev/kmsg`-style model:
+///
+/// - One shared ring buffer holds the most recent BROADCAST_RING_SIZE events.
+/// - Each event gets a monotonically increasing sequence number.
+/// - Each fd tracks its own `last_seq` cursor.
+/// - On poll/read, the fd copies events with seq > last_seq into its local
+///   EventQueue, then reads from the local queue as before.
+///
+/// This decouples event production from fd lifetime and naturally supports
+/// any number of concurrent readers without a global fd registry.
+pub struct BroadcastRing {
+    buf: [BroadcastEntry; BROADCAST_RING_SIZE],
+    /// Write position (next slot to write).
+    write_pos: usize,
+    /// Number of valid entries (min of total written and BROADCAST_RING_SIZE).
+    count: usize,
+}
+
+impl BroadcastRing {
+    /// Create an empty broadcast ring.
+    pub fn new() -> Self {
+        Self {
+            // SAFETY: BroadcastEntry is Copy with repr(C) primitives.
+            buf: unsafe { core::mem::zeroed() },
+            write_pos: 0,
+            count: 0,
+        }
+    }
+
+    /// Publish an event to the broadcast ring. Returns the assigned sequence.
+    pub fn publish(&mut self, event: SleWireEvent) -> u64 {
+        let seq = BROADCAST_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+        self.buf[self.write_pos] = BroadcastEntry { seq, event };
+        self.write_pos = (self.write_pos + 1) % BROADCAST_RING_SIZE;
+        if self.count < BROADCAST_RING_SIZE {
+            self.count += 1;
+        }
+        seq
+    }
+
+    /// Get the current (latest) sequence number.
+    pub fn current_seq() -> u64 {
+        BROADCAST_SEQ.load(Ordering::Relaxed)
+    }
+
+    /// Drain events newer than `after_seq` into the given per-fd EventQueue.
+    /// Returns the number of events copied and the new cursor position.
+    pub fn drain_since(&self, after_seq: u64, dst: &mut EventQueue) -> (usize, u64) {
+        if self.count == 0 {
+            return (0, after_seq);
+        }
+
+        let mut copied = 0usize;
+        let mut new_seq = after_seq;
+
+        // Scan the ring for entries with seq > after_seq.
+        // Since the ring is small (128) and we only scan once per poll,
+        // a linear scan is acceptable.
+        let start = if self.count < BROADCAST_RING_SIZE {
+            0
+        } else {
+            self.write_pos // oldest entry
+        };
+
+        for i in 0..self.count {
+            let idx = (start + i) % BROADCAST_RING_SIZE;
+            let entry = &self.buf[idx];
+            if entry.seq > after_seq {
+                // Copy event into per-fd queue.
+                dst.push_raw(entry.event);
+                copied += 1;
+                if entry.seq > new_seq {
+                    new_seq = entry.seq;
+                }
+            }
+        }
+
+        (copied, new_seq)
     }
 }

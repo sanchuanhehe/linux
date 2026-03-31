@@ -1241,6 +1241,8 @@ struct SubsystemShared {
     power: PowerInner,
     phy: sle_phy::PhyConfig,
     local_role: GtRole,
+    /// Global event broadcast ring for multi-listener delivery.
+    broadcast: sle_event::BroadcastRing,
 }
 
 // ---------------------------------------------------------------------------
@@ -1383,6 +1385,8 @@ struct SparkLinkCtl {
     #[pin]
     event_poll: PollCondVar,
     dev: ARef<Device>,
+    /// Broadcast ring cursor: sequence number of the last event this fd has seen.
+    last_seq: core::sync::atomic::AtomicU64,
 }
 
 #[vtable]
@@ -1419,6 +1423,7 @@ impl MiscDevice for SparkLinkCtl {
                     power: PowerInner::new(),
                     phy: sle_phy::PhyConfig::default_config(),
                     local_role: GtRole::TNode,
+                    broadcast: sle_event::BroadcastRing::new(),
                 });
                 pr_info!("sparklink: shared subsystem initialised\n");
             }
@@ -1431,6 +1436,9 @@ impl MiscDevice for SparkLinkCtl {
                     events <- new_mutex!(EventQueue::new()),
                     event_poll <- new_poll_condvar!("sparklink_event"),
                     dev: dev,
+                    last_seq: core::sync::atomic::AtomicU64::new(
+                        sle_event::BroadcastRing::current_seq()
+                    ),
                 }
             },
             GFP_KERNEL,
@@ -1439,6 +1447,8 @@ impl MiscDevice for SparkLinkCtl {
 
     fn read_iter(kiocb: Kiocb<'_, Self::Ptr>, iov: &mut IovIterDest<'_>) -> Result<usize> {
         let me = kiocb.file();
+        // Sync broadcast events into per-fd queue before reading.
+        Self::sync_broadcast(me.as_ref());
         let mut guard = me.events.lock();
         if !guard.has_events() {
             return Err(EAGAIN);
@@ -1460,6 +1470,8 @@ impl MiscDevice for SparkLinkCtl {
 
     fn poll(me: Pin<&SparkLinkCtl>, file: &FsFile, table: &PollTable<'_>) -> u32 {
         table.register_wait(file, &me.event_poll);
+        // Sync broadcast events into per-fd queue before checking.
+        Self::sync_broadcast(me.as_ref());
         let guard = me.events.lock();
         let mut mask = 0u32;
         if guard.has_events() {
@@ -1605,13 +1617,15 @@ impl MiscDevice for SparkLinkCtl {
                     s.adv_scan.process_adv_pdu(&pdu, inject.rssi)?;
                 }
                 let name_len = (inject.name_len as usize).min(31);
-                me.events.lock().push_adv_report(
-                    inject.addr,
-                    inject.rssi,
-                    inject.discovery_level,
-                    &inject.name[..name_len],
+                Self::broadcast_event(
+                    me.as_ref(),
+                    sle_event::SleWireEvent::adv_report(
+                        inject.addr,
+                        inject.rssi,
+                        inject.discovery_level,
+                        &inject.name[..name_len],
+                    ),
                 );
-                me.event_poll.notify_all();
                 genl_bridge::notify_event(0x02, 0, &inject.addr);
                 dev_info!(
                     me.dev,
@@ -1643,8 +1657,10 @@ impl MiscDevice for SparkLinkCtl {
                     let _ = s.controller.create_connection(&cp.peer_addr);
                     handle
                 };
-                me.events.lock().push_conn_state(handle, 0, 1, cp.peer_addr, 0);
-                me.event_poll.notify_all();
+                Self::broadcast_event(
+                    me.as_ref(),
+                    sle_event::SleWireEvent::conn_state(handle, 0, 1, cp.peer_addr, 0),
+                );
                 genl_bridge::notify_event(0x01, handle, &cp.peer_addr);
                 Ok(handle as isize)
             }
@@ -1660,8 +1676,10 @@ impl MiscDevice for SparkLinkCtl {
                     let _ = s.controller.disconnect(handle);
                     (handle, peer_addr, old_state)
                 };
-                me.events.lock().push_conn_state(handle, old_state, 0, peer_addr, 0);
-                me.event_poll.notify_all();
+                Self::broadcast_event(
+                    me.as_ref(),
+                    sle_event::SleWireEvent::conn_state(handle, old_state, 0, peer_addr, 0),
+                );
                 genl_bridge::notify_event(0x01, handle, &peer_addr);
                 Ok(0)
             }
@@ -1744,12 +1762,16 @@ impl MiscDevice for SparkLinkCtl {
                 };
                 match &result {
                     Ok(()) => {
-                        me.events.lock().push_conn_state(handle, 1, 2, peer_addr, 0);
-                        me.event_poll.notify_all();
+                        Self::broadcast_event(
+                            me.as_ref(),
+                            sle_event::SleWireEvent::conn_state(handle, 1, 2, peer_addr, 0),
+                        );
                     }
                     Err(_) => {
-                        me.events.lock().push_conn_state(handle, 1, 0, peer_addr, resp.response_type);
-                        me.event_poll.notify_all();
+                        Self::broadcast_event(
+                            me.as_ref(),
+                            sle_event::SleWireEvent::conn_state(handle, 1, 0, peer_addr, resp.response_type),
+                        );
                     }
                 }
                 result.map(|()| 0isize)
@@ -1768,8 +1790,10 @@ impl MiscDevice for SparkLinkCtl {
                     s.conn.receive_data(handle, &cd.data[..len], seq)?;
                 }
                 // Use cd.handle (unresolved) for the event since handle is local
-                me.events.lock().push_data_received(cd.handle, len as u16);
-                me.event_poll.notify_all();
+                Self::broadcast_event(
+                    me.as_ref(),
+                    sle_event::SleWireEvent::data_received(cd.handle, len as u16),
+                );
                 dev_info!(
                     me.dev,
                     "sparklink: injected {} bytes connection data (handle={})\n",
@@ -2252,6 +2276,44 @@ impl MiscDevice for SparkLinkCtl {
                 Err(ENOTTY)
             }
         }
+    }
+}
+
+impl SparkLinkCtl {
+    /// Synchronize events from the global broadcast ring into this fd's
+    /// per-listener event queue. Called before read() and poll() so that
+    /// all open fds see the same event stream regardless of which fd
+    /// triggered the operation that produced the event.
+    fn sync_broadcast(me: Pin<&SparkLinkCtl>) {
+        let cur = sle_event::BroadcastRing::current_seq();
+        let my_seq = me.last_seq.load(core::sync::atomic::Ordering::Relaxed);
+        if cur <= my_seq {
+            return; // no new events
+        }
+        let ss = SUBSYSTEM.lock();
+        if let Some(ref shared) = *ss {
+            let mut eq = me.events.lock();
+            let (copied, new_seq) = shared.broadcast.drain_since(my_seq, &mut eq);
+            if copied > 0 {
+                me.last_seq.store(new_seq, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Publish an event to the global broadcast ring (visible to all fds)
+    /// and also push it into this fd's local queue for immediate reads.
+    fn broadcast_event(me: Pin<&SparkLinkCtl>, event: sle_event::SleWireEvent) {
+        {
+            let mut ss = SUBSYSTEM.lock();
+            if let Some(ref mut shared) = *ss {
+                shared.broadcast.publish(event);
+            }
+        }
+        // Also push directly to this fd so the caller gets immediate read.
+        me.events.lock().push_raw(event);
+        let new_seq = sle_event::BroadcastRing::current_seq();
+        me.last_seq.store(new_seq, core::sync::atomic::Ordering::Relaxed);
+        me.event_poll.notify_all();
     }
 }
 

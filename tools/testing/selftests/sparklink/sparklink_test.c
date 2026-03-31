@@ -22,8 +22,11 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <stdint.h>
 #include <poll.h>
+#include <linux/netlink.h>
+#include <linux/genetlink.h>
 
 /* ------------------------------------------------------------------ */
 /* IOCTL definitions — must match sparklink_core.rs                   */
@@ -1765,6 +1768,187 @@ cleanup:
 }
 
 /* ------------------------------------------------------------------ */
+/* Generic Netlink test (raw socket, no libnl dependency)              */
+/* ------------------------------------------------------------------ */
+
+/* Sparklink genetlink constants (must match uapi/linux/sparklink.h) */
+#define SL_GENL_NAME		"sparklink"
+#define SL_GENL_CMD_GET_DEV_INFO 1
+#define SL_GENL_CMD_GET_VERSION	 28  /* SPARKLINK_CMD_GET_VERSION enum value */
+#define SL_GENL_ATTR_DEV_COUNT	 5   /* SPARKLINK_ATTR_DEV_COUNT */
+#define SL_GENL_ATTR_PROTO_VER	 6   /* SPARKLINK_ATTR_PROTO_VERSION */
+#define SL_GENL_ATTR_GENL_VER	 7   /* SPARKLINK_ATTR_GENL_VERSION */
+
+struct genl_msg {
+	struct nlmsghdr nlh;
+	struct genlmsghdr genl;
+	char attrs[256];
+};
+
+static int genl_resolve_family(int nlfd, const char *name)
+{
+	struct genl_msg req;
+	struct nlattr *nla;
+	char buf[4096];
+	struct nlmsghdr *nlh;
+	int len;
+
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+	req.nlh.nlmsg_type = GENL_ID_CTRL;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST;
+	req.nlh.nlmsg_seq = 1;
+	req.genl.cmd = CTRL_CMD_GETFAMILY;
+	req.genl.version = 1;
+
+	/* Add CTRL_ATTR_FAMILY_NAME attribute */
+	nla = (struct nlattr *)((char *)&req + req.nlh.nlmsg_len);
+	nla->nla_type = CTRL_ATTR_FAMILY_NAME;
+	nla->nla_len = NLA_HDRLEN + strlen(name) + 1;
+	memcpy((char *)nla + NLA_HDRLEN, name, strlen(name) + 1);
+	req.nlh.nlmsg_len += NLA_ALIGN(nla->nla_len);
+
+	if (send(nlfd, &req, req.nlh.nlmsg_len, 0) < 0)
+		return -1;
+
+	len = recv(nlfd, buf, sizeof(buf), 0);
+	if (len < 0)
+		return -1;
+
+	nlh = (struct nlmsghdr *)buf;
+	if (nlh->nlmsg_type == NLMSG_ERROR)
+		return -1;
+
+	/* Parse CTRL_ATTR_FAMILY_ID from response */
+	char *attr_start = buf + NLMSG_HDRLEN + GENL_HDRLEN;
+	int remaining = len - NLMSG_HDRLEN - GENL_HDRLEN;
+	while (remaining >= (int)NLA_HDRLEN) {
+		nla = (struct nlattr *)attr_start;
+		if (nla->nla_len < NLA_HDRLEN || (int)nla->nla_len > remaining)
+			break;
+		if (nla->nla_type == CTRL_ATTR_FAMILY_ID)
+			return *(uint16_t *)((char *)nla + NLA_HDRLEN);
+		int step = NLA_ALIGN(nla->nla_len);
+		attr_start += step;
+		remaining -= step;
+	}
+	return -1;
+}
+
+static int genl_send_cmd(int nlfd, uint16_t family_id, uint8_t cmd,
+			 uint32_t seq, char *resp, int resp_size)
+{
+	struct genl_msg req;
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+	req.nlh.nlmsg_type = family_id;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST;
+	req.nlh.nlmsg_seq = seq;
+	req.genl.cmd = cmd;
+	req.genl.version = 1;
+
+	if (send(nlfd, &req, req.nlh.nlmsg_len, 0) < 0)
+		return -1;
+
+	int len = recv(nlfd, resp, resp_size, 0);
+	if (len < 0)
+		return -1;
+
+	struct nlmsghdr *nlh = (struct nlmsghdr *)resp;
+	if (nlh->nlmsg_type == NLMSG_ERROR) {
+		struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(nlh);
+		if (err->error != 0)
+			return err->error;
+	}
+	return len;
+}
+
+static uint32_t genl_get_u32_attr(char *msg, int msg_len, uint16_t attr_type)
+{
+	char *attr_start = msg + NLMSG_HDRLEN + GENL_HDRLEN;
+	int remaining = msg_len - NLMSG_HDRLEN - GENL_HDRLEN;
+	while (remaining >= (int)NLA_HDRLEN) {
+		struct nlattr *nla = (struct nlattr *)attr_start;
+		if (nla->nla_len < NLA_HDRLEN || (int)nla->nla_len > remaining)
+			break;
+		if (nla->nla_type == attr_type && nla->nla_len >= NLA_HDRLEN + 4)
+			return *(uint32_t *)((char *)nla + NLA_HDRLEN);
+		int step = NLA_ALIGN(nla->nla_len);
+		attr_start += step;
+		remaining -= step;
+	}
+	return 0xDEAD;
+}
+
+static void test_genetlink(void)
+{
+	test_header("Generic Netlink: sparklink family");
+
+	int nlfd = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
+	if (nlfd < 0) {
+		printf("  FAIL: cannot open NETLINK_GENERIC socket: %s\n",
+		       strerror(errno));
+		return;
+	}
+
+	struct sockaddr_nl sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.nl_family = AF_NETLINK;
+	if (bind(nlfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+		printf("  FAIL: bind() failed: %s\n", strerror(errno));
+		close(nlfd);
+		return;
+	}
+
+	/* Step 1: Resolve sparklink family ID */
+	int family_id = genl_resolve_family(nlfd, SL_GENL_NAME);
+	if (family_id < 0) {
+		printf("  FAIL: cannot resolve genetlink family '%s'\n",
+		       SL_GENL_NAME);
+		close(nlfd);
+		return;
+	}
+	printf("  OK:   resolved family '%s' -> id=%d\n",
+	       SL_GENL_NAME, family_id);
+
+	/* Step 2: GET_DEV_INFO command */
+	char resp[4096];
+	int len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_GET_DEV_INFO,
+				2, resp, sizeof(resp));
+	if (len > 0) {
+		uint32_t count = genl_get_u32_attr(resp, len,
+						   SL_GENL_ATTR_DEV_COUNT);
+		if (count != 0xDEAD) {
+			printf("  OK:   GET_DEV_INFO: dev_count=%u\n", count);
+		} else {
+			printf("  FAIL: GET_DEV_INFO: missing DEV_COUNT attr\n");
+		}
+	} else {
+		printf("  FAIL: GET_DEV_INFO failed (len=%d)\n", len);
+	}
+
+	/* Step 3: GET_VERSION command */
+	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_GET_VERSION,
+			    3, resp, sizeof(resp));
+	if (len > 0) {
+		uint32_t proto_ver = genl_get_u32_attr(resp, len,
+						       SL_GENL_ATTR_PROTO_VER);
+		uint32_t genl_ver = genl_get_u32_attr(resp, len,
+						      SL_GENL_ATTR_GENL_VER);
+		if (proto_ver != 0xDEAD) {
+			printf("  OK:   GET_VERSION: proto=0x%06x genl=%u\n",
+			       proto_ver, genl_ver);
+		} else {
+			printf("  FAIL: GET_VERSION: missing version attrs\n");
+		}
+	} else {
+		printf("  FAIL: GET_VERSION failed (len=%d)\n", len);
+	}
+
+	close(nlfd);
+}
+
+/* ------------------------------------------------------------------ */
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -1806,6 +1990,7 @@ int main(void)
 	test_poll_epoll(fd);
 	test_ring_buffer_stress(fd);
 	test_multi_conn_concurrent(fd);
+	test_genetlink();
 
 	printf("\n=== All tests completed ===\n");
 

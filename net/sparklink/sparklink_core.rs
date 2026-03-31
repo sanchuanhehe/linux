@@ -1314,8 +1314,8 @@ impl MiscDevice for SparkLinkCtl {
                 let guard = me.conn.lock();
                 let handle = if req.handle == 0 {
                     // Legacy: find first active
-                    let handles = guard.active_handles();
-                    if handles.is_empty() {
+                    let (handles, count) = guard.active_handles();
+                    if count == 0 {
                         return Err(EPIPE);
                     }
                     handles[0]
@@ -1355,14 +1355,11 @@ impl MiscDevice for SparkLinkCtl {
                 let cd: SleConnData = read_user_struct(arg)?;
                 let mut guard = me.conn.lock();
                 let handle = guard.resolve_handle(cd.handle)?;
-                let data_vec = guard.recv(handle)?;
-                // Build SleConnData response
                 // SAFETY: SleConnData is repr(C), zeroed gives all-zero which is valid.
                 let mut out: SleConnData = unsafe { core::mem::zeroed() };
                 out.handle = handle;
-                let copy_len = data_vec.len().min(CONN_DATA_MAX);
-                out.length = copy_len as u16;
-                out.data[..copy_len].copy_from_slice(&data_vec[..copy_len]);
+                let recv_len = guard.recv(handle, &mut out.data)?;
+                out.length = recv_len.min(CONN_DATA_MAX) as u16;
                 drop(guard);
                 write_user_struct(arg, &out)?;
                 Ok(0)
@@ -1419,13 +1416,13 @@ impl MiscDevice for SparkLinkCtl {
             }
             SL_IOCTL_CONN_LIST => {
                 let guard = me.conn.lock();
-                let handles = guard.active_handles();
+                let (handles, count) = guard.active_handles();
                 // SAFETY: SleConnList is repr(C).
                 let mut list: SleConnList = unsafe { core::mem::zeroed() };
-                let count = handles.len().min(8);
+                let count = count.min(8);
                 list.count = count as u16;
-                for (i, &h) in handles.iter().take(8).enumerate() {
-                    list.handles[i] = h;
+                for i in 0..count {
+                    list.handles[i] = handles[i];
                 }
                 drop(guard);
                 write_user_struct(arg, &list)?;

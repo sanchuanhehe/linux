@@ -16,6 +16,109 @@
 use kernel::alloc::KVec;
 use kernel::prelude::*;
 
+/// Maximum number of messages in a connection data queue.
+const QUEUE_DEPTH: usize = 64;
+
+// ---------------------------------------------------------------------------
+// Pre-allocated ring buffer for connection data queues
+//
+// Replaces KVec<KVec<u8>> to eliminate per-message heap allocation.
+// Uses a single heap-allocated KVec<u8> as backing storage and a
+// fixed-size metadata array for message boundaries.
+// ---------------------------------------------------------------------------
+
+/// Slot metadata: offset into backing buffer and message length.
+#[derive(Copy, Clone, Default)]
+struct SlotMeta {
+    offset: u32,
+    length: u16,
+}
+
+/// Fixed-capacity ring buffer for connection TX/RX data.
+///
+/// Backing storage is a single heap allocation. Message boundaries
+/// are tracked in a small fixed-size metadata array.
+/// Enqueue/dequeue are O(1) with no per-message allocation.
+pub struct DataRingBuffer {
+    /// Backing storage for all messages (heap-allocated).
+    storage: KVec<u8>,
+    /// Per-slot metadata.
+    meta: [SlotMeta; QUEUE_DEPTH],
+    /// Read cursor.
+    head: usize,
+    /// Number of valid entries.
+    count: usize,
+    /// Write offset into storage.
+    write_off: u32,
+    /// Total capacity of storage.
+    capacity: u32,
+}
+
+impl DataRingBuffer {
+    fn try_new() -> Result<Self> {
+        let cap = QUEUE_DEPTH * CONN_DATA_MAX; // 16320 bytes
+        let mut storage = KVec::with_capacity(cap, GFP_KERNEL)?;
+        // Pre-fill to set length = capacity so we can index safely
+        for _ in 0..cap {
+            storage.push(0u8, GFP_KERNEL)?;
+        }
+        Ok(Self {
+            storage,
+            meta: [SlotMeta::default(); QUEUE_DEPTH],
+            head: 0,
+            count: 0,
+            write_off: 0,
+            capacity: cap as u32,
+        })
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.count
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Enqueue data into the ring buffer. Returns EAGAIN if full.
+    fn enqueue(&mut self, data: &[u8]) -> Result {
+        if self.count >= QUEUE_DEPTH {
+            return Err(EAGAIN);
+        }
+        let len = data.len().min(CONN_DATA_MAX);
+        let tail = (self.head + self.count) % QUEUE_DEPTH;
+        let off = (tail * CONN_DATA_MAX) as u32;
+        self.storage[off as usize..off as usize + len].copy_from_slice(&data[..len]);
+        self.meta[tail] = SlotMeta { offset: off, length: len as u16 };
+        self.count += 1;
+        Ok(())
+    }
+
+    /// Dequeue into a caller-provided buffer. Returns the number of bytes
+    /// in the dequeued message, or EAGAIN if empty.
+    fn dequeue_into(&mut self, buf: &mut [u8]) -> Result<usize> {
+        if self.count == 0 {
+            return Err(EAGAIN);
+        }
+        let m = self.meta[self.head];
+        let len = m.length as usize;
+        let off = m.offset as usize;
+        let copy_len = len.min(buf.len());
+        buf[..copy_len].copy_from_slice(&self.storage[off..off + copy_len]);
+        self.head = (self.head + 1) % QUEUE_DEPTH;
+        self.count -= 1;
+        Ok(len)
+    }
+
+    /// Drop the oldest entry. Used for overflow handling.
+    fn drop_oldest(&mut self) {
+        if self.count > 0 {
+            self.head = (self.head + 1) % QUEUE_DEPTH;
+            self.count -= 1;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GT role definitions (T/XS 10002-2025 table 32, GT角色标志)
 // ---------------------------------------------------------------------------
@@ -285,9 +388,9 @@ pub struct ConnEntry {
     /// Sequence number tracker.
     pub seq: SeqTracker,
     /// Transmit data queue (userspace -> peer).
-    pub tx_queue: KVec<KVec<u8>>,
+    pub tx_queue: DataRingBuffer,
     /// Receive data queue (peer -> userspace).
-    pub rx_queue: KVec<KVec<u8>>,
+    pub rx_queue: DataRingBuffer,
     /// Maximum queue depth.
     pub queue_max: usize,
     /// Total bytes sent.
@@ -297,8 +400,8 @@ pub struct ConnEntry {
 }
 
 impl ConnEntry {
-    fn new(handle: u16) -> Self {
-        Self {
+    fn try_new(handle: u16) -> Result<Self> {
+        Ok(Self {
             handle,
             state: ConnState::Idle,
             peer_addr: [0u8; 6],
@@ -306,12 +409,12 @@ impl ConnEntry {
             local_cap: AccessCapability::default(),
             params: NegotiatedParams::default(),
             seq: SeqTracker::new_async(),
-            tx_queue: KVec::new(),
-            rx_queue: KVec::new(),
-            queue_max: 64,
+            tx_queue: DataRingBuffer::try_new()?,
+            rx_queue: DataRingBuffer::try_new()?,
+            queue_max: QUEUE_DEPTH,
             tx_bytes: 0,
             rx_bytes: 0,
-        }
+        })
     }
 }
 
@@ -412,7 +515,7 @@ impl ConnManager {
             }
         }
         let handle = self.alloc_handle();
-        let mut entry = ConnEntry::new(handle);
+        let mut entry = ConnEntry::try_new(handle)?;
         entry.peer_addr = peer_addr;
         entry.local_role = role;
         entry.seq = SeqTracker::new_async();
@@ -511,12 +614,7 @@ impl ConnManager {
         if data.is_empty() || data.len() > CONN_DATA_MAX {
             return Err(EINVAL);
         }
-        if entry.tx_queue.len() >= entry.queue_max {
-            return Err(EAGAIN);
-        }
-        let mut buf = KVec::new();
-        buf.extend_from_slice(data, GFP_KERNEL)?;
-        entry.tx_queue.push(buf, GFP_KERNEL)?;
+        entry.tx_queue.enqueue(data)?;
         entry.seq.advance_tx();
         entry.tx_bytes += data.len() as u64;
         Ok(data.len())
@@ -532,26 +630,22 @@ impl ConnManager {
             return Ok(());
         }
         if entry.rx_queue.len() >= entry.queue_max {
-            let _ = entry.rx_queue.remove(0);
+            entry.rx_queue.drop_oldest();
         }
-        let mut buf = KVec::new();
-        buf.extend_from_slice(data, GFP_KERNEL)?;
-        entry.rx_queue.push(buf, GFP_KERNEL)?;
+        entry.rx_queue.enqueue(data)?;
         entry.seq.advance_rx();
         entry.rx_bytes += data.len() as u64;
         Ok(())
     }
 
-    /// Receive data from a connection by handle.
-    pub fn recv(&mut self, handle: u16) -> Result<KVec<u8>> {
+    /// Receive data from a connection by handle into the provided buffer.
+    /// Returns the number of bytes in the dequeued message.
+    pub fn recv(&mut self, handle: u16, buf: &mut [u8]) -> Result<usize> {
         let entry = self.find_mut(handle)?;
         if entry.state != ConnState::Connected {
             return Err(EPIPE);
         }
-        if entry.rx_queue.is_empty() {
-            return Err(EAGAIN);
-        }
-        entry.rx_queue.remove(0).map_err(|_| EINVAL)
+        entry.rx_queue.dequeue_into(buf)
     }
 
     /// Get connection info by handle.
@@ -563,15 +657,18 @@ impl ConnManager {
         Ok(entry)
     }
 
-    /// Get a list of active connection handles.
-    pub fn active_handles(&self) -> KVec<u16> {
-        let mut handles = KVec::new();
+    /// Get a list of active connection handles (stack-allocated).
+    /// Returns (array, count).
+    pub fn active_handles(&self) -> ([u16; MAX_CONNECTIONS], usize) {
+        let mut handles = [0u16; MAX_CONNECTIONS];
+        let mut count = 0;
         for entry in self.connections.iter() {
-            if entry.state != ConnState::Idle {
-                let _ = handles.push(entry.handle, GFP_KERNEL);
+            if entry.state != ConnState::Idle && count < MAX_CONNECTIONS {
+                handles[count] = entry.handle;
+                count += 1;
             }
         }
-        handles
+        (handles, count)
     }
 
     // --- Legacy single-connection compatibility layer ---

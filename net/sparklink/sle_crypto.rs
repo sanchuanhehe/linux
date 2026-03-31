@@ -419,6 +419,7 @@ pub fn hmac_sm3(key: &[u8], data: &[u8]) -> [u8; SM3_DIGEST_SIZE] {
 /// Encrypt or decrypt data using SM4 in CTR mode.
 ///
 /// `nonce` is 12 bytes; the 4-byte big-endian counter starts at `start_ctr`.
+/// XOR is performed in u64 chunks when possible for throughput.
 pub fn sm4_ctr(key: &Sm4Key, nonce: &[u8; 12], start_ctr: u32, data: &mut [u8]) {
     let mut ctr = start_ctr;
     let mut offset = 0;
@@ -431,8 +432,24 @@ pub fn sm4_ctr(key: &Sm4Key, nonce: &[u8; 12], start_ctr: u32, data: &mut [u8]) 
         let keystream = key.encrypt_block(&blk);
 
         let chunk = (data.len() - offset).min(SM4_BLOCK_SIZE);
-        for i in 0..chunk {
-            data[offset + i] ^= keystream[i];
+
+        // XOR in 8-byte words for full 16-byte blocks
+        if chunk == SM4_BLOCK_SIZE {
+            let d = &mut data[offset..offset + SM4_BLOCK_SIZE];
+            let lo = u64::from_ne_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]);
+            let hi = u64::from_ne_bytes([d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]]);
+            let klo = u64::from_ne_bytes([keystream[0], keystream[1], keystream[2], keystream[3],
+                                          keystream[4], keystream[5], keystream[6], keystream[7]]);
+            let khi = u64::from_ne_bytes([keystream[8], keystream[9], keystream[10], keystream[11],
+                                          keystream[12], keystream[13], keystream[14], keystream[15]]);
+            let rlo = (lo ^ klo).to_ne_bytes();
+            let rhi = (hi ^ khi).to_ne_bytes();
+            d[..8].copy_from_slice(&rlo);
+            d[8..16].copy_from_slice(&rhi);
+        } else {
+            for i in 0..chunk {
+                data[offset + i] ^= keystream[i];
+            }
         }
 
         offset += chunk;

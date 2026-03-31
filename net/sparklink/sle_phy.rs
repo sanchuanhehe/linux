@@ -490,4 +490,90 @@ impl PhyConfig {
         self.tx_power_dbm = power_dbm;
         Ok(())
     }
+
+    /// Encode PHY parameters for DLI ReadPhyParam response.
+    ///
+    /// Format (T/XS 10003-2025 ReadPhyParam response):
+    ///   [0]    = MCS index
+    ///   [1]    = bandwidth (0=1MHz, 1=2MHz, 2=4MHz)
+    ///   [2]    = pilot density
+    ///   [3]    = TX power (signed i8)
+    ///   [4]    = MIMO mode
+    ///   [5]    = num_tx antennas
+    ///   [6]    = num_rx antennas
+    pub fn encode_dli_params(&self, buf: &mut [u8]) -> usize {
+        if buf.len() < 7 {
+            return 0;
+        }
+        buf[0] = self.mcs_index;
+        buf[1] = match self.bandwidth_mhz {
+            1 => 0,
+            2 => 1,
+            4 => 2,
+            _ => 0,
+        };
+        buf[2] = self.pilot_density;
+        buf[3] = self.tx_power_dbm as u8;
+        buf[4] = self.antenna.mode as u8;
+        buf[5] = self.antenna.num_tx;
+        buf[6] = self.antenna.num_rx;
+        7
+    }
+
+    /// Decode PHY parameters from DLI SetPhyParam command payload.
+    ///
+    /// Accepts the same format as encode_dli_params produces.
+    /// Returns Ok(()) on success, Err(EINVAL) if parameters are invalid.
+    pub fn decode_dli_params(&mut self, buf: &[u8]) -> Result {
+        if buf.len() < 7 {
+            return Err(EINVAL);
+        }
+        self.set_mcs(buf[0])?;
+        let bw = match buf[1] {
+            0 => 1u8,
+            1 => 2,
+            2 => 4,
+            _ => return Err(EINVAL),
+        };
+        self.set_bandwidth(bw)?;
+        if buf[2] > 3 {
+            return Err(EINVAL);
+        }
+        self.pilot_density = buf[2];
+        self.set_tx_power(buf[3] as i8)?;
+        match MimoMode::from_raw(buf[4]) {
+            Some(m) => self.antenna.mode = m,
+            None => return Err(EINVAL),
+        }
+        self.antenna.num_tx = buf[5];
+        self.antenna.num_rx = buf[6];
+        Ok(())
+    }
+
+    /// Build feature bitmask from current PHY config.
+    ///
+    /// Maps MCS index, bandwidth, and pilot density to the
+    /// SleFeature bits defined in sle_dli.rs.
+    pub fn to_feature_bits(&self) -> u64 {
+        let mut bits = 0u64;
+        // MCS feature bits (SleFeature::Mcs0 = 1<<14, ..Mcs12 = 1<<26)
+        if self.mcs_index <= 12 {
+            bits |= 1u64 << (14 + self.mcs_index as u32);
+        }
+        // Bandwidth
+        if self.bandwidth_mhz >= 2 {
+            bits |= 1u64 << 8; // Bw2m
+        }
+        if self.bandwidth_mhz >= 4 {
+            bits |= 1u64 << 9; // Bw4m
+        }
+        // Pilot density
+        match self.pilot_density {
+            0 => bits |= 1u64 << 10, // Pilot4to1
+            1 => bits |= 1u64 << 11, // Pilot8to1
+            2 => bits |= 1u64 << 12, // Pilot16to1
+            _ => {}
+        }
+        bits
+    }
 }

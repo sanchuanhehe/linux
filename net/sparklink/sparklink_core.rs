@@ -27,6 +27,8 @@ mod sle_usb;
 mod sle_netlink;
 mod sle_configfs;
 mod sle_phy;
+mod sle_uart;
+mod sle_spi;
 
 use sle_dli::SleController;
 

@@ -26,29 +26,35 @@ The subsystem is organized in a layered architecture:
 
 .. code-block:: none
 
-    +------------------------------------------------------+
+    +-------------------------------------------------------+
     |                    USER SPACE                         |
     |   sparklink_ctl / sparklink_test / custom app         |
-    +------------------------------------------------------+
+    +-------------------------------------------------------+
             |  ioctl + read()  |  Generic Netlink  |  configfs
-            v                  v                    v
-    +------------------------------------------------------+
+            v                  v                   v
+    +-------------------------------------------------------+
     |              sparklink_core (SCI)                     |
     |  misc device - ioctl dispatch - event queue - debugfs |
     |  sparklink_genl.c (genetlink) - sle_configfs (config) |
-    +--+------+------+------+------+------+------+------+--+
+    +--+------+------+------+------+------+------+------+---+
        |      |      |      |      |      |      |      |
        v      v      v      v      v      v      v      v
     sle_pdu sle_adv sle_conn sle_crypto sle_sec sle_ssap sle_power sle_event
     codec   adv/scan  multi    SM3/SM4  pairing   SSAP     PM     event queue
                      conn
-    +------------------------------------------------------+
+    +-------------------------------------------------------+
+    |               sle_phy (PHY layer)                    |
+    |   MCS table - freq hopping - MIMO - power control    |
+    +-------------------------------------------------------+
     |                  sle_dli (DLI)                        |
     |  SleController trait - opcode/event model (10003)     |
-    +------+-----------------------+-----------------------+
-           |                       |
-    VirtualController        sle_usb (USB driver)
-       (loopback)            hardware discovery
+    +------+------------------+------------------+----------+
+           |                  |                  |
+    VirtualController    sle_uart (UART)    sle_spi (SPI)
+       (loopback)        H4 framing        register-based
+                              |                  |
+                         sle_usb (USB)           |
+                        hardware discovery       |
 
 Module descriptions:
 
@@ -111,6 +117,29 @@ Module descriptions:
   standard DLI opcode encoding (OGF/OCF), event codes, and feature
   bits from the 80-bit feature set.
 
+**sle_phy** (``net/sparklink/sle_phy.rs``)
+  PHY layer parameter management following T/XS 10002-2025. Includes
+  13-entry MCS table (BPSK to 256QAM), adaptive MCS selection based on
+  SINR thresholds, 79-channel frequency hopping with configurable hop
+  increment, bandwidth configuration (1/2/4 MHz), TX power control
+  (-20 to +10 dBm), and MIMO mode support (SISO, 2x2 spatial
+  multiplexing, transmit/receive diversity, beamforming).
+
+**sle_uart** (``net/sparklink/sle_uart.rs``)
+  UART DLI transport following T/XS 10003-2025. Implements H4-like
+  byte-stream framing with packet type indicator, byte-by-byte state
+  machine parsing (WaitType -> ReadHeader -> ReadPayload), and
+  ``UartController`` implementing the ``SleController`` trait.
+  Supports configurable baud rate and hardware flow control.
+
+**sle_spi** (``net/sparklink/sle_spi.rs``)
+  SPI DLI transport following T/XS 10003-2025. Implements register-based
+  command/response protocol with 6 register addresses (STATUS, CMD,
+  DATA_TX, DATA_RX, CONFIG, INT_STATUS). Provides SPI message builders
+  for command, data write, status read, and RX read operations.
+  ``SpiController`` implements the ``SleController`` trait with
+  configurable frequency, SPI mode, and CS polarity.
+
 **sle_usb** (``net/sparklink/sle_usb.rs``)
   USB transport implementation for SLE DLI controllers. Provides DLI
   packet framing (command/event/data), ``UsbController`` implementing
@@ -142,6 +171,9 @@ Source code layout
     ├── sle_netlink.rs           # Netlink protocol types
     ├── sle_configfs.rs          # Configfs runtime configuration
     ├── sle_dli.rs               # Driver layer interface
+    ├── sle_phy.rs               # PHY layer parameters
+    ├── sle_uart.rs              # UART DLI transport
+    ├── sle_spi.rs               # SPI DLI transport
     └── sle_usb.rs               # USB transport + hardware discovery
 
     drivers/sparklink/
@@ -476,6 +508,44 @@ Event notification (0x70-0x71)
         uint64_t total_delivered;  /* delivered to userspace */
     };
 
+PHY layer (0x90 -- 0x95)
+------------------------
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0x90
+     - ``PHY_INFO``
+     - Read (SlePhyInfo)
+     - Get current PHY configuration (MCS, bandwidth, TX power, MIMO mode)
+   * - 0x91
+     - ``PHY_SET_MCS``
+     - Write (SlePhyMcsCmd)
+     - Set MCS index (0--12) for modulation and coding rate selection
+   * - 0x92
+     - ``PHY_SET_TXPOWER``
+     - Write/Read (SlePhyTxPowerCmd)
+     - Set TX power in dBm (range: -20 to +10)
+   * - 0x93
+     - ``PHY_MCS_SELECT``
+     - Write/Read (SlePhyMcsSelect)
+     - Adaptive MCS selection: given SINR and bandwidth, selects optimal
+       MCS index and returns effective data rate in kbps
+   * - 0x94
+     - ``PHY_HOP_NEXT``
+     - Read (SlePhyHopInfo)
+     - Advance the frequency hopping state machine by one event and return
+       current channel index, hop increment, and event counter
+   * - 0x95
+     - ``PHY_SET_BW``
+     - Write (SlePhyBwCmd)
+     - Set channel bandwidth (1, 2, or 4 MHz)
+
 DLI controller info (0x80 -- 0x81)
 ----------------------------------
 
@@ -747,6 +817,227 @@ Example:
     # Or via ioctl (returns count as ioctl retval)
     #   ioctl(fd, SL_IOCTL_USB_DEV_COUNT)
 
+UART transport module
+---------------------
+
+The ``sle_uart.rs`` module implements H4-like byte-stream framing for
+UART-attached SLE controllers, following T/XS 10003-2025.
+
+Wire format:
+
+.. code-block:: none
+
+    Byte 0:       Packet type indicator
+                  0xA1 = Command, 0xA2 = Event, 0xA3 = Data
+    Bytes 1-2:    Opcode (Command/Event) or Handle (Data), LE16
+    Byte 3:       Parameter length (Command/Event, 1 byte)
+    Bytes 3-4:    Data length (Data packets, LE16, 2 bytes)
+    Bytes N..:    Payload
+
+The ``UartParser`` is a byte-by-byte state machine with three states:
+
+1. **WaitType** -- Waiting for the packet type indicator byte
+2. **ReadHeader** -- Collecting the 2-byte opcode/handle and length field(s)
+3. **ReadPayload** -- Collecting the payload bytes
+
+On allocation failure during payload collection, the parser resets to
+WaitType to maintain frame synchronization.
+
+``UartConfig`` supports baud rate (default 115200) and hardware flow
+control (RTS/CTS).
+
+SPI transport module
+--------------------
+
+The ``sle_spi.rs`` module implements register-based SPI transport for
+SLE controllers, following T/XS 10003-2025.
+
+Register map:
+
+.. list-table::
+   :widths: 10 20 70
+   :header-rows: 1
+
+   * - Addr
+     - Name
+     - Description
+   * - 0x00
+     - STATUS
+     - Controller status (read-only)
+   * - 0x01
+     - CMD
+     - Command register (write: send DLI command)
+   * - 0x02
+     - DATA_TX
+     - TX data FIFO (write: queue outbound data)
+   * - 0x03
+     - DATA_RX
+     - RX data FIFO (read: retrieve inbound data)
+   * - 0x04
+     - CONFIG
+     - Configuration register (read/write)
+   * - 0x05
+     - INT_STATUS
+     - Interrupt status (read to check, write to clear)
+
+SPI read operations set bit 7 of the register address (``0x80``).
+
+Interrupt status bits:
+
+- Bit 0: ``RX_READY`` -- Data available in RX FIFO
+- Bit 1: ``TX_READY`` -- TX FIFO can accept data
+- Bit 2: ``CMD_COMPLETE`` -- Command execution completed
+- Bit 3: ``ERROR`` -- Controller error
+
+Data frame format (DATA_TX/DATA_RX):
+
+.. code-block:: none
+
+    Byte 0:       Register address (DATA_TX=0x02 or DATA_RX=0x83)
+    Byte 1:       Packet type (0xA1/0xA2/0xA3)
+    Bytes 2-3:    Opcode/Handle (LE16)
+    Bytes 4-5:    Payload length (LE16)
+    Bytes 6..N:   Payload
+
+``SpiConfig`` supports SPI clock frequency (default 8 MHz), SPI mode
+(0--3), and chip-select active-low polarity.
+
+PHY layer
+=========
+
+The PHY layer module (``sle_phy.rs``) manages physical layer parameters
+as specified in T/XS 10002-2025.
+
+MCS table
+---------
+
+The SLE air interface defines 13 MCS (Modulation and Coding Scheme)
+indices:
+
+.. list-table::
+   :widths: 8 15 12 15 50
+   :header-rows: 1
+
+   * - MCS
+     - Modulation
+     - Code rate
+     - Bits/symbol
+     - Notes
+   * - 0
+     - BPSK
+     - 1/2
+     - 1
+     - Minimum rate, maximum range
+   * - 1
+     - BPSK
+     - 3/4
+     - 1
+     -
+   * - 2
+     - QPSK
+     - 1/2
+     - 2
+     -
+   * - 3
+     - QPSK
+     - 3/4
+     - 2
+     -
+   * - 4
+     - 16QAM
+     - 1/2
+     - 4
+     - Default MCS
+   * - 5
+     - 16QAM
+     - 3/4
+     - 4
+     -
+   * - 6
+     - 64QAM
+     - 1/2
+     - 6
+     -
+   * - 7
+     - 64QAM
+     - 2/3
+     - 6
+     -
+   * - 8
+     - 64QAM
+     - 3/4
+     - 6
+     -
+   * - 9
+     - 64QAM
+     - 5/6
+     - 6
+     -
+   * - 10
+     - 256QAM
+     - 1/2
+     - 8
+     -
+   * - 11
+     - 256QAM
+     - 3/4
+     - 8
+     -
+   * - 12
+     - 256QAM
+     - 5/6
+     - 8
+     - Maximum rate, requires high SINR
+
+Adaptive MCS selection chooses the highest feasible MCS index for the
+reported SINR (in 0.1 dB units) and channel bandwidth, returning the
+effective data rate in kbps.
+
+Frequency hopping
+-----------------
+
+SLE uses a 79-channel frequency hopping scheme. The hopping algorithm
+computes each channel as:
+
+.. code-block:: none
+
+    next_channel = (current_channel + hop_increment) mod num_used_channels
+    mapped_channel = channel_map.nth_used(next_channel)
+
+``hop_increment`` is negotiated during connection setup (valid range:
+5--16). The channel map is an 80-bit bitmask where each bit represents
+one of 79 usable channels. ``nth_used()`` remaps the logical channel
+index to the actual RF channel, skipping channels marked as bad.
+
+MIMO modes
+----------
+
+The PHY layer supports five antenna configurations:
+
+- **SISO** -- Single input, single output (1 stream)
+- **SpatialMux2x2** -- 2x2 spatial multiplexing (2 streams)
+- **TxDiversity2x1** -- Transmit diversity, 2 TX / 1 RX
+- **RxDiversity1x2** -- Receive diversity, 1 TX / 2 RX
+- **Beamforming2x2** -- 2x2 beamforming (1 logical stream)
+
+MIMO mode negotiation uses a min-capability model: both sides report
+their maximum supported mode, and the lesser mode is selected.
+
+DLI parameter encoding
+-----------------------
+
+PHY parameters are encoded in a 7-byte format for DLI ReadPhyParam
+and SetPhyParam commands:
+
+.. code-block:: none
+
+    Byte 0:    MCS index (0--12)
+    Byte 1:    Bandwidth (1, 2, or 4 MHz)
+    Byte 2:    Pilot pattern
+    Byte 3:    TX power (signed, dBm)
+    Byte 4:    MIMO mode
+    Bytes 5-6: Reserved
+
 configfs runtime configuration
 ==============================
 
@@ -891,7 +1182,7 @@ sparklink_test
 
 Integration test program at
 ``tools/testing/selftests/sparklink/sparklink_test.c``.
-Covers all subsystem ioctl interfaces with 27 test cases:
+Covers all subsystem ioctl interfaces with 28 test cases:
 
 - Device management: count, info, register
 - Advertising: start/stop, duplicate detection
@@ -913,6 +1204,8 @@ Covers all subsystem ioctl interfaces with 27 test cases:
 - Configfs: mount, default readback, write/readback, boundary validation
 - USB hardware discovery: device count query
 - Generic Netlink: family lookup, GET_DEV_INFO, GET_VERSION
+- PHY layer: MCS set/get, bandwidth, TX power, adaptive MCS selection,
+  frequency hopping, invalid parameter rejection
 - Error handling: unknown ioctl
 
 Build and run:
@@ -948,7 +1241,7 @@ The script:
 1. Builds ``sparklink_test`` as a static binary
 2. Creates a minimal initramfs with busybox and the test binary
 3. Boots the kernel in QEMU with KVM (if available)
-4. Waits for ``/dev/sparklink`` and runs all 27 test cases
+4. Waits for ``/dev/sparklink`` and runs all 28 test cases
 5. Parses console output for OK/FAIL/WARN counts and overall result
 
 sparklink_ctl
@@ -996,6 +1289,13 @@ CLI control tool at ``tools/testing/selftests/sparklink/sparklink_ctl.c``.
 
     dli info                          Show DLI controller information
     dli stats                         Show event queue statistics
+
+    phy info                          Show PHY configuration (MCS, BW, power)
+    phy mcs <index>                   Set MCS index (0-12)
+    phy bw <1|2|4>                    Set channel bandwidth (MHz)
+    phy power <dBm>                   Set TX power (-20 to +10)
+    phy select <sinr_x10> <bw>        Adaptive MCS selection
+    phy hop                           Advance frequency hopping
 
 Build:
 
@@ -1108,10 +1408,10 @@ Limitations and future work
 
 Current limitations:
 
-1. **No physical hardware driver** -- The USB driver framework is in
-   place and can automatically detect SLE controllers, but actual USB
-   I/O (bulk/interrupt transfers) returns ``ENODEV`` until a physical
-   device is available for integration testing.
+1. **No physical hardware driver** -- The USB, UART, and SPI transport
+   frameworks are in place with complete framing and protocol support,
+   but actual hardware I/O returns ``ENODEV`` until a physical controller
+   is available for integration testing.
 
 2. **C bridge for genetlink** -- The Generic Netlink family is
    registered via a C bridge (``sparklink_genl.c``) because upstream
@@ -1129,6 +1429,7 @@ Current limitations:
 Planned work:
 
 - USB bulk/interrupt I/O integration for physical SLE radio controllers
+- UART/SPI bus driver binding for embedded SLE radio modules
 - Pure Rust genetlink registration when upstream Rust bindings mature
 - Kernel crypto API integration for hardware-accelerated SM3/SM4
 

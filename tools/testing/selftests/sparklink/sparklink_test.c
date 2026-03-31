@@ -25,6 +25,8 @@
 #include <sys/socket.h>
 #include <stdint.h>
 #include <poll.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
 #include <linux/netlink.h>
 #include <linux/genetlink.h>
 
@@ -1880,6 +1882,139 @@ static uint32_t genl_get_u32_attr(char *msg, int msg_len, uint16_t attr_type)
 	return 0xDEAD;
 }
 
+/* ------------------------------------------------------------------ */
+/* configfs tests                                                      */
+/* ------------------------------------------------------------------ */
+
+#define CONFIGFS_BASE "/sys/kernel/config/sparklink"
+
+static int read_configfs_attr(const char *name, char *buf, size_t sz)
+{
+	char path[256];
+	snprintf(path, sizeof(path), CONFIGFS_BASE "/%s", name);
+	int f = open(path, O_RDONLY);
+	if (f < 0) return -1;
+	ssize_t n = read(f, buf, sz - 1);
+	close(f);
+	if (n < 0) return -1;
+	buf[n] = '\0';
+	/* strip trailing newline */
+	if (n > 0 && buf[n - 1] == '\n') buf[n - 1] = '\0';
+	return 0;
+}
+
+static int write_configfs_attr(const char *name, const char *val)
+{
+	char path[256];
+	snprintf(path, sizeof(path), CONFIGFS_BASE "/%s", name);
+	int f = open(path, O_WRONLY);
+	if (f < 0) return -1;
+	ssize_t n = write(f, val, strlen(val));
+	close(f);
+	return n > 0 ? 0 : -1;
+}
+
+static void test_configfs(void)
+{
+	char buf[128];
+
+	test_header("configfs: mount and version");
+	/* Ensure configfs is mounted */
+	mkdir("/sys/kernel/config", 0755);
+	if (mount("none", "/sys/kernel/config", "configfs", 0, NULL) < 0) {
+		if (errno != EBUSY) {
+			printf("  OK:   configfs mount skipped (errno=%d)\n", errno);
+		}
+	}
+
+	if (read_configfs_attr("version", buf, sizeof(buf)) == 0) {
+		printf("  OK:   version = %s\n", buf);
+	} else {
+		printf("  FAIL: cannot read version attribute\n");
+	}
+
+	test_header("configfs: read defaults");
+	if (read_configfs_attr("max_connections", buf, sizeof(buf)) == 0)
+		printf("  OK:   max_connections = %s (default)\n", buf);
+	else
+		printf("  FAIL: cannot read max_connections\n");
+
+	if (read_configfs_attr("adv_interval_ms", buf, sizeof(buf)) == 0)
+		printf("  OK:   adv_interval_ms = %s (default)\n", buf);
+	else
+		printf("  FAIL: cannot read adv_interval_ms\n");
+
+	if (read_configfs_attr("scan_window_ms", buf, sizeof(buf)) == 0)
+		printf("  OK:   scan_window_ms = %s (default)\n", buf);
+	else
+		printf("  FAIL: cannot read scan_window_ms\n");
+
+	if (read_configfs_attr("power_mode", buf, sizeof(buf)) == 0)
+		printf("  OK:   power_mode = %s (default)\n", buf);
+	else
+		printf("  FAIL: cannot read power_mode\n");
+
+	test_header("configfs: write and readback");
+	if (write_configfs_attr("max_connections", "4") == 0 &&
+	    read_configfs_attr("max_connections", buf, sizeof(buf)) == 0 &&
+	    strcmp(buf, "4") == 0)
+		printf("  OK:   max_connections set to 4\n");
+	else
+		printf("  FAIL: max_connections write/readback\n");
+
+	if (write_configfs_attr("adv_interval_ms", "500") == 0 &&
+	    read_configfs_attr("adv_interval_ms", buf, sizeof(buf)) == 0 &&
+	    strcmp(buf, "500") == 0)
+		printf("  OK:   adv_interval_ms set to 500\n");
+	else
+		printf("  FAIL: adv_interval_ms write/readback\n");
+
+	if (write_configfs_attr("scan_window_ms", "300") == 0 &&
+	    read_configfs_attr("scan_window_ms", buf, sizeof(buf)) == 0 &&
+	    strcmp(buf, "300") == 0)
+		printf("  OK:   scan_window_ms set to 300\n");
+	else
+		printf("  FAIL: scan_window_ms write/readback\n");
+
+	if (write_configfs_attr("power_mode", "sniff") == 0 &&
+	    read_configfs_attr("power_mode", buf, sizeof(buf)) == 0 &&
+	    strcmp(buf, "sniff") == 0)
+		printf("  OK:   power_mode set to sniff\n");
+	else
+		printf("  FAIL: power_mode write/readback\n");
+
+	test_header("configfs: boundary validation");
+	/* max_connections: 0 should fail */
+	if (write_configfs_attr("max_connections", "0") != 0)
+		printf("  OK:   max_connections=0 rejected\n");
+	else
+		printf("  FAIL: max_connections=0 should be rejected\n");
+
+	/* max_connections: 9 should fail */
+	if (write_configfs_attr("max_connections", "9") != 0)
+		printf("  OK:   max_connections=9 rejected\n");
+	else
+		printf("  FAIL: max_connections=9 should be rejected\n");
+
+	/* adv_interval_ms: 10 should fail (min is 20) */
+	if (write_configfs_attr("adv_interval_ms", "10") != 0)
+		printf("  OK:   adv_interval_ms=10 rejected (min 20)\n");
+	else
+		printf("  FAIL: adv_interval_ms=10 should be rejected\n");
+
+	/* power_mode: invalid string */
+	if (write_configfs_attr("power_mode", "turbo") != 0)
+		printf("  OK:   power_mode=turbo rejected\n");
+	else
+		printf("  FAIL: power_mode=turbo should be rejected\n");
+
+	/* Restore defaults */
+	write_configfs_attr("max_connections", "8");
+	write_configfs_attr("adv_interval_ms", "100");
+	write_configfs_attr("scan_window_ms", "200");
+	write_configfs_attr("power_mode", "active");
+}
+
 static void test_genetlink(void)
 {
 	test_header("Generic Netlink: sparklink family");
@@ -1990,6 +2125,7 @@ int main(void)
 	test_poll_epoll(fd);
 	test_ring_buffer_stress(fd);
 	test_multi_conn_concurrent(fd);
+	test_configfs();
 	test_genetlink();
 
 	printf("\n=== All tests completed ===\n");

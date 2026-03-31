@@ -25,12 +25,15 @@ mod sle_dli;
 mod sle_event;
 mod sle_usb;
 mod sle_netlink;
+mod sle_configfs;
 
 use sle_dli::SleController;
 
 use kernel::sync::atomic::Relaxed;
+use kernel::configfs_attrs;
 use kernel::{
     bindings,
+    configfs,
     debugfs::{Dir, File},
     device::Device,
     fs::{File as FsFile, Kiocb},
@@ -969,6 +972,8 @@ struct SparkLinkModule {
     #[pin]
     _dli_info: File<CString>,
     _genl: genl_bridge::GenlGuard,
+    #[pin]
+    _configfs: configfs::Subsystem<sle_configfs::SparkLinkConfig>,
 }
 
 impl kernel::InPlaceModule for SparkLinkModule {
@@ -1036,6 +1041,25 @@ impl kernel::InPlaceModule for SparkLinkModule {
             },
             _debugfs: debugfs,
             _genl: genl_bridge::GenlGuard::new()?,
+            _configfs <- {
+                use sle_configfs::SparkLinkConfig;
+                let item_type = configfs_attrs! {
+                    container: configfs::Subsystem<SparkLinkConfig>,
+                    data: SparkLinkConfig,
+                    attributes: [
+                        version: 0,
+                        max_connections: 1,
+                        adv_interval_ms: 2,
+                        scan_window_ms: 3,
+                        power_mode: 4,
+                    ],
+                };
+                configfs::Subsystem::new(
+                    c"sparklink",
+                    item_type,
+                    SparkLinkConfig::new(),
+                )
+            },
         })
     }
 }

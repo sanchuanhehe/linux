@@ -214,17 +214,19 @@ pub enum SleOpcode {
     SetConnParam         = 0x1403,
     ReadConnParam        = 0x1404,
     ConnParamReqReply    = 0x1405,
-    ReadFeatures         = 0x1406,
-    ReadVersion          = 0x1407,
-    ReadRssi             = 0x1408,
+    ReadFeatures         = 0x1801,
+    ReadVersion          = 0x1802,
 
     // --- Group 6: Link control (OGF=0x06, wire prefix 0x18xx) ---
-    SetPhyParam          = 0x1801,
-    ReadPhyParam         = 0x1802,
-    SetTxPower           = 0x1803,
-    ReadTxPower          = 0x1804,
-    SetMaxDataLen        = 0x1805,
-    ReadMaxDataLen       = 0x1806,
+    SetMaxDataLen        = 0x1804,
+    ReadPhyParam         = 0x1805,
+    SetPhyParam          = 0x1806,
+    ReadAvailChannels    = 0x1809,
+    SetCodingModulation  = 0x180A,
+    ReadRssi             = 0x180C,
+    SetTxPower           = 0x180D,
+    ReadTxPower          = 0x180E,
+    ReadPeerTxPower      = 0x180F,
 
     // --- Group 7: Security (OGF=0x07, wire prefix 0x1Cxx) ---
     RequestPair          = 0x1C01,

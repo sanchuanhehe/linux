@@ -26,6 +26,14 @@ use core::cell::Cell;
 use core::cell::RefCell;
 
 // ---------------------------------------------------------------------------
+// Controller backend event ring capacity
+// ---------------------------------------------------------------------------
+
+/// Number of slots in each controller backend's event ring buffer.
+/// Must be a power of two for efficient modular arithmetic.
+pub(crate) const CTRL_EVENT_RING_SIZE: usize = 32;
+
+// ---------------------------------------------------------------------------
 // DLI packet type indicators (T/XS 10003-2025 section 5.1)
 // ---------------------------------------------------------------------------
 
@@ -780,7 +788,7 @@ pub trait SleController: Send + Sync {
 pub struct VirtualController {
     addr: [u8; 6],
     opened: Cell<bool>,
-    pending_events: RefCell<[Option<SleEvent>; 8]>,
+    pending_events: RefCell<[Option<SleEvent>; CTRL_EVENT_RING_SIZE]>,
     event_head: Cell<usize>,
     event_tail: Cell<usize>,
 }
@@ -796,7 +804,7 @@ impl VirtualController {
         Self {
             addr,
             opened: Cell::new(false),
-            pending_events: RefCell::new([const { None }; 8]),
+            pending_events: RefCell::new([const { None }; CTRL_EVENT_RING_SIZE]),
             event_head: Cell::new(0),
             event_tail: Cell::new(0),
         }
@@ -804,8 +812,9 @@ impl VirtualController {
 
     fn enqueue_event(&self, ev: SleEvent) {
         let tail = self.event_tail.get();
-        let next = (tail + 1) % 8;
+        let next = (tail + 1) % CTRL_EVENT_RING_SIZE;
         if next == self.event_head.get() {
+            pr_warn!("sparklink-virtual: controller event ring full, dropping event\n");
             return; // queue full, drop
         }
         self.pending_events.borrow_mut()[tail] = Some(ev);
@@ -866,7 +875,7 @@ impl SleController for VirtualController {
             return None;
         }
         let ev = self.pending_events.borrow_mut()[head].take();
-        self.event_head.set((head + 1) % 8);
+        self.event_head.set((head + 1) % CTRL_EVENT_RING_SIZE);
         ev
     }
 

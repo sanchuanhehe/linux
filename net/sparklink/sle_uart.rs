@@ -377,7 +377,7 @@ pub struct UartController {
     config: UartConfig,
     parser: UartParser,
     opened: Cell<bool>,
-    pending_events: RefCell<[Option<SleEvent>; 8]>,
+    pending_events: RefCell<[Option<SleEvent>; super::sle_dli::CTRL_EVENT_RING_SIZE]>,
     event_head: Cell<usize>,
     event_tail: Cell<usize>,
 }
@@ -395,7 +395,7 @@ impl UartController {
             config,
             parser: UartParser::new(),
             opened: Cell::new(false),
-            pending_events: RefCell::new([const { None }; 8]),
+            pending_events: RefCell::new([const { None }; super::sle_dli::CTRL_EVENT_RING_SIZE]),
             event_head: Cell::new(0),
             event_tail: Cell::new(0),
         }
@@ -403,8 +403,9 @@ impl UartController {
 
     fn enqueue_event(&self, ev: SleEvent) {
         let tail = self.event_tail.get();
-        let next = (tail + 1) % 8;
+        let next = (tail + 1) % super::sle_dli::CTRL_EVENT_RING_SIZE;
         if next == self.event_head.get() {
+            pr_warn!("sparklink-uart: controller event ring full, dropping event\n");
             return;
         }
         self.pending_events.borrow_mut()[tail] = Some(ev);
@@ -505,7 +506,7 @@ impl SleController for UartController {
             return None;
         }
         let ev = self.pending_events.borrow_mut()[head].take();
-        self.event_head.set((head + 1) % 8);
+        self.event_head.set((head + 1) % super::sle_dli::CTRL_EVENT_RING_SIZE);
         ev
     }
 

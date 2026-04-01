@@ -339,9 +339,12 @@ u32 sle_usb_dev_get_fw_version(int dev_id);
 int sle_usb_dev_get_mac(int dev_id, u8 *mac);
 int sle_usb_dev_download_fw(int dev_id, const u8 *data, int size,
 			    int chunk_size);
+int sle_usb_dev_suspend(int dev_id);
+int sle_usb_dev_resume(int dev_id);
 
 struct sle_usb_dev {
 	bool active;
+	bool suspended;
 	struct usb_interface *intf;
 	struct usb_device *udev;
 	struct sle_urb_ctx *evt_urb;  /* interrupt IN for events */
@@ -877,4 +880,84 @@ int sle_usb_dev_download_fw(int dev_id, const u8 *data, int size,
 out:
 	kfree(pkt);
 	return ret;
+}
+
+/* -----------------------------------------------------------------------
+ * Power management: suspend / resume
+ *
+ * suspend: Kill all in-flight URBs so the host controller can power down.
+ * resume:  Re-submit the event interrupt URB and optionally re-init the
+ *          controller if the device was reset during suspend.
+ * ----------------------------------------------------------------------- */
+
+/**
+ * sle_usb_dev_suspend - Quiesce the device for system/runtime suspend.
+ * @dev_id: device table slot
+ *
+ * Kills the event (interrupt IN) and data (bulk IN) URBs so no further
+ * transfers are pending when the host controller suspends.
+ */
+int sle_usb_dev_suspend(int dev_id)
+{
+	struct sle_usb_dev *d;
+
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
+		return -EINVAL;
+
+	d = &usb_dev_table[dev_id];
+	if (!d->active)
+		return -ENODEV;
+
+	if (d->suspended)
+		return 0;
+
+	/* Kill outstanding URBs */
+	if (d->evt_urb)
+		sle_usb_kill_ctx(d->evt_urb);
+	if (d->rx_urb)
+		sle_usb_kill_ctx(d->rx_urb);
+
+	d->suspended = true;
+	pr_debug("sparklink-usb: dev %d suspended\n", dev_id);
+	return 0;
+}
+
+/**
+ * sle_usb_dev_resume - Re-activate the device after suspend.
+ * @dev_id: device table slot
+ *
+ * Re-submits the event interrupt URB so the driver resumes receiving
+ * asynchronous events from the controller.
+ */
+int sle_usb_dev_resume(int dev_id)
+{
+	struct sle_usb_dev *d;
+	int ret;
+
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
+		return -EINVAL;
+
+	d = &usb_dev_table[dev_id];
+	if (!d->active)
+		return -ENODEV;
+
+	if (!d->suspended)
+		return 0;
+
+	d->suspended = false;
+
+	/* Re-submit event URB */
+	if (d->evt_urb && d->udev) {
+		ret = sle_usb_submit_intr_in(d->evt_urb, d->udev,
+					     d->ep_intr_in, NULL,
+					     d->ep_intr_in_interval);
+		if (ret) {
+			pr_err("sparklink-usb: dev %d resume evt URB failed: %d\n",
+			       dev_id, ret);
+			return ret;
+		}
+	}
+
+	pr_debug("sparklink-usb: dev %d resumed\n", dev_id);
+	return 0;
 }

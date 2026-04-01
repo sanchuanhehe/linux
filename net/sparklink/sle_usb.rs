@@ -108,6 +108,8 @@ extern "C" {
     fn sle_usb_dev_init_controller(dev_id: i32) -> i32;
     fn sle_usb_dev_get_fw_version(dev_id: i32) -> u32;
     fn sle_usb_dev_get_mac(dev_id: i32, mac: *mut u8) -> i32;
+    fn sle_usb_dev_suspend(dev_id: i32) -> i32;
+    fn sle_usb_dev_resume(dev_id: i32) -> i32;
 }
 
 // ---------------------------------------------------------------------------
@@ -1040,6 +1042,43 @@ impl usb::Driver for SleUsbDriver {
             super::sle_detach_device(dev_id);
             pr_info!("sparklink-usb: detached sle{}\n", dev_id);
         }
+    }
+
+    fn suspend(
+        _interface: &usb::Interface<device::Core>,
+        data: Pin<&Self>,
+        _event: kernel::ffi::c_int,
+    ) -> Result {
+        let dev_id = data.dev_id;
+        if dev_id == u16::MAX {
+            return Ok(());
+        }
+        let ret = unsafe { sle_usb_dev_suspend(dev_id as i32) };
+        if ret < 0 {
+            pr_err!("sparklink-usb: suspend sle{} failed: {}\n", dev_id, ret);
+            return Err(Error::from_errno(ret));
+        }
+        super::sle_suspend_device(dev_id);
+        pr_info!("sparklink-usb: sle{} suspended\n", dev_id);
+        Ok(())
+    }
+
+    fn resume(
+        _interface: &usb::Interface<device::Core>,
+        data: Pin<&Self>,
+    ) -> Result {
+        let dev_id = data.dev_id;
+        if dev_id == u16::MAX {
+            return Ok(());
+        }
+        let ret = unsafe { sle_usb_dev_resume(dev_id as i32) };
+        if ret < 0 {
+            pr_err!("sparklink-usb: resume sle{} failed: {}\n", dev_id, ret);
+            return Err(Error::from_errno(ret));
+        }
+        super::sle_resume_device(dev_id);
+        pr_info!("sparklink-usb: sle{} resumed\n", dev_id);
+        Ok(())
     }
 }
 

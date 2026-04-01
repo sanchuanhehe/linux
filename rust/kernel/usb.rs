@@ -60,7 +60,10 @@ unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
             (*udrv.get()).name = name.as_char_ptr();
             (*udrv.get()).probe = Some(Self::probe_callback);
             (*udrv.get()).disconnect = Some(Self::disconnect_callback);
+            (*udrv.get()).suspend = Some(Self::suspend_callback);
+            (*udrv.get()).resume = Some(Self::resume_callback);
             (*udrv.get()).id_table = T::ID_TABLE.as_ptr();
+            (*udrv.get()).set_supports_autosuspend(1);
         }
 
         // SAFETY: `udrv` is guaranteed to be a valid `DriverType`.
@@ -115,6 +118,43 @@ impl<T: Driver + 'static> Adapter<T> {
         let data = unsafe { dev.drvdata_borrow::<T>() };
 
         T::disconnect(intf, data);
+    }
+
+    extern "C" fn suspend_callback(
+        intf: *mut bindings::usb_interface,
+        message: bindings::pm_message_t,
+    ) -> kernel::ffi::c_int {
+        // SAFETY: The USB core only ever calls the suspend callback with a valid pointer to a
+        // `struct usb_interface`.
+        let intf = unsafe { &*intf.cast::<Interface<device::CoreInternal>>() };
+
+        let dev: &device::Device<device::CoreInternal> = intf.as_ref();
+
+        // SAFETY: `suspend_callback` is only called after a successful `probe_callback`,
+        // so `Device::set_drvdata()` has been called with a valid `Pin<KBox<T>>`.
+        let data = unsafe { dev.drvdata_borrow::<T>() };
+
+        from_result(|| {
+            T::suspend(intf, data, message.event)?;
+            Ok(0)
+        })
+    }
+
+    extern "C" fn resume_callback(intf: *mut bindings::usb_interface) -> kernel::ffi::c_int {
+        // SAFETY: The USB core only ever calls the resume callback with a valid pointer to a
+        // `struct usb_interface`.
+        let intf = unsafe { &*intf.cast::<Interface<device::CoreInternal>>() };
+
+        let dev: &device::Device<device::CoreInternal> = intf.as_ref();
+
+        // SAFETY: `resume_callback` is only called after a successful `probe_callback`,
+        // so `Device::set_drvdata()` has been called with a valid `Pin<KBox<T>>`.
+        let data = unsafe { dev.drvdata_borrow::<T>() };
+
+        from_result(|| {
+            T::resume(intf, data)?;
+            Ok(0)
+        })
     }
 }
 
@@ -323,6 +363,27 @@ pub trait Driver {
     ///
     /// Called when the USB interface is about to be unbound from this driver.
     fn disconnect(interface: &Interface<device::Core>, data: Pin<&Self>);
+
+    /// USB driver suspend.
+    ///
+    /// Called when the system enters a sleep state or runtime PM suspends the device.
+    /// The `event` parameter carries the PM event type from `pm_message_t`.
+    /// Returns `Ok(())` on success.
+    fn suspend(
+        _interface: &Interface<device::Core>,
+        _data: Pin<&Self>,
+        _event: kernel::ffi::c_int,
+    ) -> Result {
+        Ok(())
+    }
+
+    /// USB driver resume.
+    ///
+    /// Called when the system resumes or the device is woken up from suspend.
+    /// Returns `Ok(())` on success.
+    fn resume(_interface: &Interface<device::Core>, _data: Pin<&Self>) -> Result {
+        Ok(())
+    }
 }
 
 /// A USB interface.

@@ -1683,6 +1683,30 @@ pub(crate) fn sle_switch_controller_usb(dev_id: u16, addr: [u8; 6]) {
     }
 }
 
+/// Suspend the active device's power state.
+///
+/// Called from USB suspend to transition the power manager to Suspended.
+pub(crate) fn sle_suspend_device(dev_id: u16) {
+    let mut ss = SUBSYSTEM.lock();
+    if let Some(ss) = ss.as_mut() {
+        if ss.active_dev_id == Some(dev_id) {
+            let _ = ss.power.suspend();
+        }
+    }
+}
+
+/// Resume the active device's power state.
+///
+/// Called from USB resume to transition the power manager back to Active.
+pub(crate) fn sle_resume_device(dev_id: u16) {
+    let mut ss = SUBSYSTEM.lock();
+    if let Some(ss) = ss.as_mut() {
+        if ss.active_dev_id == Some(dev_id) {
+            ss.power.resume();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Background event pump
 // ---------------------------------------------------------------------------

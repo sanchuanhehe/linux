@@ -1926,7 +1926,16 @@ impl MiscDevice for SparkLinkCtl {
                     let mut ss = SUBSYSTEM.lock();
                     let s = ss.as_mut().ok_or(ENODEV)?;
                     let handle = s.conn.connect(cp.peer_addr, role)?;
-                    let _ = s.controller.create_connection(&cp.peer_addr);
+                    // Send CreateConnection to controller; confirm on success.
+                    match s.controller.create_connection(&cp.peer_addr) {
+                        Ok(()) => {
+                            s.conn.confirm_connecting(handle);
+                        }
+                        Err(e) => {
+                            s.conn.abort_connecting(handle);
+                            return Err(e);
+                        }
+                    }
                     handle
                 };
                 Self::broadcast_event(
@@ -1945,7 +1954,17 @@ impl MiscDevice for SparkLinkCtl {
                     let peer_addr = s.conn.info(handle).map(|e| e.peer_addr).unwrap_or([0u8; 6]);
                     let old_state = s.conn.info(handle).map(|e| e.state as u8).unwrap_or(0);
                     s.conn.disconnect(handle)?;
-                    let _ = s.controller.disconnect(handle);
+                    // Send Disconnect to controller; confirm on success.
+                    match s.controller.disconnect(handle) {
+                        Ok(()) => {
+                            s.conn.confirm_disconnecting(handle);
+                        }
+                        Err(_) => {
+                            s.conn.abort_disconnecting(handle);
+                            // Still report success to userspace since we
+                            // initiated the disconnect.
+                        }
+                    }
                     (handle, peer_addr, old_state)
                 };
                 Self::broadcast_event(

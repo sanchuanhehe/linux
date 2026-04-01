@@ -315,6 +315,10 @@ pub enum ConnState {
     Connected = 2,
     /// Disconnection in progress.
     Disconnecting = 3,
+    /// CreateConnection command sent to controller, awaiting acceptance.
+    ConnectPending = 4,
+    /// Disconnect command sent to controller, awaiting acceptance.
+    DisconnectPending = 5,
 }
 
 /// Async data link sequence number tracker.
@@ -527,7 +531,7 @@ impl ConnManager {
         entry.peer_addr = peer_addr;
         entry.local_role = role;
         entry.seq = SeqTracker::new_async();
-        entry.state = ConnState::Connecting;
+        entry.state = ConnState::ConnectPending;
         self.connections.push(entry, GFP_KERNEL)?;
         self.total_created += 1;
         pr_info!(
@@ -542,6 +546,31 @@ impl ConnManager {
             handle
         );
         Ok(handle)
+    }
+
+    /// Confirm that the controller accepted the CreateConnection command.
+    /// Transitions ConnectPending → Connecting.
+    pub fn confirm_connecting(&mut self, handle: u16) {
+        if let Ok(entry) = self.find_mut(handle) {
+            if entry.state == ConnState::ConnectPending {
+                entry.state = ConnState::Connecting;
+            }
+        }
+    }
+
+    /// The controller rejected the CreateConnection command.
+    /// Removes the ConnectPending entry.
+    pub fn abort_connecting(&mut self, handle: u16) {
+        let mut idx = None;
+        for (i, entry) in self.connections.iter().enumerate() {
+            if entry.handle == handle && entry.state == ConnState::ConnectPending {
+                idx = Some(i);
+                break;
+            }
+        }
+        if let Some(i) = idx {
+            let _ = self.connections.remove(i);
+        }
     }
 
     /// Process a received access response for a given handle.
@@ -576,27 +605,16 @@ impl ConnManager {
         }
     }
 
-    /// Disconnect a connection by handle.
+    /// Start disconnecting a connection by handle.
     ///
-    /// Removes the connection entry from the table.
+    /// Sets DisconnectPending state; call confirm_disconnecting() after
+    /// the controller accepts the command.
     pub fn disconnect(&mut self, handle: u16) -> Result {
-        let mut idx = None;
-        for (i, entry) in self.connections.iter().enumerate() {
-            if entry.handle == handle {
-                match entry.state {
-                    ConnState::Connected | ConnState::Connecting => {
-                        idx = Some(i);
-                        break;
-                    }
-                    _ => return Err(EPIPE),
-                }
-            }
-        }
-        match idx {
-            Some(i) => {
-                let entry = &self.connections[i];
+        let entry = self.find_mut(handle)?;
+        match entry.state {
+            ConnState::Connected | ConnState::Connecting | ConnState::ConnectPending => {
                 pr_info!(
-                    "sparklink: disconnected handle {} from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
+                    "sparklink: disconnecting handle {} from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
                     handle,
                     entry.peer_addr[0],
                     entry.peer_addr[1],
@@ -605,11 +623,36 @@ impl ConnManager {
                     entry.peer_addr[4],
                     entry.peer_addr[5]
                 );
-                let _ = self.connections.remove(i);
-                self.total_completed += 1;
+                entry.state = ConnState::DisconnectPending;
                 Ok(())
             }
-            None => Err(ENOENT),
+            _ => Err(EPIPE),
+        }
+    }
+
+    /// Confirm that the controller accepted the Disconnect command.
+    /// Removes the entry from the connection table.
+    pub fn confirm_disconnecting(&mut self, handle: u16) {
+        let mut idx = None;
+        for (i, entry) in self.connections.iter().enumerate() {
+            if entry.handle == handle && entry.state == ConnState::DisconnectPending {
+                idx = Some(i);
+                break;
+            }
+        }
+        if let Some(i) = idx {
+            let _ = self.connections.remove(i);
+            self.total_completed += 1;
+        }
+    }
+
+    /// The controller rejected the Disconnect command.
+    /// Revert DisconnectPending back to Connected.
+    pub fn abort_disconnecting(&mut self, handle: u16) {
+        if let Ok(entry) = self.find_mut(handle) {
+            if entry.state == ConnState::DisconnectPending {
+                entry.state = ConnState::Connected;
+            }
         }
     }
 

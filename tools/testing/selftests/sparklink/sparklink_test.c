@@ -3356,6 +3356,9 @@ static void test_air_medium_connect(int fd)
 		printf("  FAIL: sle%d START_SCAN: %s\n", id_b, strerror(errno));
 	}
 
+	/* Allow EventPump to process AdvReport events from INT URB */
+	usleep(200000);
+
 	int scan_count = ioctl(fd, SL_IOCTL_SCAN_RESULT_COUNT, NULL);
 	if (scan_count > 0) {
 		printf("  OK:   sle%d found %d device(s) via air medium\n",

@@ -308,7 +308,6 @@ pub(crate) extern "C" fn sparklink_usb_complete(
     status: i32,
 ) {
     if status != 0 {
-        pr_debug!("sparklink-usb: URB completed with status {}\n", status);
         return;
     }
 
@@ -326,8 +325,8 @@ pub(crate) extern "C" fn sparklink_usb_complete(
     if let Ok(evt) = parse_event_packet(slice) {
         if let Some(sle_evt) = event_to_sle(&evt) {
             pr_debug!(
-                "sparklink-usb: event code=0x{:04x} parsed\n",
-                evt.event_code
+                "sparklink-usb: event code=0x{:04x} len={}\n",
+                evt.event_code, len
             );
             if let Some(ref mut ring) = *USB_EVENT_RING.lock() {
                 ring.push(sle_evt);

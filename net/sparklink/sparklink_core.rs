@@ -2198,7 +2198,8 @@ fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent
             shared.conn.confirm_disconnecting_by_handle(*handle);
             genl_bridge::notify_event(0x01, *handle, &peer_addr);
         }
-        sle_dli::SleEvent::AdvReport { addr, .. } => {
+        sle_dli::SleEvent::AdvReport { addr, rssi, discovery_level, data } => {
+            let _ = shared.adv_scan.process_adv_report(addr, *rssi, *discovery_level, data.as_slice());
             genl_bridge::notify_event(0x02, 0, addr);
         }
         _ => {}
@@ -2984,8 +2985,9 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             SL_IOCTL_SCAN_RESULT_COUNT => {
-                let ss = SUBSYSTEM.lock();
-                let s = ss.as_ref().ok_or(ENODEV)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                drain_controller_events(s);
                 let count = s.adv_scan.scan_result_count();
                 Ok(count as isize)
             }

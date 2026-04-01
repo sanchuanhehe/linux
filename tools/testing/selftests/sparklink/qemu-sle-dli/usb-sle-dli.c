@@ -186,6 +186,9 @@ struct USBSleDliState {
     char     *cmd_path;  /* "dual", "bulk-compat", "control-only" */
     char     *fw_mode;   /* "accept", "missing", "fail" */
 
+    /* Interrupt endpoint for wakeup signaling */
+    USBEndpoint *intr;
+
     /* Inter-device air medium link */
     QTAILQ_ENTRY(USBSleDliState) air_link;
 };
@@ -253,6 +256,9 @@ static void sle_air_broadcast_notify(USBSleDliState *broadcaster)
         }
         if (dev->scanning) {
             sle_dli_broadcast_report(dev, &fake_peer);
+            if (dev->intr) {
+                usb_wakeup(dev->intr, 0);
+            }
         }
     }
 }
@@ -295,6 +301,9 @@ static bool sle_air_connect(USBSleDliState *initiator,
     sle_dli_conn_complete(acceptor, 0x00,
                           acceptor->connections[acceptor_slot].handle,
                           initiator->mac_addr);
+    if (acceptor->intr) {
+        usb_wakeup(acceptor->intr, 0);
+    }
 
     return true;
 }
@@ -312,6 +321,9 @@ static void sle_air_relay_data(USBSleDliState *sender,
     USBSleDliState *receiver = conn->remote_dev;
     /* Queue the data as an async data packet on the receiver */
     sle_dli_queue_data(receiver, data, len);
+    if (receiver->intr) {
+        usb_wakeup(receiver->intr, 0);
+    }
 }
 
 /* Disconnect and notify the remote side */
@@ -338,6 +350,9 @@ static void sle_air_disconnect(USBSleDliState *local, int slot,
         remote->connections[remote_slot].remote_dev = NULL;
         remote->connections[remote_slot].remote_slot = -1;
         sle_dli_disconnected(remote, remote_handle, reason);
+        if (remote->intr) {
+            usb_wakeup(remote->intr, 0);
+        }
     }
 }
 
@@ -362,7 +377,7 @@ static const USBDescIface desc_iface_sle_dli = {
         {
             .bEndpointAddress = USB_DIR_IN | 0x01,  /* 0x81: interrupt IN (events) */
             .bmAttributes     = USB_ENDPOINT_XFER_INT,
-            .wMaxPacketSize   = 16,
+            .wMaxPacketSize   = 64,
             .bInterval        = 4,
         },
         {
@@ -976,6 +991,9 @@ static void usb_sle_dli_realize(USBDevice *dev, Error **errp)
         s->connections[i].remote_slot = -1;
     }
 
+    /* Cache interrupt endpoint for wakeup signaling */
+    s->intr = usb_ep_get(dev, USB_TOKEN_IN, 1);
+
     /* Register on the virtual air medium */
     sle_air_register(s);
 }
@@ -1052,6 +1070,9 @@ static void usb_sle_dli_handle_data(USBDevice *dev, USBPacket *p)
             /* Interrupt IN (0x81) — deliver events */
             len = sle_dli_dequeue_event(s, buf, sizeof(buf));
             if (len > 0) {
+                if (len > (int)p->iov.size) {
+                    len = (int)p->iov.size;
+                }
                 usb_packet_copy(p, buf, len);
             } else {
                 p->status = USB_RET_NAK;
@@ -1081,6 +1102,10 @@ static void usb_sle_dli_handle_data(USBDevice *dev, USBPacket *p)
             len = MIN(p->iov.size, sizeof(buf));
             usb_packet_copy(p, buf, len);
             sle_dli_handle_bulk_out_command(s, buf, len);
+            /* Wake INT endpoint so host polls queued events */
+            if (s->evt_count > 0 && s->intr) {
+                usb_wakeup(s->intr, 0);
+            }
         } else {
             p->status = USB_RET_STALL;
         }

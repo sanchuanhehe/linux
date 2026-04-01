@@ -604,6 +604,7 @@ int sle_usb_dev_send_data(int dev_id, u16 handle, const u8 *data, int len)
 int sle_usb_dev_start_evt(int dev_id)
 {
 	struct sle_usb_dev *d;
+	int ret;
 
 	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
 		return -EINVAL;
@@ -612,9 +613,10 @@ int sle_usb_dev_start_evt(int dev_id)
 	if (!d->active || !d->udev || !d->evt_urb)
 		return -ENODEV;
 
-	return sle_usb_submit_intr_in(d->evt_urb, d->udev,
+	ret = sle_usb_submit_intr_in(d->evt_urb, d->udev,
 				      d->ep_intr_in, NULL,
 				      d->ep_intr_in_interval);
+	return ret;
 }
 
 /**

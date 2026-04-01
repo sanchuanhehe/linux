@@ -342,6 +342,39 @@ impl AdvScanInner {
         Ok(())
     }
 
+    /// Process an advertising report event from a controller.
+    ///
+    /// Unlike `process_adv_pdu`, this takes pre-parsed fields from
+    /// the controller event (addr, rssi, discovery_level, raw adv data)
+    /// and adds a scan result directly.
+    pub fn process_adv_report(
+        &mut self,
+        addr: &[u8; 6],
+        rssi: i8,
+        discovery_level: u8,
+        data: &[u8],
+    ) -> Result {
+        if self.state != AdvScanState::Scanning && self.state != AdvScanState::ScanPending {
+            return Ok(());
+        }
+        if discovery_level < self.scan_params.filter_level {
+            return Ok(());
+        }
+        let mut result = ScanResult::default();
+        result.addr = *addr;
+        result.rssi = rssi;
+        result.discovery_level = discovery_level;
+        let dlen = data.len().min(SLE_ADV_DATA_MAX);
+        result.adv_data[..dlen].copy_from_slice(&data[..dlen]);
+        result.adv_data_len = dlen;
+
+        if self.scan_results.len() >= self.scan_results_max {
+            let _ = self.scan_results.remove(0);
+        }
+        self.scan_results.push(result, GFP_KERNEL)?;
+        Ok(())
+    }
+
     /// Get the number of available scan results.
     pub fn scan_result_count(&self) -> usize {
         self.scan_results.len()

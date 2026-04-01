@@ -4,6 +4,14 @@ menuconfig SPARKLINK
 	bool "SparkLink (NearLink) subsystem support"
 	depends on RUST
 	depends on NET
+	select CRYPTO
+	select CRYPTO_SM3_GENERIC
+	select CRYPTO_SM4_GENERIC
+	select CRYPTO_HASH
+	select CRYPTO_SKCIPHER
+	select CRYPTO_ECB
+	select CRYPTO_CTR
+	select CRYPTO_HMAC
 	help
 	  SparkLink (also known as NearLink / 星闪) is a short-range wireless
 	  communication technology designed for low-latency, low-power, and

@@ -22,6 +22,7 @@ mod sle_security;
 mod sle_ssap;
 mod sle_power;
 mod sle_dli;
+mod sle_dev;
 mod sle_event;
 mod sle_usb;
 mod sle_netlink;
@@ -104,12 +105,14 @@ fn write_user_struct<T: Sized>(arg: usize, val: &T) -> Result {
 // Global device counter (shared with C genetlink code via FFI)
 // ---------------------------------------------------------------------------
 
-static GLOBAL_DEV_COUNT: kernel::sync::atomic::Atomic<i32> = kernel::sync::atomic::Atomic::new(0);
-
 /// Return the number of registered SparkLink devices (C FFI export).
 #[no_mangle]
 pub extern "C" fn sparklink_genl_get_dev_count() -> u32 {
-    GLOBAL_DEV_COUNT.load(Relaxed) as u32
+    let ss = SUBSYSTEM.lock();
+    match ss.as_ref() {
+        Some(shared) => shared.dev_registry.count() as u32,
+        None => 0,
+    }
 }
 
 /// Return the protocol stack version as a packed u32 (C FFI export).
@@ -1445,6 +1448,10 @@ struct SubsystemShared {
     dli_tail: usize,
     /// Background event pump handle. Kept alive while subsystem is active.
     _event_pump: Option<Arc<EventPump>>,
+    /// Per-controller device registry.
+    dev_registry: sle_dev::SleDevRegistry,
+    /// Index of the active device in the registry (`None` = no controller).
+    active_dev_id: Option<u16>,
 }
 
 impl SubsystemShared {
@@ -1610,7 +1617,11 @@ struct SubsystemGuard;
 impl Drop for SubsystemGuard {
     fn drop(&mut self) {
         let mut ss = SUBSYSTEM.lock();
-        if let Some(ref shared) = *ss {
+        if let Some(ref mut shared) = *ss {
+            // Unregister all devices before closing the controller.
+            if let Some(id) = shared.active_dev_id.take() {
+                let _ = shared.dev_registry.unregister(id);
+            }
             shared.controller.close();
         }
         *ss = None;
@@ -1762,6 +1773,11 @@ impl kernel::InPlaceModule for SparkLinkModule {
                     p.start();
                 }
 
+                // Register the controller in the device registry.
+                let ctrl_info = controller.info();
+                let mut dev_registry = sle_dev::SleDevRegistry::new();
+                let dev_id = dev_registry.register(&ctrl_info).ok();
+
                 *ss = Some(SubsystemShared {
                     controller,
                     conn,
@@ -1776,6 +1792,8 @@ impl kernel::InPlaceModule for SparkLinkModule {
                     dli_head: 0,
                     dli_tail: 0,
                     _event_pump: pump,
+                    dev_registry,
+                    active_dev_id: dev_id,
                 });
                 pr_info!("sparklink: shared subsystem initialised\n");
                 SubsystemGuard
@@ -1912,6 +1930,9 @@ impl MiscDevice for SparkLinkCtl {
                     match s.controller.enable_broadcast(true) {
                         Ok(()) => {
                             s.adv_scan.confirm_advertising();
+                            if let Some(dev) = s.active_dev_id.and_then(|id| s.dev_registry.get(id)) {
+                                dev.set_flag(sle_dev::SLE_DEV_ADVERTISING);
+                            }
                         }
                         Err(e) => {
                             s.adv_scan.abort_advertising();
@@ -1925,6 +1946,9 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.adv_scan.stop_advertising()?;
+                if let Some(dev) = s.active_dev_id.and_then(|id| s.dev_registry.get(id)) {
+                    dev.clear_flag(sle_dev::SLE_DEV_ADVERTISING);
+                }
                 let _ = s.controller.enable_broadcast(false);
                 Ok(0)
             }
@@ -1957,6 +1981,9 @@ impl MiscDevice for SparkLinkCtl {
                 match s.controller.enable_scan(true) {
                     Ok(()) => {
                         s.adv_scan.confirm_scanning();
+                        if let Some(dev) = s.active_dev_id.and_then(|id| s.dev_registry.get(id)) {
+                            dev.set_flag(sle_dev::SLE_DEV_SCANNING);
+                        }
                     }
                     Err(e) => {
                         s.adv_scan.abort_scanning();
@@ -1969,44 +1996,56 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.adv_scan.stop_scanning()?;
+                if let Some(dev) = s.active_dev_id.and_then(|id| s.dev_registry.get(id)) {
+                    dev.clear_flag(sle_dev::SLE_DEV_SCANNING);
+                }
                 let _ = s.controller.enable_scan(false);
                 Ok(0)
             }
             SL_IOCTL_DEV_COUNT => {
-                Ok(1)
+                let ss = SUBSYSTEM.lock();
+                let count = ss.as_ref().map_or(0, |s| s.dev_registry.count());
+                Ok(count as isize)
             }
             SL_IOCTL_DEV_INFO => {
                 let ss = SUBSYSTEM.lock();
                 let s = ss.as_ref().ok_or(ENODEV)?;
                 // SAFETY: SciDevInfo is repr(C) with only primitive fields.
                 let mut info: SciDevInfo = unsafe { core::mem::zeroed() };
-                info.index = 0;
-                info.state = match (s.adv_scan.is_advertising(), s.adv_scan.is_scanning()) {
-                    (true, _) => SciState::Advertising as u8,
-                    (_, true) => SciState::Scanning as u8,
-                    _ => SciState::Idle as u8,
-                };
-                info.bus = SciBus::Virtual as u8;
-                info.addr = SleAddr { b: [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01] };
-                let name = b"sparklink-ctl";
-                info.name[..name.len()].copy_from_slice(name);
+
+                let dev_id = s.active_dev_id.unwrap_or(0);
+                if let Some(dev) = s.dev_registry.get(dev_id) {
+                    info.index = dev.id();
+                    info.bus = dev.bus() as u8;
+                    info.addr = SleAddr { b: *dev.addr() };
+                    let dev_name = dev.name();
+                    let copy_len = dev_name.len().min(info.name.len());
+                    info.name[..copy_len].copy_from_slice(&dev_name[..copy_len]);
+                    info.state = if dev.test_flag(sle_dev::SLE_DEV_ADVERTISING) {
+                        SciState::Advertising as u8
+                    } else if dev.test_flag(sle_dev::SLE_DEV_SCANNING) {
+                        SciState::Scanning as u8
+                    } else {
+                        SciState::Idle as u8
+                    };
+                } else {
+                    info.state = SciState::Idle as u8;
+                    info.bus = SciBus::Virtual as u8;
+                    info.addr = SleAddr { b: [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01] };
+                    let name = b"sparklink-ctl";
+                    info.name[..name.len()].copy_from_slice(name);
+                }
+
                 drop(ss);
                 write_user_struct(arg, &info)?;
                 Ok(0)
             }
             SL_IOCTL_DEV_REGISTER => {
-                GLOBAL_DEV_COUNT.fetch_add(1i32, Relaxed);
-                dev_info!(me.dev, "sparklink: DEV_REGISTER (count={})\n",
-                    GLOBAL_DEV_COUNT.load(Relaxed));
+                dev_info!(me.dev, "sparklink: DEV_REGISTER via ioctl (use module init for real registration)\n");
                 Ok(0)
             }
             SL_IOCTL_DEV_UNREGISTER => {
-                let prev = GLOBAL_DEV_COUNT.load(Relaxed);
-                if prev > 0 {
-                    GLOBAL_DEV_COUNT.fetch_add(-1i32, Relaxed);
-                }
-                dev_info!(me.dev, "sparklink: DEV_UNREGISTER (count={})\n",
-                    GLOBAL_DEV_COUNT.load(Relaxed));
+                dev_info!(me.dev, "sparklink: DEV_UNREGISTER via ioctl (use module unload for real unregistration)\n");
                 Ok(0)
             }
             SL_IOCTL_INJECT_ADV => {

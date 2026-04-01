@@ -337,6 +337,8 @@ void sle_usb_dev_stop_evt(int dev_id);
 int sle_usb_dev_init_controller(int dev_id);
 u32 sle_usb_dev_get_fw_version(int dev_id);
 int sle_usb_dev_get_mac(int dev_id, u8 *mac);
+int sle_usb_dev_download_fw(int dev_id, const u8 *data, int size,
+			    int chunk_size);
 
 struct sle_usb_dev {
 	bool active;
@@ -756,4 +758,123 @@ int sle_usb_dev_get_mac(int dev_id, u8 *mac)
 		return -ENODEV;
 	memcpy(mac, usb_dev_table[dev_id].mac_addr, 6);
 	return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Firmware download over USB bulk OUT
+ *
+ * Protocol (modeled after BT HCI firmware download):
+ *   1. Host sends FW_DOWNLOAD_START command (opcode 0xF810, param = total size)
+ *   2. Host sends firmware data in chunks via bulk OUT, prefixed with
+ *      a FW_DATA header byte 0xA5
+ *   3. After all chunks: host sends FW_DOWNLOAD_DONE (opcode 0xF811)
+ *   4. Controller ACKs with CommandComplete
+ *
+ * Chunk wire format:
+ *   [0]      0xA5 (FW_DATA marker)
+ *   [1..4]   offset (LE32)
+ *   [5..6]   chunk_len (LE16)
+ *   [7..N]   firmware data
+ * ----------------------------------------------------------------------- */
+
+#define SLE_FW_DATA_MARKER   0xA5
+#define SLE_FW_CHUNK_HDR     7     /* marker + offset(4) + len(2) */
+#define SLE_OP_FW_DL_START   0xF810
+#define SLE_OP_FW_DL_DONE    0xF811
+#define SLE_FW_DEFAULT_CHUNK 240   /* safe for full-speed USB (64B MTU) */
+#define SLE_FW_DL_TIMEOUT_MS 10000
+
+/**
+ * sle_usb_dev_download_fw - Download firmware to controller in chunks.
+ * @dev_id:     device id
+ * @data:       firmware blob from request_firmware()
+ * @size:       firmware size in bytes
+ * @chunk_size: max payload per transfer (0 = auto from endpoint size)
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int sle_usb_dev_download_fw(int dev_id, const u8 *data, int size,
+			    int chunk_size)
+{
+	struct sle_usb_dev *d;
+	unsigned int pipe;
+	int offset = 0;
+	int actual_len;
+	int ret;
+	u8 *pkt;
+	int pkt_size;
+	u8 start_params[4];
+	u8 resp[32];
+	int resp_len;
+
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
+		return -EINVAL;
+	if (!data || size <= 0)
+		return -EINVAL;
+
+	d = &usb_dev_table[dev_id];
+	if (!d->active || !d->udev)
+		return -ENODEV;
+
+	if (chunk_size <= 0)
+		chunk_size = d->ep_bulk_in_size > SLE_FW_CHUNK_HDR ?
+			     d->ep_bulk_in_size - SLE_FW_CHUNK_HDR :
+			     SLE_FW_DEFAULT_CHUNK;
+
+	pkt_size = SLE_FW_CHUNK_HDR + chunk_size;
+	pkt = kmalloc(pkt_size, GFP_KERNEL);
+	if (!pkt)
+		return -ENOMEM;
+
+	/* Step 1: Send FW_DOWNLOAD_START with total size */
+	start_params[0] = (u8)(size & 0xFF);
+	start_params[1] = (u8)((size >> 8) & 0xFF);
+	start_params[2] = (u8)((size >> 16) & 0xFF);
+	start_params[3] = (u8)((size >> 24) & 0xFF);
+
+	ret = sle_usb_dev_send_cmd(dev_id, SLE_OP_FW_DL_START,
+				   start_params, 4);
+	if (ret) {
+		pr_err("sparklink-usb: fw download start failed: %d\n", ret);
+		goto out;
+	}
+
+	/* Step 2: Send firmware in chunks via bulk OUT */
+	pipe = usb_sndbulkpipe(d->udev, d->ep_bulk_out);
+
+	while (offset < size) {
+		int chunk = min(chunk_size, size - offset);
+		int total = SLE_FW_CHUNK_HDR + chunk;
+
+		pkt[0] = SLE_FW_DATA_MARKER;
+		pkt[1] = (u8)(offset & 0xFF);
+		pkt[2] = (u8)((offset >> 8) & 0xFF);
+		pkt[3] = (u8)((offset >> 16) & 0xFF);
+		pkt[4] = (u8)((offset >> 24) & 0xFF);
+		pkt[5] = (u8)(chunk & 0xFF);
+		pkt[6] = (u8)((chunk >> 8) & 0xFF);
+		memcpy(&pkt[SLE_FW_CHUNK_HDR], data + offset, chunk);
+
+		ret = usb_bulk_msg(d->udev, pipe, pkt, total,
+				   &actual_len, SLE_FW_DL_TIMEOUT_MS);
+		if (ret) {
+			pr_err("sparklink-usb: fw chunk at offset %d failed: %d\n",
+			       offset, ret);
+			goto out;
+		}
+
+		offset += chunk;
+	}
+
+	/* Step 3: Send FW_DOWNLOAD_DONE and wait for ACK */
+	ret = sle_usb_send_cmd_sync(d, SLE_OP_FW_DL_DONE,
+				    resp, sizeof(resp), &resp_len);
+	if (ret)
+		pr_err("sparklink-usb: fw download done cmd failed: %d\n", ret);
+	else
+		pr_info("sparklink-usb: firmware downloaded (%d bytes)\n", size);
+
+out:
+	kfree(pkt);
+	return ret;
 }

@@ -33,6 +33,7 @@ mod sle_configfs;
 mod sle_phy;
 mod sle_uart;
 mod sle_spi;
+mod sle_fw;
 
 use sle_dli::SleController;
 

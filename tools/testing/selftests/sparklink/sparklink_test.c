@@ -183,7 +183,11 @@ struct sle_conn_info {
 	uint8_t  mcs_index;
 	uint8_t  tx_seq;
 	uint8_t  rx_seq;
-	uint8_t  _reserved[10];
+	uint16_t data_mtu;
+	uint16_t data_mps;
+	uint16_t svc_mtu;
+	uint8_t  data_mode;
+	uint8_t  _reserved[3];
 } __attribute__((packed));
 
 struct sle_conn_data {
@@ -965,6 +969,11 @@ static void test_conn_data_loopback(int fd)
 			printf("  WARN: expected bw=2\n");
 		if (info.mcs_index != 6)
 			printf("  WARN: expected mcs=6\n");
+		if (info.data_mtu == 0)
+			printf("  WARN: expected data_mtu > 0, got %u\n", info.data_mtu);
+		else
+			printf("  OK:   data_mtu=%u data_mps=%u data_mode=%u svc_mtu=%u\n",
+			       info.data_mtu, info.data_mps, info.data_mode, info.svc_mtu);
 	}
 
 	/* Step 4: Send data */

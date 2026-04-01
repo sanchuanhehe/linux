@@ -173,6 +173,12 @@ enum {
 	SPARKLINK_ATTR_DLI_MEASUREMENT_CAP,	/* u8: measurement capability bitmask */
 	SPARKLINK_ATTR_DLI_SECURITY_CAP,	/* u16: security capability bitmask */
 
+	/* Transport channel (per-connection) */
+	SPARKLINK_ATTR_DATA_MTU,	/* u16: data channel MTU */
+	SPARKLINK_ATTR_DATA_MPS,	/* u16: data channel MPS */
+	SPARKLINK_ATTR_DATA_MODE,	/* u8: data channel transport mode */
+	SPARKLINK_ATTR_SVC_MTU,		/* u16: service mgmt channel MTU */
+
 	__SPARKLINK_ATTR_MAX,
 };
 #define SPARKLINK_ATTR_MAX (__SPARKLINK_ATTR_MAX - 1)

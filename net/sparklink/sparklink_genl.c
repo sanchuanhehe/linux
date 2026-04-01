@@ -35,6 +35,11 @@ struct genl_conn_info {
 	__u8  mcs_index;
 	__u64 tx_bytes;
 	__u64 rx_bytes;
+	__u16 data_mtu;
+	__u16 data_mps;
+	__u16 svc_mtu;
+	__u8  data_mode;
+	__u8  _pad;
 };
 extern int sparklink_genl_get_conn_info(__u16 handle,
 					struct genl_conn_info *out);
@@ -403,7 +408,11 @@ static int sparklink_genl_do_get_conn_info(struct sk_buff *skb,
 	    nla_put_u8(msg, SPARKLINK_ATTR_BANDWIDTH, ci.bandwidth_mhz) ||
 	    nla_put_u8(msg, SPARKLINK_ATTR_MCS_INDEX, ci.mcs_index) ||
 	    nla_put_u64_64bit(msg, SPARKLINK_ATTR_TX_BYTES, ci.tx_bytes, 0) ||
-	    nla_put_u64_64bit(msg, SPARKLINK_ATTR_RX_BYTES, ci.rx_bytes, 0))
+	    nla_put_u64_64bit(msg, SPARKLINK_ATTR_RX_BYTES, ci.rx_bytes, 0) ||
+	    nla_put_u16(msg, SPARKLINK_ATTR_DATA_MTU, ci.data_mtu) ||
+	    nla_put_u16(msg, SPARKLINK_ATTR_DATA_MPS, ci.data_mps) ||
+	    nla_put_u8(msg, SPARKLINK_ATTR_DATA_MODE, ci.data_mode) ||
+	    nla_put_u16(msg, SPARKLINK_ATTR_SVC_MTU, ci.svc_mtu))
 		goto nla_put_failure;
 
 	genlmsg_end(msg, hdr);

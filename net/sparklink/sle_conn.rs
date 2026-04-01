@@ -10,11 +10,165 @@
 //! sent) → Connected (access response accepted) → Idle (disconnected).
 //! During the Connected state, data PDUs can be exchanged with 1-bit
 //! ARQ sequence numbering for the async link.
+//!
+//! Each connection carries a set of transport channels (T/XS 20002-2025):
+//! a management channel (TCID 0x01), a service management channel
+//! (TCID 0x0A), and a default data channel (TCID 0x40).
 
 #![allow(dead_code, unreachable_pub)]
 
 use kernel::alloc::KVec;
 use kernel::prelude::*;
+
+// ---------------------------------------------------------------------------
+// Transport Channel abstraction (T/XS 20002-2025)
+//
+// Each SLE connection carries a fixed set of logical transport channels,
+// identified by a Transport Channel Identifier (TCID). This provides the
+// minimal abstraction needed for standard compliance without implementing
+// the full SLB logical channel framework.
+// ---------------------------------------------------------------------------
+
+/// Transport Channel Identifier (TCID) — fixed channel assignments.
+pub mod tcid {
+    /// Management channel: link control, PHY update, encryption setup.
+    pub const MANAGEMENT: u16 = 0x01;
+    /// Service management channel: SSAP service discovery and interaction.
+    pub const SERVICE_MGMT: u16 = 0x0A;
+    /// Default data channel: general-purpose application data.
+    pub const DEFAULT_DATA: u16 = 0x40;
+}
+
+/// Transport mode for a channel (T/XS 20002-2025).
+#[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum TransportMode {
+    /// Unreliable delivery (no retransmission).
+    Unreliable = 0,
+    /// Reliable delivery (credit-based flow control).
+    Reliable = 1,
+}
+
+impl Default for TransportMode {
+    fn default() -> Self {
+        Self::Unreliable
+    }
+}
+
+/// State of a transport channel.
+#[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum ChannelState {
+    /// Channel not yet configured.
+    #[default]
+    Closed = 0,
+    /// Channel ready for data transfer.
+    Open = 1,
+}
+
+/// A single logical transport channel within a connection.
+#[derive(Copy, Clone, Debug)]
+pub struct TransportChannel {
+    /// Channel identifier.
+    pub tcid: u16,
+    /// Channel state.
+    pub state: ChannelState,
+    /// Transport mode (reliable/unreliable).
+    pub mode: TransportMode,
+    /// Maximum Transmission Unit negotiated for this channel.
+    pub mtu: u16,
+    /// Maximum PDU Segment size.
+    pub mps: u16,
+    /// TX credit count (for reliable mode flow control).
+    pub tx_credits: u16,
+    /// RX credit count.
+    pub rx_credits: u16,
+}
+
+impl TransportChannel {
+    /// Create a channel with standard defaults.
+    const fn new(tcid: u16, mode: TransportMode, mtu: u16) -> Self {
+        Self {
+            tcid,
+            state: ChannelState::Closed,
+            mode,
+            mtu,
+            mps: 247,
+            tx_credits: 0,
+            rx_credits: 0,
+        }
+    }
+}
+
+/// Fixed set of transport channels per connection.
+///
+/// Each connection has exactly three channels: management, service management,
+/// and default data. Additional dynamic channels are not supported in this
+/// minimal implementation.
+#[derive(Copy, Clone, Debug)]
+pub struct ChannelSet {
+    /// Link management channel (TCID 0x01): reliable, small MTU.
+    pub mgmt: TransportChannel,
+    /// Service management channel (TCID 0x0A): reliable, used by SSAP.
+    pub svc_mgmt: TransportChannel,
+    /// Default data channel (TCID 0x40): mode inherited from controller caps.
+    pub data: TransportChannel,
+}
+
+impl Default for ChannelSet {
+    fn default() -> Self {
+        Self {
+            mgmt: TransportChannel::new(tcid::MANAGEMENT, TransportMode::Reliable, 48),
+            svc_mgmt: TransportChannel::new(tcid::SERVICE_MGMT, TransportMode::Reliable, 247),
+            data: TransportChannel::new(tcid::DEFAULT_DATA, TransportMode::Unreliable, 247),
+        }
+    }
+}
+
+impl ChannelSet {
+    /// Open all channels (called when connection transitions to Connected).
+    pub fn open_all(&mut self) {
+        self.mgmt.state = ChannelState::Open;
+        self.svc_mgmt.state = ChannelState::Open;
+        self.data.state = ChannelState::Open;
+    }
+
+    /// Close all channels (called on disconnection).
+    pub fn close_all(&mut self) {
+        self.mgmt.state = ChannelState::Closed;
+        self.svc_mgmt.state = ChannelState::Closed;
+        self.data.state = ChannelState::Closed;
+    }
+
+    /// Update data channel MTU/MPS based on negotiated connection parameters.
+    pub fn negotiate(&mut self, max_pdu_size: u16, controller_mtu: u16) {
+        let effective_mtu = max_pdu_size.min(controller_mtu);
+        self.data.mtu = effective_mtu;
+        self.data.mps = effective_mtu;
+        // Service management inherits the same MTU ceiling.
+        self.svc_mgmt.mtu = effective_mtu.min(self.svc_mgmt.mtu.max(effective_mtu));
+    }
+
+    /// Find channel by TCID, returning mutable reference.
+    pub fn by_tcid_mut(&mut self, tcid: u16) -> Option<&mut TransportChannel> {
+        match tcid {
+            self::tcid::MANAGEMENT => Some(&mut self.mgmt),
+            self::tcid::SERVICE_MGMT => Some(&mut self.svc_mgmt),
+            self::tcid::DEFAULT_DATA => Some(&mut self.data),
+            _ => None,
+        }
+    }
+
+    /// Find channel by TCID, returning immutable reference.
+    pub fn by_tcid(&self, tcid: u16) -> Option<&TransportChannel> {
+        match tcid {
+            self::tcid::MANAGEMENT => Some(&self.mgmt),
+            self::tcid::SERVICE_MGMT => Some(&self.svc_mgmt),
+            self::tcid::DEFAULT_DATA => Some(&self.data),
+            _ => None,
+        }
+    }
+}
 
 /// Maximum number of messages in a connection data queue.
 const QUEUE_DEPTH: usize = 64;
@@ -389,6 +543,8 @@ pub struct ConnEntry {
     pub local_cap: AccessCapability,
     /// Negotiated connection parameters.
     pub params: NegotiatedParams,
+    /// Transport channels (management, service management, data).
+    pub channels: ChannelSet,
     /// Sequence number tracker.
     pub seq: SeqTracker,
     /// Transmit data queue (userspace -> peer).
@@ -412,6 +568,7 @@ impl ConnEntry {
             local_role: GtRole::TNode,
             local_cap: AccessCapability::default(),
             params: NegotiatedParams::default(),
+            channels: ChannelSet::default(),
             seq: SeqTracker::new_async(),
             tx_queue: DataRingBuffer::try_new()?,
             rx_queue: DataRingBuffer::try_new()?,
@@ -636,6 +793,8 @@ impl ConnManager {
         match response_type {
             AccessResponseType::Accepted => {
                 entry.params = params;
+                entry.channels.negotiate(params.max_pdu_size, 512);
+                entry.channels.open_all();
                 entry.state = ConnState::Connected;
                 pr_info!(
                     "sparklink: handle {} connected (bw={}MHz mcs={} timeout={}0ms)\n",

@@ -168,6 +168,16 @@ pub struct GenlConnInfo {
     pub tx_bytes: u64,
     /// Total RX bytes.
     pub rx_bytes: u64,
+    /// Data channel MTU.
+    pub data_mtu: u16,
+    /// Data channel MPS.
+    pub data_mps: u16,
+    /// Service management channel MTU.
+    pub svc_mtu: u16,
+    /// Data channel transport mode (0=unreliable, 1=reliable).
+    pub data_mode: u8,
+    /// Padding.
+    pub _pad: [u8; 1],
 }
 
 /// Get connection info by handle (C FFI export).
@@ -188,6 +198,11 @@ pub extern "C" fn sparklink_genl_get_conn_info(handle: u16, out: *mut GenlConnIn
                 info.mcs_index = entry.params.mcs_index;
                 info.tx_bytes = entry.tx_bytes;
                 info.rx_bytes = entry.rx_bytes;
+                info.data_mtu = entry.channels.data.mtu;
+                info.data_mps = entry.channels.data.mps;
+                info.data_mode = entry.channels.data.mode as u8;
+                info.svc_mtu = entry.channels.svc_mgmt.mtu;
+                info._pad = [0];
                 0
             }
             Err(_) => -(bindings::ENOENT as i32),
@@ -762,7 +777,15 @@ pub struct SleConnInfo {
     pub tx_seq: u8,
     /// Current RX sequence number.
     pub rx_seq: u8,
-    _reserved: [u8; 10],
+    /// Data channel MTU.
+    pub data_mtu: u16,
+    /// Data channel MPS.
+    pub data_mps: u16,
+    /// Service management channel MTU.
+    pub svc_mtu: u16,
+    /// Data channel transport mode (0=unreliable, 1=reliable).
+    pub data_mode: u8,
+    _reserved: [u8; 3],
 }
 
 // SAFETY: SleConnInfo is repr(C) with only primitive fields.
@@ -2845,6 +2868,10 @@ impl MiscDevice for SparkLinkCtl {
                 info.rx_pending = entry.rx_queue.len() as u16;
                 info.tx_bytes = entry.tx_bytes;
                 info.rx_bytes = entry.rx_bytes;
+                info.data_mtu = entry.channels.data.mtu;
+                info.data_mps = entry.channels.data.mps;
+                info.data_mode = entry.channels.data.mode as u8;
+                info.svc_mtu = entry.channels.svc_mgmt.mtu;
                 drop(ss);
                 write_user_struct(arg, &info)?;
                 Ok(0)

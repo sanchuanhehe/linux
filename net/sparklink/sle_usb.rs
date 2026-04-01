@@ -56,6 +56,26 @@ pub(crate) unsafe fn init_usb_event_ring() {
     *USB_EVENT_RING.lock() = Some(ControllerEventRing::new());
 }
 
+/// Drain up to `max` tagged events from the global USB event ring.
+/// Returns a fixed-size array and the number of valid entries.
+pub(crate) fn drain_usb_events(
+    out: &mut [(Option<u16>, Option<SleEvent>)],
+) -> usize {
+    let max = out.len();
+    let mut count = 0usize;
+    if let Some(ref mut ring) = *USB_EVENT_RING.lock() {
+        while count < max {
+            if let Some((dev_id, ev)) = ring.pop_tagged() {
+                out[count] = (dev_id, Some(ev));
+                count += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    count
+}
+
 // ---------------------------------------------------------------------------
 // USB FFI — C wrapper functions from sle_usb_ffi.c
 // ---------------------------------------------------------------------------
@@ -308,12 +328,19 @@ pub(crate) extern "C" fn sparklink_usb_complete(
     status: i32,
 ) {
     if status != 0 {
+        pr_debug!("sparklink-usb: complete status={} len={}\n", status, length);
         return;
     }
 
     if length <= 0 || data.is_null() {
         return;
     }
+
+    // Decode dev_id from context: ctx = (dev_id + 1), 0 means unknown
+    let dev_id: Option<u16> = {
+        let raw = _ctx as usize;
+        if raw > 0 { Some((raw - 1) as u16) } else { None }
+    };
 
     let len = length as usize;
     // SAFETY: data points to the URB transfer buffer which is valid
@@ -322,15 +349,20 @@ pub(crate) extern "C" fn sparklink_usb_complete(
     let slice = unsafe { core::slice::from_raw_parts(data, len) };
 
     // Try to parse as a DLI event packet
-    if let Ok(evt) = parse_event_packet(slice) {
-        if let Some(sle_evt) = event_to_sle(&evt) {
-            pr_debug!(
-                "sparklink-usb: event code=0x{:04x} len={}\n",
-                evt.event_code, len
-            );
-            if let Some(ref mut ring) = *USB_EVENT_RING.lock() {
-                ring.push(sle_evt);
+    match parse_event_packet(slice) {
+        Ok(evt) => {
+            if let Some(sle_evt) = event_to_sle(&evt) {
+                if let Some(ref mut ring) = *USB_EVENT_RING.lock() {
+                    ring.push_tagged(dev_id, sle_evt);
+                }
+            } else {
+                pr_debug!("sparklink-usb: unknown event code=0x{:04x} len={}\n",
+                         evt.event_code, len);
             }
+        }
+        Err(_) => {
+            pr_debug!("sparklink-usb: parse failed len={} first={:02x}\n",
+                     len, if len > 0 { slice[0] } else { 0 });
         }
     }
 }
@@ -661,6 +693,18 @@ pub fn event_to_sle(evt: &DliUsbEvent) -> Option<SleEvent> {
                 method: evt.params[6],
             })
         }
+        // DataReceived (0x0020): [handle:2] [payload:N]
+        0x0020 => {
+            if evt.params.len() < 2 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let mut data = KVec::new();
+            for &b in &evt.params[2..] {
+                let _ = data.push(b, GFP_KERNEL);
+            }
+            Some(SleEvent::DataReceived { handle, data })
+        }
         _ => None,
     }
 }
@@ -958,11 +1002,10 @@ impl SleController for UsbController {
     }
 
     fn poll_event(&self) -> Option<SleEvent> {
-        if let Some(ref mut ring) = *USB_EVENT_RING.lock() {
-            ring.pop()
-        } else {
-            None
-        }
+        // USB events are now drained via drain_usb_events() with device
+        // routing in EventPump. This avoids processing events on the
+        // wrong device due to the shared USB_EVENT_RING.
+        None
     }
 
     fn reset(&self) -> Result {

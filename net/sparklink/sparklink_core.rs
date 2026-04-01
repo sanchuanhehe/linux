@@ -2183,9 +2183,13 @@ fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent
                 _ => {}
             }
         }
-        sle_dli::SleEvent::ConnComplete { handle: _, addr, status } => {
+        sle_dli::SleEvent::ConnComplete { handle: evt_handle, addr, status } => {
             if *status == sle_dli::SleStatus::Success {
-                shared.conn.confirm_connecting_by_addr(addr);
+                if shared.conn.confirm_connecting_by_addr(addr).is_none() {
+                    // Incoming connection — no prior ConnectPending entry.
+                    // Auto-create a Connected entry for the acceptor side.
+                    let _ = shared.conn.accept_incoming(*evt_handle, addr);
+                }
                 genl_bridge::notify_event(0x01, 0, addr);
             } else {
                 shared.conn.abort_connecting_by_addr(addr);
@@ -2201,6 +2205,12 @@ fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent
         sle_dli::SleEvent::AdvReport { addr, rssi, discovery_level, data } => {
             let _ = shared.adv_scan.process_adv_report(addr, *rssi, *discovery_level, data.as_slice());
             genl_bridge::notify_event(0x02, 0, addr);
+        }
+        sle_dli::SleEvent::DataReceived { handle, data } => {
+            let seq = shared.conn.info(*handle)
+                .map(|e| e.seq.rx_seq)
+                .unwrap_or(0);
+            let _ = shared.conn.receive_data(*handle, data.as_slice(), seq);
         }
         _ => {}
     }
@@ -2256,15 +2266,48 @@ impl WorkItem for EventPump {
         // Drain all pending controller events into both the broadcast ring
         // (for read() delivery) and the DLI event ring (for DLI_POLL_EVENT).
         // Also resolve pending commands from the management plane.
-        let mut pumped = 0u32;
+        let mut _pumped = 0u32;
+
+        // Collect tagged events from USB event ring first (minimal lock hold).
+        let mut tagged_events: [(Option<u16>, Option<sle_dli::SleEvent>); 32] =
+            [const { (None, None) }; 32];
+        let tagged_count = sle_usb::drain_usb_events(&mut tagged_events);
+
         {
             let mut ss = SUBSYSTEM.lock();
             if let Some(ref mut shared) = *ss {
+                // Process VirtualController events (untagged, always active device).
                 while let Some(ev) = shared.controller.poll_event() {
                     process_controller_event(shared, &ev);
-                    pumped += 1;
-                    if pumped >= 32 {
-                        break; // yield after 32 events per cycle
+                    _pumped += 1;
+                    if _pumped >= 32 {
+                        break;
+                    }
+                }
+
+                // Process tagged USB events, routing to correct device.
+                for i in 0..tagged_count {
+                    let (dev_id, ev_opt) = core::mem::replace(
+                        &mut tagged_events[i],
+                        (None, None),
+                    );
+                    if let Some(ev) = ev_opt {
+                        let active = shared.active_dev_id;
+                        if dev_id.is_none() || dev_id == active {
+                            // Event belongs to active device: process directly.
+                            process_controller_event(shared, &ev);
+                        } else if let Some(target_id) = dev_id {
+                            // Event belongs to a non-active device.
+                            // Temporarily swap to the target device, process,
+                            // then swap back.
+                            if shared.switch_active_device(target_id, None).is_ok() {
+                                process_controller_event(shared, &ev);
+                                if let Some(orig_id) = active {
+                                    let _ = shared.switch_active_device(orig_id, None);
+                                }
+                            }
+                        }
+                        _pumped += 1;
                     }
                 }
 

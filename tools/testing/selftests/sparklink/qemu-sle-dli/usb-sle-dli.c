@@ -36,6 +36,7 @@
 #include "qemu/osdep.h"
 #include "qemu/module.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "hw/qdev-properties.h"
 #include "hw/usb.h"
 #include "hw/usb/desc.h"
@@ -81,6 +82,7 @@
 #define DLI_EVT_CONN_ESTABLISHED  0x0015
 #define DLI_EVT_BROADCAST_REPORT  0x001A
 #define DLI_EVT_PAIR_REQUEST      0x001D
+#define DLI_EVT_DATA_RECEIVED     0x0020
 
 /* Controller limits */
 #define MAX_CONNECTIONS   8
@@ -189,6 +191,11 @@ struct USBSleDliState {
     /* Interrupt endpoint for wakeup signaling */
     USBEndpoint *intr;
 
+    /* Deferred wakeup timer: schedule INT endpoint wakeup outside
+     * the current USB transaction processing context so that xHCI
+     * can actually complete the pending INT transfer. */
+    QEMUTimer *deferred_wakeup;
+
     /* Inter-device air medium link */
     QTAILQ_ENTRY(USBSleDliState) air_link;
 };
@@ -234,6 +241,40 @@ static void sle_air_unregister(USBSleDliState *s)
     QTAILQ_REMOVE(&sle_air_devices, s, air_link);
 }
 
+/* Forward declaration for event queuing (defined later) */
+static void sle_dli_queue_event(USBSleDliState *s,
+                                const uint8_t *data, int len);
+
+/*
+ * Deferred INT endpoint wakeup timer callback.
+ *
+ * When a cross-device operation (e.g. sle_air_connect) queues events
+ * on another controller's event queue, calling usb_wakeup() directly
+ * from within the source device's USB transaction handler may not take
+ * effect because xHCI is still processing the source transfer.  By
+ * deferring the wakeup to a 0-delay timer, we ensure it fires in the
+ * next event loop iteration when xHCI is idle.
+ */
+static void sle_dli_deferred_wakeup_cb(void *opaque)
+{
+    USBSleDliState *s = opaque;
+    if (s->evt_count > 0 && s->intr) {
+        usb_wakeup(s->intr, 0);
+    }
+}
+
+/*
+ * Schedule a deferred INT endpoint wakeup.  Safe to call from within
+ * another device's USB transaction handler.
+ */
+static void sle_dli_schedule_wakeup(USBSleDliState *s)
+{
+    if (s->deferred_wakeup) {
+        timer_mod(s->deferred_wakeup,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    }
+}
+
 /* Notify all scanning devices about a broadcasting device */
 static void sle_air_broadcast_notify(USBSleDliState *broadcaster)
 {
@@ -256,9 +297,7 @@ static void sle_air_broadcast_notify(USBSleDliState *broadcaster)
         }
         if (dev->scanning) {
             sle_dli_broadcast_report(dev, &fake_peer);
-            if (dev->intr) {
-                usb_wakeup(dev->intr, 0);
-            }
+            sle_dli_schedule_wakeup(dev);
         }
     }
 }
@@ -301,9 +340,7 @@ static bool sle_air_connect(USBSleDliState *initiator,
     sle_dli_conn_complete(acceptor, 0x00,
                           acceptor->connections[acceptor_slot].handle,
                           initiator->mac_addr);
-    if (acceptor->intr) {
-        usb_wakeup(acceptor->intr, 0);
-    }
+    sle_dli_schedule_wakeup(acceptor);
 
     return true;
 }
@@ -319,11 +356,44 @@ static void sle_air_relay_data(USBSleDliState *sender,
     }
 
     USBSleDliState *receiver = conn->remote_dev;
-    /* Queue the data as an async data packet on the receiver */
-    sle_dli_queue_data(receiver, data, len);
-    if (receiver->intr) {
-        usb_wakeup(receiver->intr, 0);
+    int remote_slot = conn->remote_slot;
+    if (remote_slot < 0 || remote_slot >= MAX_CONNECTIONS ||
+        !receiver->connections[remote_slot].active) {
+        return;
     }
+
+    /*
+     * Extract payload from the DLI async data packet:
+     *   [0]    = 0xA3 (DLI_PKT_ASYNC_DATA)
+     *   [1..2] = handle (sender-side)
+     *   [3..4] = payload length (LE16)
+     *   [5..N] = payload
+     */
+    const uint8_t *payload = data;
+    int payload_len = len;
+    if (len >= 5 && data[0] == DLI_PKT_ASYNC_DATA) {
+        payload = &data[5];
+        payload_len = len - 5;
+    }
+
+    /* Build DataReceived event on the receiver side */
+    uint16_t recv_handle = receiver->connections[remote_slot].handle;
+    uint8_t buf[MAX_EVENT_SIZE];
+    int plen = 2 + payload_len;  /* handle + payload */
+    if (3 + plen > MAX_EVENT_SIZE) {
+        plen = MAX_EVENT_SIZE - 3;
+        payload_len = plen - 2;
+    }
+    buf[0] = DLI_EVT_DATA_RECEIVED & 0xFF;
+    buf[1] = (DLI_EVT_DATA_RECEIVED >> 8) & 0xFF;
+    buf[2] = (uint8_t)plen;
+    buf[3] = recv_handle & 0xFF;
+    buf[4] = (recv_handle >> 8) & 0xFF;
+    if (payload_len > 0) {
+        memcpy(&buf[5], payload, payload_len);
+    }
+    sle_dli_queue_event(receiver, buf, 5 + payload_len);
+    sle_dli_schedule_wakeup(receiver);
 }
 
 /* Disconnect and notify the remote side */
@@ -350,9 +420,7 @@ static void sle_air_disconnect(USBSleDliState *local, int slot,
         remote->connections[remote_slot].remote_dev = NULL;
         remote->connections[remote_slot].remote_slot = -1;
         sle_dli_disconnected(remote, remote_handle, reason);
-        if (remote->intr) {
-            usb_wakeup(remote->intr, 0);
-        }
+        sle_dli_schedule_wakeup(remote);
     }
 }
 
@@ -786,8 +854,8 @@ static void sle_dli_process_command(USBSleDliState *s,
         break;
 
     case DLI_OP_CREATE_CONN: {
-        /* params: [addr_type:1] [addr:6] ... */
-        if (plen < 7) {
+        /* params: [addr:6] (kernel sends 6-byte MAC address directly) */
+        if (plen < 6) {
             sle_dli_cmd_status(s, opcode, 0x12); /* invalid params */
             break;
         }
@@ -807,12 +875,12 @@ static void sle_dli_process_command(USBSleDliState *s,
         /* Create connection on this side */
         s->connections[slot].active = true;
         s->connections[slot].handle = s->next_handle++;
-        memcpy(s->connections[slot].peer_addr, &params[1], 6);
+        memcpy(s->connections[slot].peer_addr, &params[0], 6);
         s->connections[slot].remote_dev = NULL;
         s->connections[slot].remote_slot = -1;
 
         /* Try to create a bidirectional link via the air medium */
-        sle_air_connect(s, &params[1], slot);
+        sle_air_connect(s, &params[0], slot);
 
         /* Generate ConnEstablished event on this side */
         sle_dli_conn_complete(s, 0x00,
@@ -822,13 +890,13 @@ static void sle_dli_process_command(USBSleDliState *s,
     }
 
     case DLI_OP_DISCONNECT: {
-        /* params: [handle:2] [reason:1] */
-        if (plen < 3) {
+        /* params: [handle:2] [reason:1(optional)] */
+        if (plen < 2) {
             sle_dli_cmd_status(s, opcode, 0x12);
             break;
         }
         uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
-        uint8_t reason = params[2];
+        uint8_t reason = (plen >= 3) ? params[2] : 0x13; /* default: remote terminate */
         bool found = false;
         for (int i = 0; i < MAX_CONNECTIONS; i++) {
             if (s->connections[i].active &&
@@ -904,13 +972,14 @@ static void sle_dli_handle_bulk_out_command(USBSleDliState *s,
         /* Check for async data — relay to connected peer */
         if (data[0] == DLI_PKT_ASYNC_DATA && len >= 5) {
             /*
-             * Async data format:
+             * Async data format (DLI wire):
              *   [0]    = 0xA3 (DLI_PKT_ASYNC_DATA)
-             *   [1..2] = handle (LE16)
-             *   [3..4] = payload length (LE16)
+             *   [1..2] = link_id_segment (LE16): (handle & 0xFFF) << 4
+             *   [3..4] = payload length (LE16, 9 bits)
              *   [5..N] = payload
              */
-            uint16_t handle = data[1] | ((uint16_t)data[2] << 8);
+            uint16_t link_id_seg = data[1] | ((uint16_t)data[2] << 8);
+            uint16_t handle = (link_id_seg >> 4) & 0x0FFF;
             for (int i = 0; i < MAX_CONNECTIONS; i++) {
                 if (s->connections[i].active &&
                     s->connections[i].handle == handle) {
@@ -994,6 +1063,10 @@ static void usb_sle_dli_realize(USBDevice *dev, Error **errp)
     /* Cache interrupt endpoint for wakeup signaling */
     s->intr = usb_ep_get(dev, USB_TOKEN_IN, 1);
 
+    /* Create deferred wakeup timer for cross-device event delivery */
+    s->deferred_wakeup = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                      sle_dli_deferred_wakeup_cb, s);
+
     /* Register on the virtual air medium */
     sle_air_register(s);
 }
@@ -1004,6 +1077,11 @@ static void usb_sle_dli_handle_reset(USBDevice *dev)
 
     /* Unregister from air medium before resetting state */
     sle_air_unregister(s);
+
+    /* Cancel any pending deferred wakeup */
+    if (s->deferred_wakeup) {
+        timer_del(s->deferred_wakeup);
+    }
 
     s->evt_head = s->evt_tail = s->evt_count = 0;
     s->data_head = s->data_tail = s->data_count = 0;
@@ -1074,6 +1152,11 @@ static void usb_sle_dli_handle_data(USBDevice *dev, USBPacket *p)
                     len = (int)p->iov.size;
                 }
                 usb_packet_copy(p, buf, len);
+                /* If more events pending, schedule a wakeup to drain them
+                 * promptly instead of waiting for the next interval poll. */
+                if (s->evt_count > 0 && s->intr) {
+                    sle_dli_schedule_wakeup(s);
+                }
             } else {
                 p->status = USB_RET_NAK;
             }

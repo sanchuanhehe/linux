@@ -3435,7 +3435,45 @@ static void test_air_medium_connect(int fd)
 			printf("  WARN: CONN_SEND: %s\n", strerror(errno));
 		}
 
-		/* Disconnect */
+		/* Step 5: switch to sle_a and receive the relayed data */
+		target = (uint16_t)id_a;
+		ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+
+		/* Wait for EventPump to deliver DataReceived event */
+		usleep(200000);
+
+		/* Find sle_a's connection handle via CONN_LIST */
+		struct sle_conn_list cl_a;
+		memset(&cl_a, 0, sizeof(cl_a));
+		ret = ioctl(fd, SL_IOCTL_CONN_LIST, &cl_a);
+		if (ret == 0 && cl_a.count > 0) {
+			printf("  OK:   sle%d has %d connection(s) (incoming)\n",
+			       id_a, cl_a.count);
+			ok_count++;
+
+			struct sle_conn_data rd;
+			memset(&rd, 0, sizeof(rd));
+			rd.handle = cl_a.handles[0];
+			ret = ioctl(fd, SL_IOCTL_CONN_RECV, &rd);
+			if (ret == 0 && rd.length > 0) {
+				printf("  OK:   sle%d received %d bytes via air medium\n",
+				       id_a, rd.length);
+				ok_count++;
+			} else {
+				printf("  WARN: CONN_RECV on sle%d: ret=%d len=%d\n",
+				       id_a, ret, rd.length);
+			}
+
+			/* Disconnect sle_a side */
+			ioctl(fd, SL_IOCTL_DISCONNECT, &cl_a.handles[0]);
+		} else {
+			printf("  WARN: sle%d CONN_LIST: ret=%d count=%d\n",
+			       id_a, ret, cl_a.count);
+		}
+
+		/* Switch back to sle_b and disconnect */
+		target = (uint16_t)id_b;
+		ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 		ioctl(fd, SL_IOCTL_DISCONNECT, &handle_b);
 	} else {
 		printf("  FAIL: sle%d CONNECT to air medium peer: %s\n",
@@ -3447,7 +3485,7 @@ static void test_air_medium_connect(int fd)
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 	ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
 
-	printf("  OK:   Air medium test: %d/6 steps passed\n", ok_count);
+	printf("  OK:   Air medium test: %d/8 steps passed\n", ok_count);
 
 	target = 0;
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);

@@ -614,7 +614,8 @@ int sle_usb_dev_start_evt(int dev_id)
 		return -ENODEV;
 
 	ret = sle_usb_submit_intr_in(d->evt_urb, d->udev,
-				      d->ep_intr_in, NULL,
+				      d->ep_intr_in,
+				      (void *)(uintptr_t)(dev_id + 1),
 				      d->ep_intr_in_interval);
 	return ret;
 }
@@ -995,7 +996,8 @@ int sle_usb_dev_resume(int dev_id)
 	/* Re-submit event URB */
 	if (d->evt_urb && d->udev) {
 		ret = sle_usb_submit_intr_in(d->evt_urb, d->udev,
-					     d->ep_intr_in, NULL,
+					     d->ep_intr_in,
+					     (void *)(uintptr_t)(dev_id + 1),
 					     d->ep_intr_in_interval);
 		if (ret) {
 			pr_err("sparklink-usb: dev %d resume evt URB failed: %d\n",

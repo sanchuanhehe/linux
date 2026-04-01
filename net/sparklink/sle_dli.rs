@@ -41,7 +41,7 @@ pub(crate) const CTRL_EVENT_RING_SIZE: usize = 32;
 /// buffer asynchronous events received from hardware completion callbacks
 /// until `EventPump` polls them via `SleController::poll_event()`.
 pub(crate) struct ControllerEventRing {
-    events: [Option<SleEvent>; CTRL_EVENT_RING_SIZE],
+    events: [(Option<u16>, Option<SleEvent>); CTRL_EVENT_RING_SIZE],
     head: usize,
     tail: usize,
 }
@@ -49,28 +49,42 @@ pub(crate) struct ControllerEventRing {
 impl ControllerEventRing {
     pub(crate) fn new() -> Self {
         Self {
-            events: [const { None }; CTRL_EVENT_RING_SIZE],
+            events: [const { (None, None) }; CTRL_EVENT_RING_SIZE],
             head: 0,
             tail: 0,
         }
     }
 
-    pub(crate) fn push(&mut self, ev: SleEvent) {
+    /// Push an event with an optional source device id.
+    pub(crate) fn push_tagged(&mut self, dev_id: Option<u16>, ev: SleEvent) {
         let next = (self.tail + 1) % CTRL_EVENT_RING_SIZE;
         if next == self.head {
             return;
         }
-        self.events[self.tail] = Some(ev);
+        self.events[self.tail] = (dev_id, Some(ev));
         self.tail = next;
     }
 
-    pub(crate) fn pop(&mut self) -> Option<SleEvent> {
+    /// Push an event without device routing (processed on active device).
+    pub(crate) fn push(&mut self, ev: SleEvent) {
+        self.push_tagged(None, ev);
+    }
+
+    /// Pop the next event along with its source device id.
+    pub(crate) fn pop_tagged(&mut self) -> Option<(Option<u16>, SleEvent)> {
         if self.head == self.tail {
             return None;
         }
-        let ev = self.events[self.head].take();
+        let (dev_id, ev) = core::mem::replace(
+            &mut self.events[self.head],
+            (None, None),
+        );
         self.head = (self.head + 1) % CTRL_EVENT_RING_SIZE;
-        ev
+        ev.map(|e| (dev_id, e))
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<SleEvent> {
+        self.pop_tagged().map(|(_, ev)| ev)
     }
 }
 

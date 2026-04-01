@@ -749,6 +749,29 @@ impl ConnManager {
         None
     }
 
+    /// Accept an incoming connection from a remote peer.
+    /// Creates a Connected entry using the controller-provided handle.
+    pub fn accept_incoming(&mut self, handle: u16, addr: &[u8; 6]) -> Result {
+        if self.connections.len() >= self.max_connections {
+            return Err(EBUSY);
+        }
+        for entry in self.connections.iter() {
+            if entry.handle == handle {
+                return Ok(());
+            }
+        }
+        let mut entry = ConnEntry::try_new(handle)?;
+        entry.peer_addr = *addr;
+        entry.state = ConnState::Connected;
+        self.connections.push(entry, GFP_KERNEL)?;
+        self.total_created += 1;
+        pr_info!(
+            "sparklink: accepted incoming connection from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} (handle={})\n",
+            addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], handle
+        );
+        Ok(())
+    }
+
     /// Abort the first pending connection matching a peer address.
     pub fn abort_connecting_by_addr(&mut self, addr: &[u8; 6]) {
         let mut idx = None;

@@ -119,9 +119,13 @@ pub enum AdvScanState {
     /// Idle — neither advertising nor scanning.
     #[default]
     Idle,
-    /// Advertising — broadcasting PDUs.
+    /// Advertising command sent to controller, awaiting confirmation.
+    AdvPending,
+    /// Advertising confirmed by controller — broadcasting PDUs.
     Advertising,
-    /// Scanning — listening for PDUs.
+    /// Scan command sent to controller, awaiting confirmation.
+    ScanPending,
+    /// Scanning confirmed by controller — listening for PDUs.
     Scanning,
 }
 
@@ -164,24 +168,42 @@ impl AdvScanInner {
     }
 
     /// Start advertising. Fails if already advertising or scanning.
+    /// Sets state to AdvPending; call confirm_advertising() after
+    /// controller sends CommandComplete with success.
     pub fn start_advertising(&mut self, params: AdvParams) -> Result {
         if self.state != AdvScanState::Idle {
             pr_err!("sparklink: cannot start adv in state {:?}\n", self.state);
             return Err(EBUSY);
         }
         self.adv_params = params;
-        self.state = AdvScanState::Advertising;
+        self.state = AdvScanState::AdvPending;
         pr_info!(
-            "sparklink: advertising started (level={}, interval={})\n",
+            "sparklink: advertising pending (level={}, interval={})\n",
             params.discovery_level,
             params.interval_slots
         );
         Ok(())
     }
 
+    /// Confirm advertising after controller reports success.
+    pub fn confirm_advertising(&mut self) {
+        if self.state == AdvScanState::AdvPending {
+            self.state = AdvScanState::Advertising;
+            pr_info!("sparklink: advertising confirmed\n");
+        }
+    }
+
+    /// Abort a pending advertising request (controller reported failure).
+    pub fn abort_advertising(&mut self) {
+        if self.state == AdvScanState::AdvPending {
+            self.state = AdvScanState::Idle;
+            pr_info!("sparklink: advertising aborted (controller rejected)\n");
+        }
+    }
+
     /// Stop advertising.
     pub fn stop_advertising(&mut self) -> Result {
-        if self.state != AdvScanState::Advertising {
+        if self.state != AdvScanState::Advertising && self.state != AdvScanState::AdvPending {
             return Err(EBUSY);
         }
         self.state = AdvScanState::Idle;
@@ -190,6 +212,8 @@ impl AdvScanInner {
     }
 
     /// Start scanning. Fails if already advertising or scanning.
+    /// Sets state to ScanPending; call confirm_scanning() after
+    /// controller sends CommandComplete with success.
     pub fn start_scanning(&mut self, params: ScanParams) -> Result {
         if self.state != AdvScanState::Idle {
             pr_err!("sparklink: cannot start scan in state {:?}\n", self.state);
@@ -197,9 +221,9 @@ impl AdvScanInner {
         }
         self.scan_params = params;
         self.scan_results = KVec::new();
-        self.state = AdvScanState::Scanning;
+        self.state = AdvScanState::ScanPending;
         pr_info!(
-            "sparklink: scanning started (window={}, interval={}, filter={})\n",
+            "sparklink: scanning pending (window={}, interval={}, filter={})\n",
             params.window_slots,
             params.interval_slots,
             params.filter_level
@@ -207,9 +231,25 @@ impl AdvScanInner {
         Ok(())
     }
 
+    /// Confirm scanning after controller reports success.
+    pub fn confirm_scanning(&mut self) {
+        if self.state == AdvScanState::ScanPending {
+            self.state = AdvScanState::Scanning;
+            pr_info!("sparklink: scanning confirmed\n");
+        }
+    }
+
+    /// Abort a pending scan request (controller reported failure).
+    pub fn abort_scanning(&mut self) {
+        if self.state == AdvScanState::ScanPending {
+            self.state = AdvScanState::Idle;
+            pr_info!("sparklink: scanning aborted (controller rejected)\n");
+        }
+    }
+
     /// Stop scanning.
     pub fn stop_scanning(&mut self) -> Result {
-        if self.state != AdvScanState::Scanning {
+        if self.state != AdvScanState::Scanning && self.state != AdvScanState::ScanPending {
             return Err(EBUSY);
         }
         self.state = AdvScanState::Idle;
@@ -217,21 +257,21 @@ impl AdvScanInner {
         Ok(())
     }
 
-    /// Check if currently advertising.
+    /// Check if currently advertising (confirmed or pending).
     pub fn is_advertising(&self) -> bool {
-        self.state == AdvScanState::Advertising
+        self.state == AdvScanState::Advertising || self.state == AdvScanState::AdvPending
     }
 
-    /// Check if currently scanning.
+    /// Check if currently scanning (confirmed or pending).
     pub fn is_scanning(&self) -> bool {
-        self.state == AdvScanState::Scanning
+        self.state == AdvScanState::Scanning || self.state == AdvScanState::ScanPending
     }
 
     /// Build the advertising PDU for the current configuration.
     ///
     /// Called by the driver/timer to generate the next advertising frame.
     pub fn build_adv_pdu(&self) -> Option<AdvPdu> {
-        if self.state != AdvScanState::Advertising {
+        if self.state != AdvScanState::Advertising && self.state != AdvScanState::AdvPending {
             return None;
         }
         let mut builder = AdvDataBuilder::new();
@@ -259,7 +299,7 @@ impl AdvScanInner {
     /// Extracts device info from the PDU and adds it to the scan results
     /// if it passes the discovery level filter.
     pub fn process_adv_pdu(&mut self, pdu: &AdvPdu, rssi: i8) -> Result {
-        if self.state != AdvScanState::Scanning {
+        if self.state != AdvScanState::Scanning && self.state != AdvScanState::ScanPending {
             return Err(EPERM);
         }
 

@@ -1233,6 +1233,9 @@ kernel::sync::global_lock! {
 static OPEN_FD_COUNT: kernel::sync::atomic::Atomic<u32> =
     kernel::sync::atomic::Atomic::new(0);
 
+/// DLI event ring size (events consumed from controller by EventPump).
+const DLI_RING_SIZE: usize = 32;
+
 /// Shared state across all open file descriptors.
 /// Protected by the SUBSYSTEM global mutex.
 struct SubsystemShared {
@@ -1246,8 +1249,34 @@ struct SubsystemShared {
     local_role: GtRole,
     /// Global event broadcast ring for multi-listener delivery.
     broadcast: sle_event::BroadcastRing,
+    /// DLI event ring for DLI_POLL_EVENT ioctl. Events consumed from the
+    /// controller by the EventPump are stored here so DLI_POLL_EVENT has
+    /// a deterministic source separate from the controller queue.
+    dli_ring: [SleDliEvent; DLI_RING_SIZE],
+    dli_head: usize,
+    dli_tail: usize,
     /// Background event pump handle. Kept alive while subsystem is active.
     _event_pump: Option<Arc<EventPump>>,
+}
+
+impl SubsystemShared {
+    fn push_dli_event(&mut self, ev: SleDliEvent) {
+        self.dli_ring[self.dli_tail] = ev;
+        self.dli_tail = (self.dli_tail + 1) % DLI_RING_SIZE;
+        if self.dli_tail == self.dli_head {
+            // Ring full: drop oldest entry.
+            self.dli_head = (self.dli_head + 1) % DLI_RING_SIZE;
+        }
+    }
+
+    fn pop_dli_event(&mut self) -> Option<SleDliEvent> {
+        if self.dli_head == self.dli_tail {
+            return None;
+        }
+        let ev = self.dli_ring[self.dli_head];
+        self.dli_head = (self.dli_head + 1) % DLI_RING_SIZE;
+        Some(ev)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,7 +1323,8 @@ impl WorkItem for EventPump {
     type Pointer = Arc<EventPump>;
 
     fn run(this: Arc<EventPump>) {
-        // Drain all pending controller events into the broadcast ring.
+        // Drain all pending controller events into both the broadcast ring
+        // (for read() delivery) and the DLI event ring (for DLI_POLL_EVENT).
         let mut pumped = 0u32;
         {
             let mut ss = SUBSYSTEM.lock();
@@ -1302,6 +1332,8 @@ impl WorkItem for EventPump {
                 while let Some(ev) = shared.controller.poll_event() {
                     let wire = sle_dli_event_to_broadcast(&ev);
                     shared.broadcast.publish(wire);
+                    let dli_ev = sle_dli_event_to_wire(&ev);
+                    shared.push_dli_event(dli_ev);
                     pumped += 1;
                     if pumped >= 32 {
                         break; // yield after 32 events per cycle
@@ -1514,6 +1546,9 @@ impl kernel::InPlaceModule for SparkLinkModule {
                     phy: sle_phy::PhyConfig::default_config(),
                     local_role: GtRole::TNode,
                     broadcast: sle_event::BroadcastRing::new(),
+                    dli_ring: unsafe { core::mem::zeroed() },
+                    dli_head: 0,
+                    dli_tail: 0,
                     _event_pump: pump,
                 });
                 pr_info!("sparklink: shared subsystem initialised\n");
@@ -1640,7 +1675,19 @@ impl MiscDevice for SparkLinkCtl {
                             pdu.crc
                         );
                     }
-                    let _ = s.controller.enable_broadcast(true);
+                    // Send enable to controller; confirm on success.
+                    // The command returning Ok(()) is sufficient for state
+                    // confirmation. Events (CommandComplete) stay in the
+                    // controller queue for userspace DLI_POLL_EVENT.
+                    match s.controller.enable_broadcast(true) {
+                        Ok(()) => {
+                            s.adv_scan.confirm_advertising();
+                        }
+                        Err(e) => {
+                            s.adv_scan.abort_advertising();
+                            return Err(e);
+                        }
+                    }
                 }
                 Ok(0)
             }
@@ -1676,7 +1723,15 @@ impl MiscDevice for SparkLinkCtl {
                     return Err(EPERM);
                 }
                 s.adv_scan.start_scanning(params)?;
-                let _ = s.controller.enable_scan(true);
+                match s.controller.enable_scan(true) {
+                    Ok(()) => {
+                        s.adv_scan.confirm_scanning();
+                    }
+                    Err(e) => {
+                        s.adv_scan.abort_scanning();
+                        return Err(e);
+                    }
+                }
                 Ok(0)
             }
             SL_IOCTL_STOP_SCAN => {
@@ -2282,6 +2337,13 @@ impl MiscDevice for SparkLinkCtl {
             SL_IOCTL_DLI_POLL_EVENT => {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
+                // Try DLI event ring first (events already consumed by EventPump).
+                if let Some(dli_ev) = s.pop_dli_event() {
+                    drop(ss);
+                    write_user_struct(arg, &dli_ev)?;
+                    return Ok(0);
+                }
+                // Fallback: poll controller directly (EventPump hasn't run yet).
                 match s.controller.poll_event() {
                     Some(ev) => {
                         let dli_ev = sle_dli_event_to_wire(&ev);

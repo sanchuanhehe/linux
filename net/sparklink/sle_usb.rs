@@ -29,10 +29,29 @@ use kernel::usb;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::sle_dli::{
-    DliPacketType, SleBus, SleController, SleControllerInfo, SleEvent, SleFeature,
-    SleOpcode, SleStatus,
+    ControllerEventRing, DliPacketType, SleBus, SleController, SleControllerInfo,
+    SleEvent, SleFeature, SleOpcode, SleStatus,
 };
 use super::sle_transport::{SleAttachInfo, SleProtoId};
+
+// ---------------------------------------------------------------------------
+// Global USB event ring — receives events from C completion callbacks
+// ---------------------------------------------------------------------------
+
+kernel::sync::global_lock! {
+    // SAFETY: Initialized once in module_init via init_usb_event_ring().
+    unsafe(uninit) static USB_EVENT_RING: Mutex<Option<ControllerEventRing>> = None;
+}
+
+/// Initialize the global USB event ring.
+///
+/// # Safety
+///
+/// Must be called exactly once during module init.
+pub(crate) unsafe fn init_usb_event_ring() {
+    unsafe { USB_EVENT_RING.init() };
+    *USB_EVENT_RING.lock() = Some(ControllerEventRing::new());
+}
 
 // ---------------------------------------------------------------------------
 // USB FFI — C wrapper functions from sle_usb_ffi.c
@@ -307,9 +326,9 @@ pub(crate) extern "C" fn sparklink_usb_complete(
                 "sparklink-usb: event code=0x{:04x} parsed\n",
                 evt.event_code
             );
-            // Feed into subsystem broadcast ring via the global shared state.
-            // The EventPump will pick it up on its next tick.
-            let _ = sle_evt;
+            if let Some(ref mut ring) = *USB_EVENT_RING.lock() {
+                ring.push(sle_evt);
+            }
         }
     }
 }
@@ -487,6 +506,26 @@ pub struct DliAsyncHeader {
     pub data_len: u16,
 }
 
+/// Extract discovery_level from raw advertising TLV data.
+///
+/// Scans the TLV entries (type 0x01 = discovery level per T/XS 20001)
+/// and returns the 3-bit discovery level value. Returns 0 if not found.
+fn extract_discovery_level(data: &[u8]) -> u8 {
+    let mut i = 0;
+    while i + 1 < data.len() {
+        let len = data[i] as usize;
+        if len == 0 || i + 1 + len > data.len() {
+            break;
+        }
+        let typ = data[i + 1];
+        if typ == 0x01 && len >= 2 {
+            return data[i + 2] & 0x07;
+        }
+        i += 1 + len;
+    }
+    0
+}
+
 /// Parse the async/sync data header from a bulk IN packet.
 ///
 /// Expects the raw packet starting with the type byte already stripped
@@ -585,7 +624,8 @@ pub fn event_to_sle(evt: &DliUsbEvent) -> Option<SleEvent> {
             for &b in &evt.params[8..data_end] {
                 let _ = data.push(b, GFP_KERNEL);
             }
-            Some(SleEvent::AdvReport { addr, rssi, data })
+            let discovery_level = extract_discovery_level(data.as_slice());
+            Some(SleEvent::AdvReport { addr, rssi, discovery_level, data })
         }
         // HwError (0x000A): [code:1]
         0x000A => {
@@ -909,11 +949,11 @@ impl SleController for UsbController {
     }
 
     fn poll_event(&self) -> Option<SleEvent> {
-        // Real implementation: usb_interrupt_msg(udev, pipe_in, buf,
-        //                                        EP_EVENT_MAX_PKT,
-        //                                        &actual, timeout)
-        // then parse_event_packet() + event_to_sle()
-        None
+        if let Some(ref mut ring) = *USB_EVENT_RING.lock() {
+            ring.pop()
+        } else {
+            None
+        }
     }
 
     fn reset(&self) -> Result {

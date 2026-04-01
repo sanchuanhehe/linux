@@ -573,6 +573,55 @@ impl ConnManager {
         }
     }
 
+    /// Confirm a pending connection by peer address (for DLI ConnComplete events
+    /// where the controller-side handle may differ from the host-assigned handle).
+    pub fn confirm_connecting_by_addr(&mut self, addr: &[u8; 6]) -> Option<u16> {
+        for entry in self.connections.iter_mut() {
+            if entry.peer_addr == *addr && entry.state == ConnState::ConnectPending {
+                entry.state = ConnState::Connecting;
+                return Some(entry.handle);
+            }
+        }
+        None
+    }
+
+    /// Abort the first pending connection matching a peer address.
+    pub fn abort_connecting_by_addr(&mut self, addr: &[u8; 6]) {
+        let mut idx = None;
+        for (i, entry) in self.connections.iter().enumerate() {
+            if entry.peer_addr == *addr && entry.state == ConnState::ConnectPending {
+                idx = Some(i);
+                break;
+            }
+        }
+        if let Some(i) = idx {
+            let _ = self.connections.remove(i);
+        }
+    }
+
+    /// Confirm a disconnect by handle, removing the entry.
+    /// Returns true if a matching entry was found and removed.
+    pub fn confirm_disconnecting_by_handle(&mut self, handle: u16) -> bool {
+        let mut idx = None;
+        for (i, entry) in self.connections.iter().enumerate() {
+            if entry.handle == handle
+                && (entry.state == ConnState::DisconnectPending
+                    || entry.state == ConnState::Connected
+                    || entry.state == ConnState::Connecting)
+            {
+                idx = Some(i);
+                break;
+            }
+        }
+        if let Some(i) = idx {
+            let _ = self.connections.remove(i);
+            self.total_completed += 1;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Process a received access response for a given handle.
     pub fn process_access_response(
         &mut self,

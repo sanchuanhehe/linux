@@ -40,11 +40,12 @@
 use kernel::prelude::*;
 
 use super::sle_dli::{
-    SleBus, SleController, SleControllerInfo,
+    ControllerEventRing, SleBus, SleController, SleControllerInfo,
     SleEvent, SleFeature, SleOpcode,
 };
 use super::sle_transport::{SleAttachInfo, SleProtoId};
 use super::sle_uart::{UartFrame, UartParser, MAX_PAYLOAD_LEN};
+use super::sle_usb::{DliUsbEvent, event_to_sle};
 
 // =========================================================================
 // Serdev FFI — C wrapper functions from sle_serdev_ffi.c
@@ -120,6 +121,7 @@ extern "C" {
 struct SerdevParserState {
     parser: UartParser,
     dev_id: Option<u16>,
+    events: ControllerEventRing,
 }
 
 impl SerdevParserState {
@@ -127,6 +129,7 @@ impl SerdevParserState {
         Self {
             parser: UartParser::new(),
             dev_id: None,
+            events: ControllerEventRing::new(),
         }
     }
 
@@ -153,6 +156,19 @@ impl SerdevParserState {
                             params.as_ptr(),
                             params.len() as i32,
                         );
+                    }
+                    // Convert to SleEvent and push into event ring for
+                    // EventPump to pick up via poll_event().
+                    let mut p = kernel::alloc::KVec::new();
+                    for &b in params.as_slice() {
+                        let _ = p.push(b, kernel::alloc::flags::GFP_KERNEL);
+                    }
+                    let raw_evt = DliUsbEvent {
+                        event_code: *event_code,
+                        params: p,
+                    };
+                    if let Some(sle_evt) = event_to_sle(&raw_evt) {
+                        self.events.push(sle_evt);
                     }
                 }
                 _ => {
@@ -303,7 +319,11 @@ impl SleController for SerdevController {
     }
 
     fn poll_event(&self) -> Option<SleEvent> {
-        None
+        if let Some(ref mut state) = *SERDEV_PARSER.lock() {
+            state.events.pop()
+        } else {
+            None
+        }
     }
 
     fn reset(&self) -> Result {

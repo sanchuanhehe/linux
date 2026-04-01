@@ -1272,13 +1272,14 @@ fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
             out.status = *status as u8;
             out.opcode = *opcode as u16;
         }
-        sle_dli::SleEvent::AdvReport { addr, rssi, data } => {
+        sle_dli::SleEvent::AdvReport { addr, rssi, discovery_level, data } => {
             out.event_type = 0x03;
             out.addr = *addr;
             out.data[0] = *rssi as u8;
-            let len = data.len().min(239);
-            out.data_len = (len + 1) as u16;
-            out.data[1..1 + len].copy_from_slice(&data[..len]);
+            out.data[1] = *discovery_level;
+            let len = data.len().min(238);
+            out.data_len = (len + 2) as u16;
+            out.data[2..2 + len].copy_from_slice(&data[..len]);
         }
         sle_dli::SleEvent::ConnComplete { handle, addr, status } => {
             out.event_type = 0x04;
@@ -1747,6 +1748,96 @@ impl_has_delayed_work! {
     impl HasDelayedWork<Self> for EventPump { self.work }
 }
 
+// ---------------------------------------------------------------------------
+// Unified controller event processing
+// ---------------------------------------------------------------------------
+
+/// Process a single controller event: resolve pending commands, drive
+/// state machine transitions, and publish to broadcast ring / DLI ring.
+///
+/// Called from both `EventPump` (periodic background) and inline after
+/// ioctl commands (immediate drain for synchronous controller backends
+/// like VirtualController).
+fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent) {
+    // 1. Resolve pending management commands.
+    match ev {
+        sle_dli::SleEvent::CommandComplete { opcode, status, data } => {
+            shared.cmd_pending.resolve(*opcode as u16, *status as u8, data.as_slice());
+        }
+        sle_dli::SleEvent::CommandStatus { opcode, status } => {
+            shared.cmd_pending.resolve(*opcode as u16, *status as u8, &[]);
+        }
+        _ => {}
+    }
+
+    // 2. Drive pending state machine transitions (DLI async confirmation).
+    match ev {
+        sle_dli::SleEvent::CommandComplete { opcode, status, .. } => {
+            match opcode {
+                sle_dli::SleOpcode::EnableBroadcast => {
+                    if *status == sle_dli::SleStatus::Success {
+                        shared.adv_scan.confirm_advertising();
+                        if let Some(dev) = shared.active_dev_id.and_then(|id| shared.dev_registry.get(id)) {
+                            dev.set_flag(sle_dev::SLE_DEV_ADVERTISING);
+                        }
+                    } else {
+                        shared.adv_scan.abort_advertising();
+                    }
+                }
+                sle_dli::SleOpcode::EnableScan => {
+                    if *status == sle_dli::SleStatus::Success {
+                        shared.adv_scan.confirm_scanning();
+                        if let Some(dev) = shared.active_dev_id.and_then(|id| shared.dev_registry.get(id)) {
+                            dev.set_flag(sle_dev::SLE_DEV_SCANNING);
+                        }
+                    } else {
+                        shared.adv_scan.abort_scanning();
+                    }
+                }
+                _ => {}
+            }
+        }
+        sle_dli::SleEvent::ConnComplete { handle: _, addr, status } => {
+            if *status == sle_dli::SleStatus::Success {
+                shared.conn.confirm_connecting_by_addr(addr);
+            } else {
+                shared.conn.abort_connecting_by_addr(addr);
+            }
+        }
+        sle_dli::SleEvent::Disconnected { handle, .. } => {
+            shared.conn.confirm_disconnecting_by_handle(*handle);
+        }
+        _ => {}
+    }
+
+    // 3. Publish to broadcast ring and DLI event ring.
+    let wire = sle_dli_event_to_broadcast(ev);
+    shared.broadcast.publish(wire);
+    let dli_ev = sle_dli_event_to_wire(ev);
+    shared.push_dli_event(dli_ev);
+}
+
+/// Drain all immediately available controller events and process them.
+///
+/// Used after ioctl commands to handle synchronous controller responses
+/// (VirtualController, UartController) inline without waiting for the
+/// next EventPump cycle. For real hardware backends (USB, serdev),
+/// events arrive asynchronously and this function is a no-op.
+fn drain_controller_events(shared: &mut SubsystemShared) {
+    let mut drained = 0u32;
+    while let Some(ev) = shared.controller.poll_event() {
+        process_controller_event(shared, &ev);
+        drained += 1;
+        if drained >= 32 {
+            break;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Background event pump (RX processing)
+// ---------------------------------------------------------------------------
+
 impl EventPump {
     fn new() -> Result<Arc<Self>> {
         Arc::pin_init(pin_init!(EventPump {
@@ -1775,25 +1866,7 @@ impl WorkItem for EventPump {
             let mut ss = SUBSYSTEM.lock();
             if let Some(ref mut shared) = *ss {
                 while let Some(ev) = shared.controller.poll_event() {
-                    // Resolve pending management commands on CommandComplete/CommandStatus.
-                    match &ev {
-                        sle_dli::SleEvent::CommandComplete { opcode, status, data } => {
-                            shared.cmd_pending.resolve(
-                                *opcode as u16, *status as u8, data.as_slice(),
-                            );
-                        }
-                        sle_dli::SleEvent::CommandStatus { opcode, status } => {
-                            shared.cmd_pending.resolve(
-                                *opcode as u16, *status as u8, &[],
-                            );
-                        }
-                        _ => {}
-                    }
-
-                    let wire = sle_dli_event_to_broadcast(&ev);
-                    shared.broadcast.publish(wire);
-                    let dli_ev = sle_dli_event_to_wire(&ev);
-                    shared.push_dli_event(dli_ev);
+                    process_controller_event(shared, &ev);
                     pumped += 1;
                     if pumped >= 32 {
                         break; // yield after 32 events per cycle
@@ -1870,10 +1943,17 @@ impl WorkItem for CommandWorker {
                     match shared.cmd_queue.pop() {
                         Some(req) => {
                             let plen = req.param_len as usize;
-                            let _ = shared.controller.send_command_raw(
+                            let result = shared.controller.send_command_raw(
                                 req.opcode,
                                 &req.params[..plen],
                             );
+                            if result.is_err() {
+                                // Immediately resolve the pending entry as
+                                // failed so it does not linger until timeout.
+                                shared.cmd_pending.resolve(
+                                    req.opcode, 0x03, &[], // HardwareFailure
+                                );
+                            }
                             dispatched += 1;
                         }
                         None => break,
@@ -1915,8 +1995,8 @@ fn sle_dli_event_to_broadcast(ev: &sle_dli::SleEvent) -> sle_event::SleWireEvent
         sle_dli::SleEvent::Disconnected { handle, reason } => {
             sle_event::SleWireEvent::conn_state(*handle, 2, 0, [0u8; 6], *reason)
         }
-        sle_dli::SleEvent::AdvReport { addr, rssi, data } => {
-            sle_event::SleWireEvent::adv_report(*addr, *rssi, 0, data.as_slice())
+        sle_dli::SleEvent::AdvReport { addr, rssi, discovery_level, data } => {
+            sle_event::SleWireEvent::adv_report(*addr, *rssi, *discovery_level, data.as_slice())
         }
         sle_dli::SleEvent::DataReceived { handle, data } => {
             sle_event::SleWireEvent::data_received(*handle, data.len() as u16)
@@ -2042,6 +2122,8 @@ impl kernel::InPlaceModule for SparkLinkModule {
         unsafe { SUBSYSTEM.init() };
         // SAFETY: Called exactly once during module init.
         unsafe { sle_serdev::init_serdev_parser() };
+        // SAFETY: Called exactly once during module init.
+        unsafe { sle_usb::init_usb_event_ring() };
 
         let options = MiscDeviceOptions {
             name: c"sparklink",
@@ -2398,16 +2480,13 @@ impl MiscDevice for SparkLinkCtl {
                             pdu.crc
                         );
                     }
-                    // Send enable to controller; confirm on success.
-                    // The command returning Ok(()) is sufficient for state
-                    // confirmation. Events (CommandComplete) stay in the
-                    // controller queue for userspace DLI_POLL_EVENT.
+                    // Send enable to controller; state stays AdvPending.
+                    // EventPump will confirm or abort when CommandComplete
+                    // arrives from the controller (DLI async model).
                     match s.controller.enable_broadcast(true) {
                         Ok(()) => {
-                            s.adv_scan.confirm_advertising();
-                            if let Some(dev) = s.active_dev_id.and_then(|id| s.dev_registry.get(id)) {
-                                dev.set_flag(sle_dev::SLE_DEV_ADVERTISING);
-                            }
+                            // Drain synchronous responses (VirtualController).
+                            drain_controller_events(s);
                         }
                         Err(e) => {
                             s.adv_scan.abort_advertising();
@@ -2455,10 +2534,8 @@ impl MiscDevice for SparkLinkCtl {
                 s.adv_scan.start_scanning(params)?;
                 match s.controller.enable_scan(true) {
                     Ok(()) => {
-                        s.adv_scan.confirm_scanning();
-                        if let Some(dev) = s.active_dev_id.and_then(|id| s.dev_registry.get(id)) {
-                            dev.set_flag(sle_dev::SLE_DEV_SCANNING);
-                        }
+                        // Drain synchronous responses (VirtualController).
+                        drain_controller_events(s);
                     }
                     Err(e) => {
                         s.adv_scan.abort_scanning();
@@ -2584,10 +2661,12 @@ impl MiscDevice for SparkLinkCtl {
                     let mut ss = SUBSYSTEM.lock();
                     let s = ss.as_mut().ok_or(ENODEV)?;
                     let handle = s.conn.connect(cp.peer_addr, role)?;
-                    // Send CreateConnection to controller; confirm on success.
+                    // Send CreateConnection to controller; state stays
+                    // ConnPending. EventPump will confirm when ConnComplete
+                    // event arrives from the controller.
                     match s.controller.create_connection(&cp.peer_addr) {
                         Ok(()) => {
-                            s.conn.confirm_connecting(handle);
+                            drain_controller_events(s);
                         }
                         Err(e) => {
                             s.conn.abort_connecting(handle);
@@ -2612,15 +2691,15 @@ impl MiscDevice for SparkLinkCtl {
                     let peer_addr = s.conn.info(handle).map(|e| e.peer_addr).unwrap_or([0u8; 6]);
                     let old_state = s.conn.info(handle).map(|e| e.state as u8).unwrap_or(0);
                     s.conn.disconnect(handle)?;
-                    // Send Disconnect to controller; confirm on success.
+                    // Send Disconnect to controller; state stays
+                    // DisconnPending. EventPump will confirm when
+                    // Disconnected event arrives from the controller.
                     match s.controller.disconnect(handle) {
                         Ok(()) => {
-                            s.conn.confirm_disconnecting(handle);
+                            drain_controller_events(s);
                         }
                         Err(_) => {
                             s.conn.abort_disconnecting(handle);
-                            // Still report success to userspace since we
-                            // initiated the disconnect.
                         }
                     }
                     (handle, peer_addr, old_state)
@@ -3134,10 +3213,13 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
 
-                // Submit to pending queue (tracking).
-                let seq = s.cmd_pending.submit(cmd.opcode)?;
-                // Enqueue to command request queue (async dispatch).
+                // Enqueue to command request queue first — if this fails,
+                // no pending entry is leaked.
                 s.cmd_queue.push(cmd.opcode, &cmd.params[..param_len])?;
+
+                // Only create the pending tracking entry after the command
+                // is successfully enqueued for dispatch.
+                let seq = s.cmd_pending.submit(cmd.opcode)?;
 
                 // Kick the command worker to dispatch.
                 if let Some(ref w) = s._cmd_worker {

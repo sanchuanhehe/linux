@@ -34,6 +34,47 @@ use core::cell::RefCell;
 pub(crate) const CTRL_EVENT_RING_SIZE: usize = 32;
 
 // ---------------------------------------------------------------------------
+// Shared event ring for hardware controller backends
+// ---------------------------------------------------------------------------
+
+/// Thread-safe event ring buffer used by USB and serdev controllers to
+/// buffer asynchronous events received from hardware completion callbacks
+/// until `EventPump` polls them via `SleController::poll_event()`.
+pub(crate) struct ControllerEventRing {
+    events: [Option<SleEvent>; CTRL_EVENT_RING_SIZE],
+    head: usize,
+    tail: usize,
+}
+
+impl ControllerEventRing {
+    pub(crate) fn new() -> Self {
+        Self {
+            events: [const { None }; CTRL_EVENT_RING_SIZE],
+            head: 0,
+            tail: 0,
+        }
+    }
+
+    pub(crate) fn push(&mut self, ev: SleEvent) {
+        let next = (self.tail + 1) % CTRL_EVENT_RING_SIZE;
+        if next == self.head {
+            return;
+        }
+        self.events[self.tail] = Some(ev);
+        self.tail = next;
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<SleEvent> {
+        if self.head == self.tail {
+            return None;
+        }
+        let ev = self.events[self.head].take();
+        self.head = (self.head + 1) % CTRL_EVENT_RING_SIZE;
+        ev
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DLI packet type indicators (T/XS 10003-2025 section 5.1)
 // ---------------------------------------------------------------------------
 
@@ -693,6 +734,7 @@ pub enum SleEvent {
     AdvReport {
         addr: [u8; 6],
         rssi: i8,
+        discovery_level: u8,
         data: KVec<u8>,
     },
     /// Connection established.
@@ -888,7 +930,7 @@ impl SleController for VirtualController {
         pr_info!("sparklink-virtual: controller closed\n");
     }
 
-    fn send_command(&self, opcode: SleOpcode, _params: &[u8]) -> Result {
+    fn send_command(&self, opcode: SleOpcode, params: &[u8]) -> Result {
         pr_debug!("sparklink-virtual: cmd {:?} (0x{:04x})\n", opcode, opcode as u16);
         // Generate a CommandComplete event for loopback testing
         self.enqueue_event(SleEvent::CommandComplete {
@@ -896,6 +938,29 @@ impl SleController for VirtualController {
             status: SleStatus::Success,
             data: KVec::new(),
         });
+        // Generate additional events for operations that produce separate
+        // asynchronous notifications in real DLI controllers.
+        match opcode {
+            SleOpcode::CreateConnection if params.len() >= 6 => {
+                let mut addr = [0u8; 6];
+                addr.copy_from_slice(&params[..6]);
+                // Simulate ConnComplete with handle = first non-zero addr byte
+                let handle = params[5] as u16;
+                self.enqueue_event(SleEvent::ConnComplete {
+                    handle: if handle == 0 { 1 } else { handle },
+                    addr,
+                    status: SleStatus::Success,
+                });
+            }
+            SleOpcode::Disconnect if params.len() >= 2 => {
+                let handle = u16::from_le_bytes([params[0], params[1]]);
+                self.enqueue_event(SleEvent::Disconnected {
+                    handle,
+                    reason: 0, // success
+                });
+            }
+            _ => {}
+        }
         Ok(())
     }
 

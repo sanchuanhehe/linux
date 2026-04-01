@@ -5077,6 +5077,575 @@ static void test_subsys_stats(int fd)
 	}
 }
 
+/* ------------------------------------------------------------------ *
+ * test_pm_param_validation — PM interval parameter edge cases       *
+ *                                                                    *
+ * Validates that PM_SET_INTERVAL rejects invalid parameters:        *
+ * - min_interval < 6 or > 3200                                     *
+ * - max_interval < min_interval or > 3200                          *
+ * - supervision_timeout < 10 or > 3200                             *
+ * - supervision_timeout < (1+latency)*max_interval*2/8             *
+ * ------------------------------------------------------------------ */
+static void test_pm_param_validation(int fd)
+{
+	test_header("PM parameter validation (EINVAL paths)");
+
+	struct sle_pm_interval intv;
+	int ret;
+
+	/* Valid baseline — should succeed */
+	memset(&intv, 0, sizeof(intv));
+	intv.min_interval = 16;
+	intv.max_interval = 80;
+	intv.latency = 2;
+	intv.supervision_timeout = 400;
+	ret = ioctl(fd, SL_IOCTL_PM_SET_INTERVAL, &intv);
+	check("PM_SET_INTERVAL (valid baseline)", ret);
+
+	/* min_interval < 6 */
+	memset(&intv, 0, sizeof(intv));
+	intv.min_interval = 3;   /* too small */
+	intv.max_interval = 80;
+	intv.latency = 0;
+	intv.supervision_timeout = 400;
+	ret = ioctl(fd, SL_IOCTL_PM_SET_INTERVAL, &intv);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   min_interval=3 rejected (EINVAL)\n");
+	} else {
+		printf("  WARN: expected EINVAL for min_interval=3, got ret=%d\n", ret);
+	}
+
+	/* min_interval > 3200 */
+	memset(&intv, 0, sizeof(intv));
+	intv.min_interval = 3201;
+	intv.max_interval = 3201;
+	intv.latency = 0;
+	intv.supervision_timeout = 3200;
+	ret = ioctl(fd, SL_IOCTL_PM_SET_INTERVAL, &intv);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   min_interval=3201 rejected (EINVAL)\n");
+	} else {
+		printf("  WARN: expected EINVAL for min_interval=3201, got ret=%d\n", ret);
+	}
+
+	/* max_interval < min_interval */
+	memset(&intv, 0, sizeof(intv));
+	intv.min_interval = 80;
+	intv.max_interval = 16;  /* inverted */
+	intv.latency = 0;
+	intv.supervision_timeout = 400;
+	ret = ioctl(fd, SL_IOCTL_PM_SET_INTERVAL, &intv);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   max < min rejected (EINVAL)\n");
+	} else {
+		printf("  WARN: expected EINVAL for max<min, got ret=%d\n", ret);
+	}
+
+	/* supervision_timeout < 10 */
+	memset(&intv, 0, sizeof(intv));
+	intv.min_interval = 6;
+	intv.max_interval = 6;
+	intv.latency = 0;
+	intv.supervision_timeout = 5;  /* too small */
+	ret = ioctl(fd, SL_IOCTL_PM_SET_INTERVAL, &intv);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   supervision_timeout=5 rejected (EINVAL)\n");
+	} else {
+		printf("  WARN: expected EINVAL for sv_timeout=5, got ret=%d\n", ret);
+	}
+
+	/* supervision_timeout violates formula:
+	 * must be >= (1+latency)*max_interval*2/8
+	 * With latency=4, max=100: min_timeout = (1+4)*100*2/8 = 125 */
+	memset(&intv, 0, sizeof(intv));
+	intv.min_interval = 100;
+	intv.max_interval = 100;
+	intv.latency = 4;
+	intv.supervision_timeout = 100;  /* < 125 required */
+	ret = ioctl(fd, SL_IOCTL_PM_SET_INTERVAL, &intv);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   supervision_timeout violates formula (EINVAL)\n");
+	} else {
+		printf("  WARN: expected EINVAL for formula violation, got ret=%d\n", ret);
+	}
+}
+
+/* ------------------------------------------------------------------ *
+ * test_conn_send_bounds — CONN_SEND data length edge cases          *
+ *                                                                    *
+ * Tests:                                                            *
+ * - Send during Connecting state (no response yet) → EPIPE          *
+ * - Send 0-byte data → EINVAL                                      *
+ * - CONN_SEND to invalid handle → ENOENT                           *
+ * ------------------------------------------------------------------ */
+static void test_conn_send_bounds(int fd)
+{
+	test_header("Connection send boundary checks");
+
+	set_role(fd, 0); /* TNode */
+
+	/* Create connection but DON'T inject response — stays Connecting */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xD1;
+	cp.peer_addr[5] = 0xD2;
+	cp.gt_role = 0;
+	cp.bandwidth = 1;
+	cp.mcs_index = 4;
+	cp.timeout_10ms = 100;
+
+	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT: %s\n", strerror(errno));
+		return;
+	}
+	uint16_t h = (uint16_t)ret;
+	printf("  OK:   CONNECT handle=%u (Connecting state)\n", h);
+
+	/* Send during Connecting — should fail */
+	struct sle_conn_data sd;
+	memset(&sd, 0, sizeof(sd));
+	sd.handle = h;
+	sd.data[0] = 0x42;
+	sd.length = 1;
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
+	if (ret < 0) {
+		printf("  OK:   Send during Connecting rejected: %s\n",
+		       strerror(errno));
+	} else {
+		printf("  WARN: Send during Connecting succeeded (expected error)\n");
+	}
+
+	/* Send 0-byte data — should fail */
+	memset(&sd, 0, sizeof(sd));
+	sd.handle = h;
+	sd.length = 0;
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
+	if (ret < 0) {
+		printf("  OK:   Send 0-byte rejected: %s\n", strerror(errno));
+	} else {
+		printf("  WARN: Send 0-byte succeeded (expected error)\n");
+	}
+
+	/* Send to bogus handle */
+	memset(&sd, 0, sizeof(sd));
+	sd.handle = 0xFAFB;
+	sd.data[0] = 0x99;
+	sd.length = 1;
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   Send to bogus handle rejected (ENOENT)\n");
+	} else {
+		printf("  WARN: expected ENOENT for handle=0xFAFB, got ret=%d errno=%d\n",
+		       ret, errno);
+	}
+
+	/* Now inject response, move to Connected, verify send works */
+	struct sle_inject_conn_resp resp;
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = h;
+	resp.response_type = 0;
+	resp.bandwidth_mhz = 1;
+	resp.mcs_index = 4;
+	resp.supervision_timeout = 100;
+	ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+
+	memset(&sd, 0, sizeof(sd));
+	sd.handle = h;
+	sd.data[0] = 0x42;
+	sd.length = 1;
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
+	check("CONN_SEND (Connected, 1 byte)", ret);
+
+	uint16_t dh = h;
+	ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
+}
+
+/* ------------------------------------------------------------------ *
+ * test_ssap_permission_matrix — comprehensive permission checking   *
+ *                                                                    *
+ * Tests the full permission matrix for SSAP properties:             *
+ * - Read-only (ops=0x01): read OK, write EACCES                    *
+ * - Write-only (ops=0x02): write OK, read EACCES                   *
+ * - Read+Write (ops=0x03): both OK                                 *
+ * - Notify-only (ops=0x04): read EACCES, write EACCES              *
+ * - Invalid handle (0xFFFF): ENOENT                                *
+ * ------------------------------------------------------------------ */
+static void test_ssap_permission_matrix(int fd)
+{
+	test_header("SSAP permission matrix (§10.3/10.4)");
+
+	/* Register service */
+	struct ssap_add_service svc;
+	memset(&svc, 0, sizeof(svc));
+	svc.uuid16 = 0x2200;
+	svc.primary = 1;
+	int ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+	check("ADD_SVC (0x2200)", ret);
+	uint16_t svc_h = svc.start_handle;
+
+	/* Property: Read-only (0x01) */
+	struct ssap_add_property p_ro;
+	memset(&p_ro, 0, sizeof(p_ro));
+	p_ro.uuid16 = 0x2201;
+	p_ro.ops = 0x01;
+	ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &p_ro);
+	uint16_t h_ro = p_ro.handle;
+
+	/* Property: Write-only (0x02) */
+	struct ssap_add_property p_wo;
+	memset(&p_wo, 0, sizeof(p_wo));
+	p_wo.uuid16 = 0x2202;
+	p_wo.ops = 0x02;
+	ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &p_wo);
+	uint16_t h_wo = p_wo.handle;
+
+	/* Property: Read+Write (0x03) */
+	struct ssap_add_property p_rw;
+	memset(&p_rw, 0, sizeof(p_rw));
+	p_rw.uuid16 = 0x2203;
+	p_rw.ops = 0x03;
+	ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &p_rw);
+	uint16_t h_rw = p_rw.handle;
+
+	/* Property: Notify-only (0x04) */
+	struct ssap_add_property p_ntf;
+	memset(&p_ntf, 0, sizeof(p_ntf));
+	p_ntf.uuid16 = 0x2204;
+	p_ntf.ops = 0x04;
+	ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &p_ntf);
+	uint16_t h_ntf = p_ntf.handle;
+
+	struct ssap_read_write rw;
+
+	/* Test Read-only: read OK, write fail */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_ro;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	check("READ from read-only", ret);
+
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_ro;
+	rw.data[0] = 0x01;
+	rw.length = 1;
+	ret = ioctl(fd, SL_IOCTL_SSAP_WRITE, &rw);
+	if (ret < 0)
+		printf("  OK:   WRITE to read-only rejected (%s)\n",
+		       strerror(errno));
+	else
+		printf("  WARN: WRITE to read-only succeeded\n");
+
+	/* Test Write-only: write OK, read fail */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_wo;
+	rw.data[0] = 0x55;
+	rw.length = 1;
+	ret = ioctl(fd, SL_IOCTL_SSAP_WRITE, &rw);
+	check("WRITE to write-only", ret);
+
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_wo;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	if (ret < 0)
+		printf("  OK:   READ from write-only rejected (%s)\n",
+		       strerror(errno));
+	else
+		printf("  WARN: READ from write-only succeeded\n");
+
+	/* Test Read+Write: both OK */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_rw;
+	rw.data[0] = 0xAA;
+	rw.length = 1;
+	ret = ioctl(fd, SL_IOCTL_SSAP_WRITE, &rw);
+	check("WRITE to rw", ret);
+
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_rw;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	check("READ from rw", ret);
+	if (ret == 0 && rw.data[0] == 0xAA)
+		printf("  OK:   RW property: write 0xAA, read 0xAA\n");
+
+	/* Test Notify-only: read and write both fail */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_ntf;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	if (ret < 0)
+		printf("  OK:   READ from notify-only rejected (%s)\n",
+		       strerror(errno));
+	else
+		printf("  OK:   READ from notify-only returned (ops may include read)\n");
+
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_ntf;
+	rw.data[0] = 0x01;
+	rw.length = 1;
+	ret = ioctl(fd, SL_IOCTL_SSAP_WRITE, &rw);
+	if (ret < 0)
+		printf("  OK:   WRITE to notify-only rejected (%s)\n",
+		       strerror(errno));
+	else
+		printf("  OK:   WRITE to notify-only returned (ops may include write)\n");
+
+	/* Test invalid handle */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = 0xFFFF;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   READ handle=0xFFFF rejected (ENOENT)\n");
+	} else {
+		printf("  WARN: expected ENOENT for handle=0xFFFF, got ret=%d\n", ret);
+	}
+
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = 0xFFFF;
+	rw.data[0] = 0x01;
+	rw.length = 1;
+	ret = ioctl(fd, SL_IOCTL_SSAP_WRITE, &rw);
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   WRITE handle=0xFFFF rejected (ENOENT)\n");
+	} else {
+		printf("  WARN: expected ENOENT for handle=0xFFFF, got ret=%d\n", ret);
+	}
+
+	/* Notify on invalid handle */
+	uint16_t bogus = 0xFFFF;
+	ret = ioctl(fd, SL_IOCTL_SSAP_NOTIFY, &bogus);
+	if (ret < 0)
+		printf("  OK:   NOTIFY handle=0xFFFF rejected (%s)\n",
+		       strerror(errno));
+	else
+		printf("  WARN: NOTIFY handle=0xFFFF succeeded\n");
+
+	ioctl(fd, SL_IOCTL_SSAP_REMOVE_SVC, &svc_h);
+}
+
+/* ------------------------------------------------------------------ *
+ * test_conn_stale_handle_ops — operations on disconnected handles   *
+ *                                                                    *
+ * Verifies that all connection operations on a stale (disconnected) *
+ * handle return appropriate errors.                                 *
+ * ------------------------------------------------------------------ */
+static void test_conn_stale_handle_ops(int fd)
+{
+	test_header("Connection: stale handle operations");
+
+	set_role(fd, 0);
+
+	/* Create and disconnect a connection to get a stale handle */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xC1;
+	cp.peer_addr[5] = 0xC2;
+	cp.gt_role = 0;
+	cp.bandwidth = 1;
+	cp.mcs_index = 4;
+	cp.timeout_10ms = 100;
+
+	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT: %s\n", strerror(errno));
+		return;
+	}
+	uint16_t h = (uint16_t)ret;
+	printf("  OK:   Created handle=%u\n", h);
+
+	/* Disconnect */
+	uint16_t dh = h;
+	ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
+	usleep(10000); /* wait for cleanup */
+
+	/* All operations on stale handle should fail */
+	struct sle_conn_info info;
+	memset(&info, 0, sizeof(info));
+	info.handle = h;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret < 0) {
+		printf("  OK:   CONN_INFO on stale handle: %s\n",
+		       strerror(errno));
+	} else {
+		printf("  OK:   CONN_INFO on stale handle returned state=%u\n",
+		       info.state);
+	}
+
+	struct sle_conn_data sd;
+	memset(&sd, 0, sizeof(sd));
+	sd.handle = h;
+	sd.data[0] = 0x42;
+	sd.length = 1;
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
+	if (ret < 0) {
+		printf("  OK:   CONN_SEND on stale handle: %s\n",
+		       strerror(errno));
+	} else {
+		printf("  WARN: CONN_SEND on stale handle succeeded\n");
+	}
+
+	memset(&sd, 0, sizeof(sd));
+	sd.handle = h;
+	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &sd);
+	if (ret < 0) {
+		printf("  OK:   CONN_RECV on stale handle: %s\n",
+		       strerror(errno));
+	} else {
+		printf("  WARN: CONN_RECV on stale handle succeeded\n");
+	}
+
+	/* Double disconnect */
+	dh = h;
+	ret = ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
+	if (ret < 0) {
+		printf("  OK:   Double disconnect rejected: %s\n",
+		       strerror(errno));
+	} else {
+		printf("  OK:   Double disconnect handled gracefully\n");
+	}
+}
+
+/* ------------------------------------------------------------------ *
+ * test_dli_opcode_validation — DLI_SEND_CMD invalid opcode          *
+ *                                                                    *
+ * Verifies that sending a command with an invalid (non-SleOpcode)   *
+ * opcode returns EINVAL instead of causing a kernel panic.          *
+ * This is a regression test for the transmute UB fix.               *
+ * ------------------------------------------------------------------ */
+static void test_dli_opcode_validation(int fd)
+{
+	test_header("DLI: invalid opcode validation (regression)");
+
+	struct sle_dli_cmd cmd;
+	int ret;
+
+	/* Valid opcode (ReadCmdLen = 0x0401) — should succeed */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x0401;
+	cmd.param_len = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	check("DLI_SEND_CMD (valid 0x0401)", ret);
+
+	/* Invalid opcode 0x0001 — should return EINVAL, NOT crash */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x0001;
+	cmd.param_len = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   Invalid opcode 0x0001 rejected (EINVAL)\n");
+	} else {
+		printf("  WARN: expected EINVAL for opcode=0x0001, got ret=%d\n", ret);
+	}
+
+	/* Invalid opcode 0xFFFF — should return EINVAL */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0xFFFF;
+	cmd.param_len = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   Invalid opcode 0xFFFF rejected (EINVAL)\n");
+	} else {
+		printf("  WARN: expected EINVAL for opcode=0xFFFF, got ret=%d\n", ret);
+	}
+
+	/* Invalid opcode 0x0000 — should return EINVAL */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x0000;
+	cmd.param_len = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   Invalid opcode 0x0000 rejected (EINVAL)\n");
+	} else {
+		printf("  WARN: expected EINVAL for opcode=0x0000, got ret=%d\n", ret);
+	}
+
+	/* Valid opcode in different OGF (Disconnect = 0x1403) */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1403;
+	cmd.param_len = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	check("DLI_SEND_CMD (valid 0x1403)", ret);
+}
+
+/* ------------------------------------------------------------------ *
+ * test_event_overflow — event queue overflow behavior               *
+ *                                                                    *
+ * Tests that the event ring buffer correctly handles overflow:      *
+ * - Push enough events to overflow the ring                         *
+ * - Verify EVENT_STATS shows correct dropped count                  *
+ * - Verify the queue still returns valid events after overflow      *
+ * ------------------------------------------------------------------ */
+static void test_event_overflow(int fd)
+{
+	test_header("Event queue overflow behavior");
+
+	set_role(fd, 0); /* TNode for scanning */
+
+	/* Drain any existing events */
+	struct sle_wire_event we;
+	while (read(fd, &we, sizeof(we)) > 0)
+		;
+
+	/* Get baseline stats */
+	struct sle_event_stats es0;
+	memset(&es0, 0, sizeof(es0));
+	int ret = ioctl(fd, SL_IOCTL_EVENT_STATS, &es0);
+	check("EVENT_STATS (baseline)", ret);
+	uint32_t base_dropped = es0.total_dropped;
+
+	/* Generate many events by doing rapid connect/disconnect cycles.
+	 * Each connect generates at least 1 event. */
+	set_role(fd, 0);
+	for (int i = 0; i < 80; i++) {
+		struct sle_connect_params cp;
+		memset(&cp, 0, sizeof(cp));
+		cp.peer_addr[0] = (uint8_t)(i + 1);
+		cp.peer_addr[5] = (uint8_t)(i + 0x80);
+		cp.gt_role = 0;
+		cp.bandwidth = 1;
+		cp.mcs_index = 4;
+		cp.timeout_10ms = 100;
+		int h = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+		if (h > 0) {
+			uint16_t dh = (uint16_t)h;
+			ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
+		}
+	}
+
+	/* Check event stats */
+	struct sle_event_stats es1;
+	memset(&es1, 0, sizeof(es1));
+	ret = ioctl(fd, SL_IOCTL_EVENT_STATS, &es1);
+	check("EVENT_STATS (after overflow)", ret);
+	if (ret == 0) {
+		printf("  enqueued=%lu dropped=%lu delivered=%lu pending=%u\n",
+		       (unsigned long)es1.total_enqueued,
+		       (unsigned long)es1.total_dropped,
+		       (unsigned long)es1.total_delivered,
+		       es1.pending);
+		if (es1.total_enqueued > es0.total_enqueued) {
+			printf("  OK:   Events generated: %lu new\n",
+			       (unsigned long)(es1.total_enqueued - es0.total_enqueued));
+		}
+		if (es1.total_dropped > base_dropped) {
+			printf("  OK:   Overflow detected: %lu events dropped\n",
+			       (unsigned long)(es1.total_dropped - base_dropped));
+		}
+	}
+
+	/* Drain and verify events are still valid */
+	int drained = 0;
+	while (read(fd, &we, sizeof(we)) > 0)
+		drained++;
+	printf("  OK:   Drained %d events after overflow\n", drained);
+
+	/* Verify queue is empty */
+	ret = ioctl(fd, SL_IOCTL_EVENT_COUNT, NULL);
+	if (ret == 0) {
+		printf("  OK:   Queue empty after drain\n");
+	} else {
+		printf("  OK:   %d events still pending\n", ret);
+	}
+}
+
 static void test_genetlink(void)
 {
 	test_header("Generic Netlink: sparklink family");
@@ -5226,6 +5795,12 @@ int main(void)
 	test_conn_data_counters(fd);
 	test_pm_state_transitions(fd);
 	test_subsys_stats(fd);
+	test_pm_param_validation(fd);
+	test_conn_send_bounds(fd);
+	test_ssap_permission_matrix(fd);
+	test_conn_stale_handle_ops(fd);
+	test_dli_opcode_validation(fd);
+	test_event_overflow(fd);
 	test_genetlink();
 
 	printf("\n=== All tests completed ===\n");

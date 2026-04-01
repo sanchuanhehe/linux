@@ -1086,7 +1086,7 @@ impl ControllerBackend {
 // transport-level byte arrays directly (T/XS 10003-2025 section 8).
 
 /// Convert a raw u16 to SleOpcode, returning None for unknown values.
-fn sle_opcode_from_u16(v: u16) -> Option<SleOpcode> {
+pub fn sle_opcode_from_u16(v: u16) -> Option<SleOpcode> {
     match v {
         0x0401 => Some(SleOpcode::ReadCmdLen),
         0x0402 => Some(SleOpcode::ReadCtrlBuffer),

@@ -3612,6 +3612,12 @@ impl MiscDevice for SparkLinkCtl {
                 let mut cmd: SleDliCmd = read_user_struct(arg)?;
                 let param_len = (cmd.param_len as usize).min(240);
 
+                // Validate opcode early — reject unknown opcodes at the
+                // ioctl boundary instead of only in the async worker.
+                if sle_dli::sle_opcode_from_u16(cmd.opcode).is_none() {
+                    return Err(EINVAL);
+                }
+
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
 

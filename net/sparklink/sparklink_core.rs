@@ -1828,12 +1828,20 @@ fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent
         sle_dli::SleEvent::ConnComplete { handle: _, addr, status } => {
             if *status == sle_dli::SleStatus::Success {
                 shared.conn.confirm_connecting_by_addr(addr);
+                genl_bridge::notify_event(0x01, 0, addr);
             } else {
                 shared.conn.abort_connecting_by_addr(addr);
             }
         }
         sle_dli::SleEvent::Disconnected { handle, .. } => {
+            let peer_addr = shared.conn.info(*handle)
+                .map(|e| e.peer_addr)
+                .unwrap_or([0u8; 6]);
             shared.conn.confirm_disconnecting_by_handle(*handle);
+            genl_bridge::notify_event(0x01, *handle, &peer_addr);
+        }
+        sle_dli::SleEvent::AdvReport { addr, .. } => {
+            genl_bridge::notify_event(0x02, 0, addr);
         }
         _ => {}
     }
@@ -2117,7 +2125,7 @@ struct SparkLinkModule {
     #[pin]
     ioctl_count: File<Atomic<usize>>,
     #[pin]
-    _dli_info: File<CString>,
+    _dli_info: File<Atomic<u32>>,
     // debugfs subdirectories for observability layer
     _mgmt_dir: Dir,
     #[pin]
@@ -2193,24 +2201,29 @@ impl kernel::InPlaceModule for SparkLinkModule {
                 c"ioctl_count",
                 Atomic::<usize>::new(0),
             ),
-            _dli_info <- {
-                let ctrl = sle_dli::VirtualController::new([0x5E, 0, 0, 0, 0, 1]);
-                let cinfo = ctrl.info();
-                let major = (cinfo.fw_version >> 16) & 0xFF;
-                let minor = (cinfo.fw_version >> 8) & 0xFF;
-                let patch = cinfo.fw_version & 0xFF;
-                debugfs.read_only_file(
-                    c"dli_controller",
-                    CString::try_from_fmt(fmt!(
-                        "bus: {:?}\nfirmware: {}.{}.{}\nfeatures: 0x{:016x}\nmax_connections: {}\nmax_mtu: {}\nmax_mps: {}\ntransport_modes: 0x{:02x}\nmeasurement_cap: 0x{:02x}\nsecurity_cap: 0x{:04x}",
-                        cinfo.bus, major, minor, patch,
-                        cinfo.features, cinfo.max_connections,
-                        cinfo.max_mtu, cinfo.max_mps,
-                        cinfo.transport_modes, cinfo.measurement_cap,
-                        cinfo.security_cap
-                    ))?,
-                )
-            },
+            _dli_info <- debugfs.read_callback_file(
+                c"dli_controller",
+                Atomic::<u32>::new(0),
+                &|_dummy: &Atomic<u32>, f: &mut core::fmt::Formatter<'_>| {
+                    let ss = SUBSYSTEM.lock();
+                    if let Some(ref ss) = *ss {
+                        let cinfo = ss.controller.info();
+                        let major = (cinfo.fw_version >> 16) & 0xFF;
+                        let minor = (cinfo.fw_version >> 8) & 0xFF;
+                        let patch = cinfo.fw_version & 0xFF;
+                        writeln!(f, "bus: {:?}", cinfo.bus)?;
+                        writeln!(f, "firmware: {}.{}.{}", major, minor, patch)?;
+                        writeln!(f, "features: 0x{:016x}", cinfo.features)?;
+                        writeln!(f, "max_connections: {}", cinfo.max_connections)?;
+                        writeln!(f, "max_mtu: {}", cinfo.max_mtu)?;
+                        writeln!(f, "max_mps: {}", cinfo.max_mps)?;
+                        writeln!(f, "transport_modes: 0x{:02x}", cinfo.transport_modes)?;
+                        writeln!(f, "measurement_cap: 0x{:02x}", cinfo.measurement_cap)?;
+                        writeln!(f, "security_cap: 0x{:04x}", cinfo.security_cap)?;
+                    }
+                    Ok(())
+                },
+            ),
             // --- Observability layer: debugfs subdirectories ---
             _mgmt_stats <- mgmt_dir.read_callback_file(
                 c"stats",
@@ -2710,7 +2723,6 @@ impl MiscDevice for SparkLinkCtl {
                     me.as_ref(),
                     sle_event::SleWireEvent::conn_state(handle, 0, 1, cp.peer_addr, 0),
                 );
-                genl_bridge::notify_event(0x01, handle, &cp.peer_addr);
                 Ok(handle as isize)
             }
             SL_IOCTL_DISCONNECT => {
@@ -2739,7 +2751,6 @@ impl MiscDevice for SparkLinkCtl {
                     me.as_ref(),
                     sle_event::SleWireEvent::conn_state(handle, old_state, 0, peer_addr, 0),
                 );
-                genl_bridge::notify_event(0x01, handle, &peer_addr);
                 Ok(0)
             }
             SL_IOCTL_CONN_INFO => {

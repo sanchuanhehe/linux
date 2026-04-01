@@ -40,6 +40,22 @@ pub enum SleEventType {
     PowerChanged = 0x05,
     /// Hardware or controller error.
     HardwareError = 0x06,
+    /// DLI command completed (opcode + status).
+    CommandComplete = 0x07,
+    /// DLI command status (async command accepted/rejected).
+    CommandStatus = 0x08,
+    /// Broadcast / advertising terminated.
+    BroadcastEnd = 0x09,
+    /// PHY parameters updated (MCS, bandwidth, etc.).
+    PhyUpdate = 0x0A,
+    /// Connection parameters updated.
+    ConnParamUpdate = 0x0B,
+    /// Data length changed on a connection.
+    DataLenChange = 0x0C,
+    /// Controller data buffer overflow.
+    DataBufOverflow = 0x0D,
+    /// Remote peer requests connection parameter change.
+    PeerConnParamReq = 0x0E,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +136,105 @@ pub struct HardwareErrorEvent {
     /// Error code.
     pub error_code: u8,
     _pad: [u8; 3],
+}
+
+/// DLI command completed event.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CommandCompleteEvent {
+    /// Opcode of the completed command.
+    pub opcode: u16,
+    /// Status code (0 = success).
+    pub status: u8,
+    /// Return data length.
+    pub data_len: u8,
+    /// Return data (up to 32 bytes).
+    pub data: [u8; 32],
+}
+
+/// DLI command status event (async command accepted/rejected).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CommandStatusEvent {
+    /// Opcode of the command.
+    pub opcode: u16,
+    /// Status code (0 = pending/accepted).
+    pub status: u8,
+    _pad: u8,
+}
+
+/// Broadcast terminated event.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct BroadcastEndEvent {
+    /// Reason code for termination.
+    pub reason: u8,
+    _pad: [u8; 3],
+}
+
+/// PHY parameters updated event.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PhyUpdateEvent {
+    /// Connection handle (0xFFFF = local).
+    pub handle: u16,
+    /// New MCS index.
+    pub mcs_index: u8,
+    /// New bandwidth in MHz.
+    pub bandwidth_mhz: u8,
+}
+
+/// Connection parameters updated event.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ConnParamUpdateEvent {
+    /// Connection handle.
+    pub handle: u16,
+    /// New interval (in 1.25ms units).
+    pub interval: u16,
+    /// New latency (number of events).
+    pub latency: u16,
+    /// New supervision timeout (in 10ms units).
+    pub timeout: u16,
+}
+
+/// Data length changed event.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct DataLenChangeEvent {
+    /// Connection handle.
+    pub handle: u16,
+    /// Max TX octets.
+    pub max_tx_octets: u16,
+    /// Max RX octets.
+    pub max_rx_octets: u16,
+    _pad: u16,
+}
+
+/// Data buffer overflow event.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct DataBufOverflowEvent {
+    /// Link type (0=async, 1=sync).
+    pub link_type: u8,
+    _pad: [u8; 3],
+}
+
+/// Peer connection parameter request event.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PeerConnParamReqEvent {
+    /// Connection handle.
+    pub handle: u16,
+    /// Requested minimum interval.
+    pub interval_min: u16,
+    /// Requested maximum interval.
+    pub interval_max: u16,
+    /// Requested latency.
+    pub latency: u16,
+    /// Requested supervision timeout.
+    pub timeout: u16,
+    _pad: u16,
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +348,98 @@ impl SleWireEvent {
             _pad: [0u8; 3],
         };
         Self::from_payload(SleEventType::HardwareError, &payload)
+    }
+
+    /// Build a command complete wire event.
+    pub fn command_complete(opcode: u16, status: u8, data: &[u8]) -> Self {
+        let mut evt = CommandCompleteEvent {
+            opcode,
+            status,
+            data_len: data.len().min(32) as u8,
+            data: [0u8; 32],
+        };
+        let len = data.len().min(32);
+        evt.data[..len].copy_from_slice(&data[..len]);
+        Self::from_payload(SleEventType::CommandComplete, &evt)
+    }
+
+    /// Build a command status wire event.
+    pub fn command_status(opcode: u16, status: u8) -> Self {
+        let payload = CommandStatusEvent {
+            opcode,
+            status,
+            _pad: 0,
+        };
+        Self::from_payload(SleEventType::CommandStatus, &payload)
+    }
+
+    /// Build a broadcast end wire event.
+    pub fn broadcast_end(reason: u8) -> Self {
+        let payload = BroadcastEndEvent {
+            reason,
+            _pad: [0u8; 3],
+        };
+        Self::from_payload(SleEventType::BroadcastEnd, &payload)
+    }
+
+    /// Build a PHY update wire event.
+    pub fn phy_update(handle: u16, mcs_index: u8, bandwidth_mhz: u8) -> Self {
+        let payload = PhyUpdateEvent {
+            handle,
+            mcs_index,
+            bandwidth_mhz,
+        };
+        Self::from_payload(SleEventType::PhyUpdate, &payload)
+    }
+
+    /// Build a connection parameter update wire event.
+    pub fn conn_param_update(handle: u16, interval: u16, latency: u16, timeout: u16) -> Self {
+        let payload = ConnParamUpdateEvent {
+            handle,
+            interval,
+            latency,
+            timeout,
+        };
+        Self::from_payload(SleEventType::ConnParamUpdate, &payload)
+    }
+
+    /// Build a data length change wire event.
+    pub fn data_len_change(handle: u16, max_tx: u16, max_rx: u16) -> Self {
+        let payload = DataLenChangeEvent {
+            handle,
+            max_tx_octets: max_tx,
+            max_rx_octets: max_rx,
+            _pad: 0,
+        };
+        Self::from_payload(SleEventType::DataLenChange, &payload)
+    }
+
+    /// Build a data buffer overflow wire event.
+    pub fn data_buf_overflow(link_type: u8) -> Self {
+        let payload = DataBufOverflowEvent {
+            link_type,
+            _pad: [0u8; 3],
+        };
+        Self::from_payload(SleEventType::DataBufOverflow, &payload)
+    }
+
+    /// Build a peer connection parameter request wire event.
+    pub fn peer_conn_param_req(
+        handle: u16,
+        interval_min: u16,
+        interval_max: u16,
+        latency: u16,
+        timeout: u16,
+    ) -> Self {
+        let payload = PeerConnParamReqEvent {
+            handle,
+            interval_min,
+            interval_max,
+            latency,
+            timeout,
+            _pad: 0,
+        };
+        Self::from_payload(SleEventType::PeerConnParamReq, &payload)
     }
 }
 

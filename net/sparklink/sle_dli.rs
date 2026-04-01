@@ -725,6 +725,41 @@ pub enum SleEvent {
     HardwareError {
         code: u8,
     },
+    /// Broadcast / advertising terminated by the controller.
+    BroadcastEnd {
+        reason: u8,
+    },
+    /// PHY parameters updated on a connection.
+    PhyUpdate {
+        handle: u16,
+        mcs_index: u8,
+        bandwidth_mhz: u8,
+    },
+    /// Connection parameters updated.
+    ConnParamUpdate {
+        handle: u16,
+        interval: u16,
+        latency: u16,
+        timeout: u16,
+    },
+    /// Data length changed on a connection.
+    DataLenChange {
+        handle: u16,
+        max_tx_octets: u16,
+        max_rx_octets: u16,
+    },
+    /// Controller data buffer overflow.
+    DataBufOverflow {
+        link_type: u8,
+    },
+    /// Remote peer requests connection parameter change.
+    PeerConnParamReq {
+        handle: u16,
+        interval_min: u16,
+        interval_max: u16,
+        latency: u16,
+        timeout: u16,
+    },
 }
 
 // ---------------------------------------------------------------------------

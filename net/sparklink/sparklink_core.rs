@@ -1081,6 +1081,56 @@ fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
             out.data[0] = *code;
             out.data_len = 1;
         }
+        sle_dli::SleEvent::BroadcastEnd { reason } => {
+            out.event_type = 0x0A;
+            out.data[0] = *reason;
+            out.data_len = 1;
+        }
+        sle_dli::SleEvent::PhyUpdate { handle, mcs_index, bandwidth_mhz } => {
+            out.event_type = 0x0B;
+            out.handle = *handle;
+            out.data[0] = *mcs_index;
+            out.data[1] = *bandwidth_mhz;
+            out.data_len = 2;
+        }
+        sle_dli::SleEvent::ConnParamUpdate { handle, interval, latency, timeout } => {
+            out.event_type = 0x0C;
+            out.handle = *handle;
+            out.data[0] = (*interval & 0xFF) as u8;
+            out.data[1] = (*interval >> 8) as u8;
+            out.data[2] = (*latency & 0xFF) as u8;
+            out.data[3] = (*latency >> 8) as u8;
+            out.data[4] = (*timeout & 0xFF) as u8;
+            out.data[5] = (*timeout >> 8) as u8;
+            out.data_len = 6;
+        }
+        sle_dli::SleEvent::DataLenChange { handle, max_tx_octets, max_rx_octets } => {
+            out.event_type = 0x0D;
+            out.handle = *handle;
+            out.data[0] = (*max_tx_octets & 0xFF) as u8;
+            out.data[1] = (*max_tx_octets >> 8) as u8;
+            out.data[2] = (*max_rx_octets & 0xFF) as u8;
+            out.data[3] = (*max_rx_octets >> 8) as u8;
+            out.data_len = 4;
+        }
+        sle_dli::SleEvent::DataBufOverflow { link_type } => {
+            out.event_type = 0x0E;
+            out.data[0] = *link_type;
+            out.data_len = 1;
+        }
+        sle_dli::SleEvent::PeerConnParamReq { handle, interval_min, interval_max, latency, timeout } => {
+            out.event_type = 0x0F;
+            out.handle = *handle;
+            out.data[0] = (*interval_min & 0xFF) as u8;
+            out.data[1] = (*interval_min >> 8) as u8;
+            out.data[2] = (*interval_max & 0xFF) as u8;
+            out.data[3] = (*interval_max >> 8) as u8;
+            out.data[4] = (*latency & 0xFF) as u8;
+            out.data[5] = (*latency >> 8) as u8;
+            out.data[6] = (*timeout & 0xFF) as u8;
+            out.data[7] = (*timeout >> 8) as u8;
+            out.data_len = 8;
+        }
     }
     out
 }
@@ -1352,6 +1402,16 @@ impl WorkItem for EventPump {
 /// Convert a DLI SleEvent into a SleWireEvent for broadcast ring insertion.
 fn sle_dli_event_to_broadcast(ev: &sle_dli::SleEvent) -> sle_event::SleWireEvent {
     match ev {
+        sle_dli::SleEvent::CommandComplete { opcode, status, data } => {
+            sle_event::SleWireEvent::command_complete(
+                *opcode as u16,
+                *status as u8,
+                data.as_slice(),
+            )
+        }
+        sle_dli::SleEvent::CommandStatus { opcode, status } => {
+            sle_event::SleWireEvent::command_status(*opcode as u16, *status as u8)
+        }
         sle_dli::SleEvent::ConnComplete { handle, addr, status } => {
             let new_state = if *status == sle_dli::SleStatus::Success { 2u8 } else { 0u8 };
             sle_event::SleWireEvent::conn_state(*handle, 1, new_state, *addr, *status as u8)
@@ -1368,9 +1428,37 @@ fn sle_dli_event_to_broadcast(ev: &sle_dli::SleEvent) -> sle_event::SleWireEvent
         sle_dli::SleEvent::HardwareError { code } => {
             sle_event::SleWireEvent::hardware_error(*code)
         }
-        // Other events (CommandComplete, CommandStatus, EncryptionChanged,
-        // PairRequest) are controller-internal and not broadcast to userspace.
-        _ => sle_event::SleWireEvent::hardware_error(0),
+        sle_dli::SleEvent::EncryptionChanged { handle, enabled } => {
+            // Map to SecurityChanged wire event.
+            sle_event::SleWireEvent::conn_state(
+                *handle,
+                0,
+                if *enabled { 1 } else { 0 },
+                [0u8; 6],
+                0,
+            )
+        }
+        sle_dli::SleEvent::PairRequest { addr, .. } => {
+            sle_event::SleWireEvent::conn_state(0, 0, 0, *addr, 0)
+        }
+        sle_dli::SleEvent::BroadcastEnd { reason } => {
+            sle_event::SleWireEvent::broadcast_end(*reason)
+        }
+        sle_dli::SleEvent::PhyUpdate { handle, mcs_index, bandwidth_mhz } => {
+            sle_event::SleWireEvent::phy_update(*handle, *mcs_index, *bandwidth_mhz)
+        }
+        sle_dli::SleEvent::ConnParamUpdate { handle, interval, latency, timeout } => {
+            sle_event::SleWireEvent::conn_param_update(*handle, *interval, *latency, *timeout)
+        }
+        sle_dli::SleEvent::DataLenChange { handle, max_tx_octets, max_rx_octets } => {
+            sle_event::SleWireEvent::data_len_change(*handle, *max_tx_octets, *max_rx_octets)
+        }
+        sle_dli::SleEvent::DataBufOverflow { link_type } => {
+            sle_event::SleWireEvent::data_buf_overflow(*link_type)
+        }
+        sle_dli::SleEvent::PeerConnParamReq { handle, interval_min, interval_max, latency, timeout } => {
+            sle_event::SleWireEvent::peer_conn_param_req(*handle, *interval_min, *interval_max, *latency, *timeout)
+        }
     }
 }
 

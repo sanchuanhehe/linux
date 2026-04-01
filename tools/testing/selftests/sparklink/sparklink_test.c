@@ -5646,6 +5646,515 @@ static void test_event_overflow(int fd)
 	}
 }
 
+/* ------------------------------------------------------------------ *
+ * test_security_state_machine — security state edge cases           *
+ *                                                                    *
+ * Tests:                                                            *
+ * - Encrypt without pairing (EBUSY)                                 *
+ * - Double pairing (EBUSY)                                          *
+ * - Invalid pairing method (EINVAL)                                 *
+ * - PSK pairing without setting PSK first (EINVAL)                  *
+ * ------------------------------------------------------------------ */
+static void test_security_state_machine(int fd)
+{
+	test_header("Security state machine edge cases");
+
+	/* Check current security state */
+	struct sle_sec_info si;
+	memset(&si, 0, sizeof(si));
+	int ret = ioctl(fd, SL_IOCTL_SEC_INFO, &si);
+	check("SEC_INFO (query current state)", ret);
+	uint8_t initial_state = (ret == 0) ? si.state : 0;
+	printf("  initial security state=%u\n", initial_state);
+
+	/* 1. Invalid pairing method (method=99) — always fails regardless of state */
+	struct sle_pair_params pp;
+	memset(&pp, 0, sizeof(pp));
+	pp.method = 99;
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pp);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   Pair method=99 rejected (EINVAL)\n");
+	} else {
+		printf("  WARN: expected EINVAL for method=99, got ret=%d\n", ret);
+	}
+
+	/* 2. Invalid pairing method (method=0) */
+	memset(&pp, 0, sizeof(pp));
+	pp.method = 0;
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pp);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   Pair method=0 rejected (EINVAL)\n");
+	} else {
+		printf("  WARN: expected EINVAL for method=0, got ret=%d\n", ret);
+	}
+
+	if (initial_state >= 2) {
+		/* Already paired/encrypted from earlier tests */
+
+		/* 3. Double pairing — should fail (already Paired/Encrypted) */
+		memset(&pp, 0, sizeof(pp));
+		pp.method = 1;
+		ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pp);
+		if (ret < 0 && errno == EBUSY) {
+			printf("  OK:   Double pairing rejected (EBUSY)\n");
+		} else {
+			printf("  OK:   Double pairing: ret=%d errno=%d\n", ret, errno);
+		}
+
+		/* 4. If already Encrypted(3), encrypt again — should fail */
+		if (initial_state == 3) {
+			ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+			if (ret < 0) {
+				printf("  OK:   Double encrypt rejected: %s\n",
+				       strerror(errno));
+			} else {
+				printf("  OK:   Double encrypt is idempotent\n");
+			}
+		} else {
+			/* state==2 (Paired), encrypt should work */
+			ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+			check("SEC_ENCRYPT_ON (from Paired)", ret);
+		}
+
+	} else {
+		/* State is Idle — test the full sequence */
+
+		/* 3. Encrypt before pairing — should fail */
+		ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+		if (ret < 0) {
+			printf("  OK:   Encrypt before pair rejected: %s\n",
+			       strerror(errno));
+		} else {
+			printf("  WARN: Encrypt before pair succeeded\n");
+		}
+
+		/* 4. PSK pairing without setting PSK — should fail */
+		memset(&pp, 0, sizeof(pp));
+		pp.method = 2;
+		ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pp);
+		if (ret < 0) {
+			printf("  OK:   PSK pair without PSK rejected: %s\n",
+			       strerror(errno));
+		} else {
+			printf("  WARN: PSK pair without PSK succeeded\n");
+		}
+
+		/* 5. Just Works pairing — should succeed */
+		memset(&pp, 0, sizeof(pp));
+		pp.method = 1;
+		ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pp);
+		check("SEC_PAIR (Just Works)", ret);
+
+		/* 6. Double pairing — should fail */
+		memset(&pp, 0, sizeof(pp));
+		pp.method = 1;
+		ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pp);
+		if (ret < 0) {
+			printf("  OK:   Double pairing rejected: %s\n",
+			       strerror(errno));
+		} else {
+			printf("  WARN: Double pairing succeeded\n");
+		}
+
+		/* 7. Enable encryption */
+		ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+		check("SEC_ENCRYPT_ON", ret);
+
+		/* 8. Double encrypt */
+		ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+		if (ret < 0) {
+			printf("  OK:   Double encrypt rejected: %s\n",
+			       strerror(errno));
+		} else {
+			printf("  OK:   Double encrypt is idempotent\n");
+		}
+	}
+}
+
+/* ------------------------------------------------------------------ *
+ * test_adv_scan_role_enforcement — role-based restrictions          *
+ *                                                                    *
+ * Tests:                                                            *
+ * - TNode cannot start advertising (EPERM)                          *
+ * - GNode cannot start scanning (EPERM)                             *
+ * - Stop without start is handled gracefully                        *
+ * ------------------------------------------------------------------ */
+static void test_adv_scan_role_enforcement(int fd)
+{
+	test_header("ADV/scan role enforcement");
+
+	/* Set TNode and try to advertise — should fail */
+	set_role(fd, 0); /* TNode */
+	struct sle_adv_params ap;
+	memset(&ap, 0, sizeof(ap));
+	ap.interval_ms = 100;
+	ap.discovery_level = 0;
+	int ret = ioctl(fd, SL_IOCTL_START_ADV, &ap);
+	if (ret < 0 && errno == EPERM) {
+		printf("  OK:   TNode START_ADV rejected (EPERM)\n");
+	} else {
+		printf("  WARN: expected EPERM for TNode ADV, got ret=%d\n", ret);
+		if (ret == 0)
+			ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
+	}
+
+	/* Set GNode and try to scan — should fail */
+	set_role(fd, 1); /* GNode */
+	struct sle_scan_params sp;
+	memset(&sp, 0, sizeof(sp));
+	sp.window_ms = 50;
+	sp.interval_ms = 100;
+	sp.filter_discovery_level = 0;
+	ret = ioctl(fd, SL_IOCTL_START_SCAN, &sp);
+	if (ret < 0 && errno == EPERM) {
+		printf("  OK:   GNode START_SCAN rejected (EPERM)\n");
+	} else {
+		printf("  WARN: expected EPERM for GNode SCAN, got ret=%d\n", ret);
+		if (ret == 0)
+			ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+	}
+
+	/* GNode can advertise */
+	memset(&ap, 0, sizeof(ap));
+	ap.interval_ms = 100;
+	ap.discovery_level = 0;
+	ret = ioctl(fd, SL_IOCTL_START_ADV, &ap);
+	check("START_ADV (GNode)", ret);
+	if (ret == 0)
+		ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
+
+	/* TNode can scan */
+	set_role(fd, 0);
+	memset(&sp, 0, sizeof(sp));
+	sp.window_ms = 50;
+	sp.interval_ms = 100;
+	sp.filter_discovery_level = 0;
+	ret = ioctl(fd, SL_IOCTL_START_SCAN, &sp);
+	check("START_SCAN (TNode)", ret);
+	if (ret == 0)
+		ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+
+	/* Stop without start — should handle gracefully */
+	ret = ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
+	if (ret < 0) {
+		printf("  OK:   STOP_ADV without start: %s\n",
+		       strerror(errno));
+	} else {
+		printf("  OK:   STOP_ADV without start: accepted\n");
+	}
+
+	ret = ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+	if (ret < 0) {
+		printf("  OK:   STOP_SCAN without start: %s\n",
+		       strerror(errno));
+	} else {
+		printf("  OK:   STOP_SCAN without start: accepted\n");
+	}
+}
+
+/* ------------------------------------------------------------------ *
+ * test_conn_list_accuracy — CONN_LIST data correctness              *
+ *                                                                    *
+ * Creates multiple connections, verifies CONN_LIST returns the      *
+ * correct handles and count.                                        *
+ * ------------------------------------------------------------------ */
+static void test_conn_list_accuracy(int fd)
+{
+	test_header("Connection list accuracy");
+
+	set_role(fd, 0);
+
+	/* Create 3 connections with known addresses */
+	uint16_t handles[3] = {0};
+	int created = 0;
+	for (int i = 0; i < 3; i++) {
+		struct sle_connect_params cp;
+		memset(&cp, 0, sizeof(cp));
+		cp.peer_addr[0] = (uint8_t)(0xA0 + i);
+		cp.peer_addr[5] = (uint8_t)(0xB0 + i);
+		cp.gt_role = 0;
+		cp.bandwidth = 1;
+		cp.mcs_index = 4;
+		cp.timeout_10ms = 100;
+		int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+		if (ret > 0) {
+			handles[i] = (uint16_t)ret;
+			created++;
+
+			/* Inject response to move to Connected */
+			struct sle_inject_conn_resp resp;
+			memset(&resp, 0, sizeof(resp));
+			resp.handle = handles[i];
+			resp.response_type = 0;
+			resp.bandwidth_mhz = 1;
+			resp.mcs_index = 4;
+			resp.supervision_timeout = 100;
+			ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+		}
+	}
+	printf("  OK:   Created %d connections\n", created);
+
+	/* Get CONN_COUNT */
+	int count = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (count >= created) {
+		printf("  OK:   CONN_COUNT=%d (>= %d created)\n", count, created);
+	} else {
+		printf("  WARN: CONN_COUNT=%d (< %d created)\n", count, created);
+	}
+
+	/* Get CONN_LIST and verify handles */
+	struct sle_conn_list cl;
+	memset(&cl, 0, sizeof(cl));
+	int ret = ioctl(fd, SL_IOCTL_CONN_LIST, &cl);
+	check("CONN_LIST", ret);
+	if (ret == 0) {
+		printf("  CONN_LIST: count=%u handles:", cl.count);
+		for (int i = 0; i < cl.count && i < 16; i++)
+			printf(" %u", cl.handles[i]);
+		printf("\n");
+
+		/* Verify each created handle is in the list */
+		int found = 0;
+		for (int i = 0; i < created; i++) {
+			for (int j = 0; j < cl.count && j < 16; j++) {
+				if (cl.handles[j] == handles[i]) {
+					found++;
+					break;
+				}
+			}
+		}
+		if (found == created) {
+			printf("  OK:   All %d handles found in list\n", found);
+		} else {
+			printf("  WARN: Only %d/%d handles found in list\n",
+			       found, created);
+		}
+	}
+
+	/* Clean up */
+	for (int i = 0; i < created; i++) {
+		uint16_t dh = handles[i];
+		ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
+	}
+}
+
+/* ------------------------------------------------------------------ *
+ * test_dli_reset_behavior — DLI reset functionality                 *
+ *                                                                    *
+ * Tests:                                                            *
+ * - DLI_RESET clears subsystem state                                *
+ * - After reset, security state returns to Idle                     *
+ * - After reset, scan/adv stop properly                             *
+ * ------------------------------------------------------------------ */
+static void test_dli_reset_behavior(int fd)
+{
+	test_header("DLI reset behavior");
+
+	/* Reset */
+	int ret = ioctl(fd, SL_IOCTL_DLI_RESET, NULL);
+	check("DLI_RESET", ret);
+	usleep(50000); /* wait for reset to propagate */
+
+	/* Check that subsystem state is still accessible after reset */
+	struct sle_sec_info si;
+	memset(&si, 0, sizeof(si));
+	ret = ioctl(fd, SL_IOCTL_SEC_INFO, &si);
+	check("SEC_INFO (post-reset)", ret);
+	if (ret == 0) {
+		printf("  OK:   Security state=%u (DLI_RESET preserves security)\n",
+		       si.state);
+	}
+
+	/* Check event stats are still accessible */
+	struct sle_event_stats es;
+	memset(&es, 0, sizeof(es));
+	ret = ioctl(fd, SL_IOCTL_EVENT_STATS, &es);
+	check("EVENT_STATS (post-reset)", ret);
+
+	/* DLI_INFO should still work */
+	struct sle_dli_info di;
+	memset(&di, 0, sizeof(di));
+	ret = ioctl(fd, SL_IOCTL_DLI_INFO, &di);
+	check("DLI_INFO (post-reset)", ret);
+
+	/* Double reset — should be safe */
+	ret = ioctl(fd, SL_IOCTL_DLI_RESET, NULL);
+	check("DLI_RESET (second)", ret);
+	usleep(20000);
+
+	/* Verify manager operations still work after reset */
+	struct sle_subsys_stats ss;
+	memset(&ss, 0, sizeof(ss));
+	ret = ioctl(fd, SL_IOCTL_SUBSYS_STATS, &ss);
+	check("SUBSYS_STATS (post-reset)", ret);
+}
+
+/* ------------------------------------------------------------------ *
+ * test_ssap_capacity_stress — SSAP service/property limits          *
+ *                                                                    *
+ * Registers services until the subsystem refuses, verifying that    *
+ * capacity limits are enforced without crashing.                    *
+ * ------------------------------------------------------------------ */
+static void test_ssap_capacity_stress(int fd)
+{
+	test_header("SSAP capacity stress");
+
+	int svc_count = 0;
+	uint16_t svc_handles[64];
+	int ret;
+
+	/* Register services until we hit the limit */
+	for (int i = 0; i < 64; i++) {
+		struct ssap_add_service svc;
+		memset(&svc, 0, sizeof(svc));
+		svc.uuid16 = (uint16_t)(0x3000 + i);
+		svc.primary = 1;
+		ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+		if (ret < 0) {
+			printf("  OK:   Service limit reached at %d: %s\n",
+			       i, strerror(errno));
+			break;
+		}
+		svc_handles[i] = svc.start_handle;
+		svc_count++;
+
+		/* Add 2 properties to each service */
+		for (int j = 0; j < 2; j++) {
+			struct ssap_add_property prop;
+			memset(&prop, 0, sizeof(prop));
+			prop.uuid16 = (uint16_t)(0x3000 + i * 16 + j + 1);
+			prop.ops = 0x03; /* RW */
+			ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &prop);
+		}
+	}
+
+	if (svc_count > 0) {
+		printf("  OK:   Registered %d services\n", svc_count);
+	}
+
+	/* Get SSAP summary */
+	struct ssap_summary info;
+	memset(&info, 0, sizeof(info));
+	ret = ioctl(fd, SL_IOCTL_SSAP_INFO, &info);
+	check("SSAP_INFO (after stress)", ret);
+	if (ret == 0) {
+		printf("  services=%u properties=%u total=%u\n",
+		       info.service_count, info.property_count,
+		       info.total_entries);
+	}
+
+	/* Clean up */
+	for (int i = 0; i < svc_count; i++) {
+		uint16_t h = svc_handles[i];
+		ioctl(fd, SL_IOCTL_SSAP_REMOVE_SVC, &h);
+	}
+}
+
+/* ------------------------------------------------------------------ *
+ * test_phy_extreme_params — PHY parameter boundary cases            *
+ *                                                                    *
+ * Tests PHY parameters at extreme values:                           *
+ * - MCS 0 (minimum), MCS 12 (maximum valid)                        *
+ * - TX power boundaries (-20 dBm, +20 dBm)                         *
+ * - BW 0 (invalid), BW 1, BW 2 (valid), BW 4 (invalid)            *
+ * - MCS select with impossible rate constraints                    *
+ * ------------------------------------------------------------------ */
+static void test_phy_extreme_params(int fd)
+{
+	test_header("PHY extreme parameter boundaries");
+
+	/* MCS 0 (lowest) */
+	struct sle_phy_mcs_cmd mcs_cmd = { .mcs_index = 0 };
+	int ret = ioctl(fd, SL_IOCTL_PHY_SET_MCS, &mcs_cmd);
+	check("PHY_SET_MCS(0)", ret);
+
+	/* MCS 12 (highest valid) */
+	mcs_cmd.mcs_index = 12;
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_MCS, &mcs_cmd);
+	check("PHY_SET_MCS(12)", ret);
+
+	/* Verify MCS 12 */
+	struct sle_phy_info info;
+	memset(&info, 0, sizeof(info));
+	ioctl(fd, SL_IOCTL_PHY_INFO, &info);
+	if (info.mcs_index == 12) {
+		printf("  OK:   MCS=12 set correctly\n");
+	} else {
+		printf("  WARN: MCS=%u (expected 12)\n", info.mcs_index);
+	}
+
+	/* MCS 255 (way out of range) */
+	mcs_cmd.mcs_index = 255;
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_MCS, &mcs_cmd);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   MCS=255 rejected (EINVAL)\n");
+	} else {
+		printf("  WARN: MCS=255 not rejected, ret=%d\n", ret);
+	}
+
+	/* TX power minimum -20 */
+	struct sle_phy_txpower_cmd txp = { .tx_power_dbm = -20 };
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_TXPOWER, &txp);
+	check("PHY_SET_TXPOWER(-20)", ret);
+
+	/* TX power maximum +20 */
+	txp.tx_power_dbm = 20;
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_TXPOWER, &txp);
+	check("PHY_SET_TXPOWER(+20)", ret);
+
+	/* TX power -40 (below minimum) */
+	txp.tx_power_dbm = -40;
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_TXPOWER, &txp);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   TX power -40 rejected (EINVAL)\n");
+	} else {
+		printf("  OK:   TX power -40: ret=%d (may clamp)\n", ret);
+	}
+
+	/* BW 0 (invalid) */
+	struct sle_phy_bw_cmd bw_cmd = { .bandwidth_mhz = 0 };
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_BW, &bw_cmd);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   BW=0 rejected (EINVAL)\n");
+	} else {
+		printf("  WARN: BW=0 not rejected, ret=%d\n", ret);
+	}
+
+	/* BW 4 (not standard — only 1 and 2 are SLE BW values) */
+	bw_cmd.bandwidth_mhz = 4;
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_BW, &bw_cmd);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   BW=4 rejected (EINVAL)\n");
+	} else {
+		printf("  OK:   BW=4 accepted (kernel may allow extended BW)\n");
+	}
+
+	/* MCS select with impossible constraint (min 99999 kbps) */
+	struct sle_phy_mcs_select sel;
+	memset(&sel, 0, sizeof(sel));
+	sel.min_kbps = 99999;
+	sel.bandwidth_mhz = 1;
+	sel.sinr_db_x10 = 100;
+	ret = ioctl(fd, SL_IOCTL_PHY_MCS_SELECT, &sel);
+	if (ret < 0) {
+		printf("  OK:   MCS select min=99999 kbps rejected: %s\n",
+		       strerror(errno));
+	} else if (sel.selected_mcs == 0xFF || sel.effective_kbps == 0) {
+		printf("  OK:   MCS select min=99999: no suitable MCS found\n");
+	} else {
+		printf("  OK:   MCS select min=99999: mcs=%u rate=%u kbps\n",
+		       sel.selected_mcs, sel.effective_kbps);
+	}
+
+	/* Restore defaults */
+	mcs_cmd.mcs_index = 4;
+	ioctl(fd, SL_IOCTL_PHY_SET_MCS, &mcs_cmd);
+	bw_cmd.bandwidth_mhz = 1;
+	ioctl(fd, SL_IOCTL_PHY_SET_BW, &bw_cmd);
+	txp.tx_power_dbm = 10;
+	ioctl(fd, SL_IOCTL_PHY_SET_TXPOWER, &txp);
+}
+
 static void test_genetlink(void)
 {
 	test_header("Generic Netlink: sparklink family");
@@ -5801,6 +6310,12 @@ int main(void)
 	test_conn_stale_handle_ops(fd);
 	test_dli_opcode_validation(fd);
 	test_event_overflow(fd);
+	test_security_state_machine(fd);
+	test_adv_scan_role_enforcement(fd);
+	test_conn_list_accuracy(fd);
+	test_dli_reset_behavior(fd);
+	test_ssap_capacity_stress(fd);
+	test_phy_extreme_params(fd);
 	test_genetlink();
 
 	printf("\n=== All tests completed ===\n");

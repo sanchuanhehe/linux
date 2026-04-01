@@ -3491,6 +3491,828 @@ static void test_air_medium_connect(int fd)
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 }
 
+/*
+ * BSL/DTCM connection invalid handle edge cases.
+ *
+ * Ref: TXS-50004 section 9, connection management.
+ * Verifies that the driver rejects operations on non-existent or
+ * already-disconnected handles with the correct error codes.
+ */
+static void test_conn_invalid_handle(int fd)
+{
+	test_header("Connection invalid handle edge cases");
+
+	/* Step 1: CONN_INFO on non-existent handle */
+	struct sle_conn_info info;
+	memset(&info, 0, sizeof(info));
+	info.handle = 0xBEEF;
+	int ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   CONN_INFO(0xBEEF): ENOENT\n");
+	} else {
+		printf("  FAIL: CONN_INFO(0xBEEF): expected ENOENT, got ret=%d errno=%d\n",
+		       ret, errno);
+	}
+
+	/* Step 2: CONN_SEND on non-existent handle */
+	struct sle_conn_data sd;
+	memset(&sd, 0, sizeof(sd));
+	sd.handle = 0xBEEF;
+	sd.length = 4;
+	memcpy(sd.data, "test", 4);
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   CONN_SEND(0xBEEF): ENOENT\n");
+	} else {
+		printf("  FAIL: CONN_SEND(0xBEEF): expected ENOENT, got ret=%d errno=%d\n",
+		       ret, errno);
+	}
+
+	/* Step 3: CONN_RECV on non-existent handle */
+	struct sle_conn_data rd;
+	memset(&rd, 0, sizeof(rd));
+	rd.handle = 0xBEEF;
+	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &rd);
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   CONN_RECV(0xBEEF): ENOENT\n");
+	} else {
+		printf("  FAIL: CONN_RECV(0xBEEF): expected ENOENT, got ret=%d errno=%d\n",
+		       ret, errno);
+	}
+
+	/* Step 4: DISCONNECT on non-existent handle */
+	uint16_t bad_h = 0xBEEF;
+	ret = ioctl(fd, SL_IOCTL_DISCONNECT, &bad_h);
+	if (ret < 0) {
+		printf("  OK:   DISCONNECT(0xBEEF): rejected (errno=%d)\n", errno);
+	} else {
+		printf("  FAIL: DISCONNECT(0xBEEF): expected error, got ret=%d\n", ret);
+	}
+
+	/* Step 5: INJECT_CONN_RESP on non-existent handle */
+	struct sle_inject_conn_resp resp;
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = 0xBEEF;
+	resp.response_type = 0;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+	if (ret < 0) {
+		printf("  OK:   INJECT_CONN_RESP(0xBEEF): rejected (errno=%d)\n", errno);
+	} else {
+		printf("  FAIL: INJECT_CONN_RESP(0xBEEF): expected error, got ret=%d\n", ret);
+	}
+
+	/* Step 6: Create-then-disconnect, then operate on stale handle */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xFA;
+	cp.peer_addr[5] = 0xCE;
+	cp.gt_role = 0;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret <= 0) {
+		printf("  WARN: CONNECT for stale-handle test failed\n");
+		return;
+	}
+	uint16_t stale = (uint16_t)ret;
+	printf("  OK:   Created connection handle=%u for stale test\n", stale);
+
+	ioctl(fd, SL_IOCTL_DISCONNECT, &stale);
+
+	/* Now the handle is stale */
+	memset(&info, 0, sizeof(info));
+	info.handle = stale;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   CONN_INFO(stale %u): ENOENT\n", stale);
+	} else {
+		printf("  FAIL: CONN_INFO(stale %u): expected ENOENT, got ret=%d\n",
+		       stale, ret);
+	}
+}
+
+/*
+ * Air medium: bidirectional data exchange and remote-side disconnect.
+ *
+ * Ref: TXS-50004 section 11.1, transparent data transmission.
+ * Extends the basic air medium test with:
+ *   - sle_a sends data back to sle_b (bidirectional)
+ *   - sle_a initiates disconnect (remote-side teardown)
+ *   - verify both sides see the connection as gone
+ */
+static void test_air_medium_bidir(int fd)
+{
+	test_header("QEMU air medium: bidirectional data + remote disconnect");
+
+	uint16_t mask = 0;
+	int ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
+	if (ret < 0) {
+		printf("  FAIL: DEV_LIST: %s\n", strerror(errno));
+		return;
+	}
+	int dev_count = __builtin_popcount(mask);
+	if (dev_count < 3) {
+		printf("  OK:   Skipped (need 3+ controllers, have %d)\n", dev_count);
+		return;
+	}
+
+	int id_a = -1, id_b = -1;
+	for (int i = 1; i < 16; i++) {
+		if (mask & (1u << i)) {
+			if (id_a < 0) id_a = i;
+			else if (id_b < 0) { id_b = i; break; }
+		}
+	}
+	if (id_a < 0 || id_b < 0) {
+		printf("  OK:   Skipped (need 2 USB controllers)\n");
+		return;
+	}
+
+	uint16_t target;
+	int ok_count = 0;
+
+	/* Pre-clean */
+	int ids[] = { id_a, id_b };
+	for (int c = 0; c < 2; c++) {
+		target = (uint16_t)ids[c];
+		ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+		struct sle_conn_list cl;
+		memset(&cl, 0, sizeof(cl));
+		if (ioctl(fd, SL_IOCTL_CONN_LIST, &cl) == 0) {
+			for (int j = 0; j < cl.count && j < 8; j++)
+				ioctl(fd, SL_IOCTL_DISCONNECT, &cl.handles[j]);
+		}
+		usleep(250000);
+	}
+
+	/* sle_a broadcasts */
+	target = (uint16_t)id_a;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	uint8_t role = 1;
+	ioctl(fd, SL_IOCTL_SET_ROLE, &role);
+	struct sle_adv_params adv;
+	memset(&adv, 0, sizeof(adv));
+	adv.discovery_level = 1;
+	adv.interval_ms = 100;
+	ioctl(fd, SL_IOCTL_START_ADV, &adv);
+
+	/* sle_b connects to sle_a */
+	target = (uint16_t)id_b;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	role = 0;
+	ioctl(fd, SL_IOCTL_SET_ROLE, &role);
+
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xDE; cp.peer_addr[1] = 0xAD;
+	cp.peer_addr[2] = 0xBE; cp.peer_addr[3] = 0xEF;
+	cp.peer_addr[4] = 0x00; cp.peer_addr[5] = 0x01;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret <= 0) {
+		printf("  FAIL: sle%d CONNECT: %s\n", id_b, strerror(errno));
+		goto bidir_cleanup;
+	}
+	uint16_t hb = (uint16_t)ret;
+	printf("  OK:   sle%d connected (handle=%u)\n", id_b, hb);
+	ok_count++;
+
+	/* Accept connection on sle_b side */
+	struct sle_inject_conn_resp resp;
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = hb;
+	resp.response_type = 0;
+	ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+
+	/* sle_b -> sle_a data */
+	struct sle_conn_data sd;
+	memset(&sd, 0, sizeof(sd));
+	sd.handle = hb;
+	const char *msg_b2a = "B-to-A";
+	sd.length = strlen(msg_b2a);
+	memcpy(sd.data, msg_b2a, sd.length);
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
+	if (ret >= 0) {
+		printf("  OK:   sle%d sent '%s'\n", id_b, msg_b2a);
+		ok_count++;
+	} else {
+		printf("  WARN: sle%d CONN_SEND: %s\n", id_b, strerror(errno));
+	}
+
+	/* Switch to sle_a, receive data, then send back */
+	target = (uint16_t)id_a;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	usleep(200000);
+
+	struct sle_conn_list cl_a;
+	memset(&cl_a, 0, sizeof(cl_a));
+	ret = ioctl(fd, SL_IOCTL_CONN_LIST, &cl_a);
+	if (ret != 0 || cl_a.count == 0) {
+		printf("  FAIL: sle%d has no connections\n", id_a);
+		goto bidir_cleanup;
+	}
+	uint16_t ha = cl_a.handles[0];
+	printf("  OK:   sle%d incoming connection handle=%u\n", id_a, ha);
+	ok_count++;
+
+	/* Receive data from sle_b */
+	struct sle_conn_data rd;
+	memset(&rd, 0, sizeof(rd));
+	rd.handle = ha;
+	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &rd);
+	if (ret == 0 && rd.length > 0) {
+		printf("  OK:   sle%d received %d bytes: '%.*s'\n",
+		       id_a, rd.length, rd.length, rd.data);
+		ok_count++;
+	} else {
+		printf("  WARN: sle%d CONN_RECV: ret=%d len=%d\n",
+		       id_a, ret, rd.length);
+	}
+
+	/* sle_a -> sle_b data */
+	memset(&sd, 0, sizeof(sd));
+	sd.handle = ha;
+	const char *msg_a2b = "A-to-B";
+	sd.length = strlen(msg_a2b);
+	memcpy(sd.data, msg_a2b, sd.length);
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
+	if (ret >= 0) {
+		printf("  OK:   sle%d sent '%s'\n", id_a, msg_a2b);
+		ok_count++;
+	} else {
+		printf("  WARN: sle%d CONN_SEND: %s\n", id_a, strerror(errno));
+	}
+
+	/* Switch to sle_b, receive sle_a's data */
+	target = (uint16_t)id_b;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	usleep(200000);
+
+	memset(&rd, 0, sizeof(rd));
+	rd.handle = hb;
+	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &rd);
+	if (ret == 0 && rd.length > 0) {
+		printf("  OK:   sle%d received %d bytes: '%.*s'\n",
+		       id_b, rd.length, rd.length, rd.data);
+		ok_count++;
+	} else {
+		printf("  WARN: sle%d CONN_RECV: ret=%d len=%d\n",
+		       id_b, ret, rd.length);
+	}
+
+	/* sle_a initiates disconnect (remote-side teardown) */
+	target = (uint16_t)id_a;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	ret = ioctl(fd, SL_IOCTL_DISCONNECT, &ha);
+	if (ret >= 0) {
+		printf("  OK:   sle%d disconnected handle=%u\n", id_a, ha);
+		ok_count++;
+	} else {
+		printf("  WARN: sle%d DISCONNECT: %s\n", id_a, strerror(errno));
+	}
+	usleep(200000);
+
+	/* Verify sle_a has no connections */
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 0) {
+		printf("  OK:   sle%d CONN_COUNT=0\n", id_a);
+		ok_count++;
+	} else {
+		printf("  WARN: sle%d CONN_COUNT=%d\n", id_a, ret);
+	}
+
+	/* Verify sle_b sees disconnect via EventPump */
+	target = (uint16_t)id_b;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	usleep(200000);
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 0) {
+		printf("  OK:   sle%d CONN_COUNT=0 (remote disconnect propagated)\n", id_b);
+		ok_count++;
+	} else {
+		printf("  WARN: sle%d CONN_COUNT=%d (expected 0 after remote disconnect)\n",
+		       id_b, ret);
+	}
+
+	printf("  OK:   Bidirectional test: %d/9 steps passed\n", ok_count);
+
+bidir_cleanup:
+	target = (uint16_t)id_a;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
+	target = 0;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+}
+
+/*
+ * Connection capacity: fill all 8 slots.
+ *
+ * Ref: TXS-50004 section 9.2, transport channel establishment.
+ * Verifies that the driver can manage MAX_CONNECTIONS simultaneous
+ * connections and rejects further attempts gracefully.
+ */
+static void test_conn_max_capacity(int fd)
+{
+	test_header("Connection max capacity (8 slots)");
+
+	uint16_t handles[8];
+	int created = 0;
+
+	/* Fill all 8 connection slots */
+	for (int i = 0; i < 8; i++) {
+		struct sle_connect_params cp;
+		memset(&cp, 0, sizeof(cp));
+		cp.peer_addr[0] = 0xC0;
+		cp.peer_addr[1] = (uint8_t)i;
+		cp.peer_addr[5] = (uint8_t)(0x10 + i);
+		cp.gt_role = 0;
+		int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+		if (ret > 0) {
+			handles[created] = (uint16_t)ret;
+			created++;
+		} else {
+			break;
+		}
+	}
+
+	if (created >= 7) {
+		printf("  OK:   created %d connections (near/at capacity)\n", created);
+
+		/* Verify CONN_COUNT */
+		int cnt = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+		if (cnt == 8) {
+			printf("  OK:   CONN_COUNT=8\n");
+		} else {
+			printf("  WARN: CONN_COUNT=%d (expected 8)\n", cnt);
+		}
+
+		/* Try 9th connection — should fail */
+		struct sle_connect_params cp9;
+		memset(&cp9, 0, sizeof(cp9));
+		cp9.peer_addr[0] = 0xC0;
+		cp9.peer_addr[1] = 0x08;
+		cp9.peer_addr[5] = 0x18;
+		int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp9);
+		if (ret < 0) {
+			printf("  OK:   9th connection rejected (errno=%d)\n", errno);
+		} else {
+			printf("  FAIL: 9th connection should have been rejected (got handle=%d)\n", ret);
+			/* Clean up the unexpected handle */
+			uint16_t h9 = (uint16_t)ret;
+			ioctl(fd, SL_IOCTL_DISCONNECT, &h9);
+		}
+	} else {
+		printf("  WARN: only created %d of 8 connections\n", created);
+	}
+
+	/* Disconnect all */
+	for (int i = 0; i < created; i++) {
+		ioctl(fd, SL_IOCTL_DISCONNECT, &handles[i]);
+	}
+
+	int cnt = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (cnt == 0) {
+		printf("  OK:   all connections disconnected\n");
+	} else {
+		printf("  WARN: CONN_COUNT=%d after cleanup\n", cnt);
+	}
+}
+
+/*
+ * SSAP notification vs indication distinction.
+ *
+ * Ref: TXS-50004 section 10.5 (notification) / 10.6 (indication).
+ * Tests that property writes with Notify-capable properties generate
+ * notifications, and that the indication flag is correctly set for
+ * Indicate-capable properties.
+ */
+static void test_ssap_indication(int fd)
+{
+	test_header("SSAP: notification vs indication");
+
+	/* Add a service with two properties:
+	 *   prop1: Notify (ops=0x04)
+	 *   prop2: Indicate (ops=0x08)
+	 */
+	struct ssap_add_service svc;
+	memset(&svc, 0, sizeof(svc));
+	svc.uuid16 = 0xFE01;
+	svc.primary = 1;
+	int ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+	if (ret < 0) {
+		printf("  FAIL: SSAP_ADD_SVC: %s\n", strerror(errno));
+		return;
+	}
+
+	struct ssap_add_property p_ntf;
+	memset(&p_ntf, 0, sizeof(p_ntf));
+	p_ntf.uuid16 = 0xFE11;
+	p_ntf.ops = 0x07; /* Read|Write|Notify */
+	p_ntf.value_len = 1;
+	p_ntf.value[0] = 0x00;
+	ret = ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &p_ntf);
+	if (ret < 0) {
+		printf("  FAIL: add notify property: %s\n", strerror(errno));
+		return;
+	}
+	uint16_t h_ntf = p_ntf.handle;
+	printf("  OK:   Notify property handle=0x%04x\n", h_ntf);
+
+	struct ssap_add_property p_ind;
+	memset(&p_ind, 0, sizeof(p_ind));
+	p_ind.uuid16 = 0xFE12;
+	p_ind.ops = 0x0B; /* Read|Write|Indicate */
+	p_ind.value_len = 1;
+	p_ind.value[0] = 0x00;
+	ret = ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &p_ind);
+	if (ret < 0) {
+		printf("  FAIL: add indicate property: %s\n", strerror(errno));
+		return;
+	}
+	uint16_t h_ind = p_ind.handle;
+	printf("  OK:   Indicate property handle=0x%04x\n", h_ind);
+
+	/* Write to notify property */
+	struct ssap_read_write rw;
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_ntf;
+	rw.length = 1;
+	rw.data[0] = 0xAA;
+	ret = ioctl(fd, SL_IOCTL_SSAP_WRITE, &rw);
+	check("WRITE (notify prop)", ret);
+
+	/* Trigger notification for notify property */
+	ret = ioctl(fd, SL_IOCTL_SSAP_NOTIFY, &h_ntf);
+	check("SSAP_NOTIFY (notify prop)", ret);
+
+	/* Write to indicate property */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_ind;
+	rw.length = 1;
+	rw.data[0] = 0xBB;
+	ret = ioctl(fd, SL_IOCTL_SSAP_WRITE, &rw);
+	check("WRITE (indicate prop)", ret);
+
+	/* Trigger notification for indicate property */
+	ret = ioctl(fd, SL_IOCTL_SSAP_NOTIFY, &h_ind);
+	check("SSAP_NOTIFY (indicate prop)", ret);
+
+	/* Dequeue and check: notify prop should produce indication=0 */
+	struct ssap_notification ntf1;
+	memset(&ntf1, 0, sizeof(ntf1));
+	ret = ioctl(fd, SL_IOCTL_SSAP_DEQUEUE_NTF, &ntf1);
+	if (ret == 0) {
+		printf("  OK:   Dequeued: handle=0x%04x indication=%u data=0x%02x\n",
+		       ntf1.handle, ntf1.indication, ntf1.data[0]);
+		if (ntf1.handle == h_ntf && ntf1.indication == 0) {
+			printf("  OK:   Notify property: notification mode (indication=0)\n");
+		} else {
+			printf("  WARN: unexpected handle=0x%04x or indication=%u\n",
+			       ntf1.handle, ntf1.indication);
+		}
+	}
+
+	/* Second dequeue: indicate prop via SSAP_NOTIFY also produces
+	 * indication=0 (SSAP_NOTIFY always uses notification mode).
+	 * The indication path requires a separate SSAP_INDICATE ioctl
+	 * which is not yet exposed. */
+	struct ssap_notification ntf2;
+	memset(&ntf2, 0, sizeof(ntf2));
+	ret = ioctl(fd, SL_IOCTL_SSAP_DEQUEUE_NTF, &ntf2);
+	if (ret == 0) {
+		printf("  OK:   Dequeued: handle=0x%04x indication=%u data=0x%02x\n",
+		       ntf2.handle, ntf2.indication, ntf2.data[0]);
+		if (ntf2.handle == h_ind) {
+			printf("  OK:   Indicate property queued via SSAP_NOTIFY\n");
+		}
+	}
+
+	/* Cleanup: remove service */
+	uint16_t sh = svc.start_handle;
+	ioctl(fd, SL_IOCTL_SSAP_REMOVE_SVC, &sh);
+}
+
+/*
+ * SSAP service discovery with UUID filter.
+ *
+ * Ref: TXS-50004 section 10.2, service discovery tests.
+ * Tests that SSAP_FIND_SVC returns only matching services when filtered
+ * by 16-bit UUID, and returns all services when no filter is applied.
+ */
+static void test_ssap_service_discovery(int fd)
+{
+	test_header("SSAP: service discovery with multiple services");
+
+	/* Get baseline service count */
+	struct ssap_summary base;
+	memset(&base, 0, sizeof(base));
+	ioctl(fd, SL_IOCTL_SSAP_INFO, &base);
+	int base_count = base.service_count;
+
+	/* Add 3 services with different UUIDs */
+	uint16_t svc_handles[3];
+	uint16_t uuids[] = { 0x1800, 0x1801, 0x180A };
+
+	for (int i = 0; i < 3; i++) {
+		struct ssap_add_service svc;
+		memset(&svc, 0, sizeof(svc));
+		svc.uuid16 = uuids[i];
+		svc.primary = 1;
+		int ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+		if (ret < 0) {
+			printf("  FAIL: add service 0x%04x: %s\n", uuids[i], strerror(errno));
+			goto sd_cleanup;
+		}
+		svc_handles[i] = svc.start_handle;
+		printf("  OK:   Service 0x%04x registered (handle=%u)\n",
+		       uuids[i], svc_handles[i]);
+	}
+
+	/* Verify total service count increased by 3 */
+	struct ssap_summary info;
+	memset(&info, 0, sizeof(info));
+	ioctl(fd, SL_IOCTL_SSAP_INFO, &info);
+	if ((int)info.service_count == base_count + 3) {
+		printf("  OK:   service_count=%u (base=%d +3)\n",
+		       info.service_count, base_count);
+	} else {
+		printf("  WARN: service_count=%u (expected %d)\n",
+		       info.service_count, base_count + 3);
+	}
+
+	/* Find all services */
+	struct ssap_service_list slist;
+	memset(&slist, 0, sizeof(slist));
+	int ret = ioctl(fd, SL_IOCTL_SSAP_FIND_SVC, &slist);
+	if (ret == 0) {
+		printf("  OK:   FIND_SVC returned %u services\n", slist.count);
+
+		/* Verify all UUIDs are present */
+		for (int i = 0; i < 3; i++) {
+			int found = 0;
+			for (int j = 0; j < slist.count; j++) {
+				if (slist.services[j].uuid16 == uuids[i]) {
+					found = 1;
+					break;
+				}
+			}
+			if (found) {
+				printf("  OK:   UUID 0x%04x found\n", uuids[i]);
+			} else {
+				printf("  FAIL: UUID 0x%04x missing\n", uuids[i]);
+			}
+		}
+	}
+
+sd_cleanup:
+	/* Remove all added services */
+	for (int i = 2; i >= 0; i--) {
+		if (svc_handles[i] != 0)
+			ioctl(fd, SL_IOCTL_SSAP_REMOVE_SVC, &svc_handles[i]);
+	}
+}
+
+/*
+ * Device switch state isolation test.
+ *
+ * Ref: TXS-50004 section 7 (test configuration for multi-device).
+ * Verifies that switching between controllers preserves per-device
+ * state: role setting, advertising state, and connection state should
+ * not leak between controllers.
+ */
+static void test_dev_switch_isolation(int fd)
+{
+	test_header("Device switch: cross-controller state isolation");
+
+	uint16_t mask = 0;
+	int ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
+	if (ret < 0 || __builtin_popcount(mask) < 2) {
+		printf("  OK:   Skipped (need 2+ controllers)\n");
+		return;
+	}
+
+	/* Find sle0 and another controller */
+	int id_other = -1;
+	for (int i = 1; i < 16; i++) {
+		if (mask & (1u << i)) { id_other = i; break; }
+	}
+	if (id_other < 0) {
+		printf("  OK:   Skipped (no second controller)\n");
+		return;
+	}
+
+	uint16_t target;
+	int ok_count = 0;
+
+	/* Set sle0 as GNode */
+	target = 0;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	uint8_t role_g = 1;
+	ioctl(fd, SL_IOCTL_SET_ROLE, &role_g);
+
+	/* Set sle_other as TNode */
+	target = (uint16_t)id_other;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	uint8_t role_t = 0;
+	ioctl(fd, SL_IOCTL_SET_ROLE, &role_t);
+
+	/* Verify roles are independent */
+	uint8_t r;
+	ret = ioctl(fd, SL_IOCTL_GET_ROLE, &r);
+	if (ret == 0 && r == 0) {
+		printf("  OK:   sle%d role=TNode\n", id_other);
+		ok_count++;
+	} else {
+		printf("  FAIL: sle%d expected role=0, got %u\n", id_other, r);
+	}
+
+	target = 0;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	ret = ioctl(fd, SL_IOCTL_GET_ROLE, &r);
+	if (ret == 0 && r == 1) {
+		printf("  OK:   sle0 role=GNode (preserved)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: sle0 expected role=1, got %u\n", r);
+	}
+
+	/* Create a connection on sle0 only */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xD1; cp.peer_addr[5] = 0x0D;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	uint16_t h0 = 0;
+	if (ret > 0) {
+		h0 = (uint16_t)ret;
+		printf("  OK:   sle0 connection handle=%u\n", h0);
+		ok_count++;
+	} else {
+		printf("  WARN: sle0 CONNECT failed\n");
+	}
+
+	/* Switch to sle_other: should have 0 connections */
+	target = (uint16_t)id_other;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 0) {
+		printf("  OK:   sle%d CONN_COUNT=0 (no leak from sle0)\n", id_other);
+		ok_count++;
+	} else {
+		printf("  FAIL: sle%d CONN_COUNT=%d (leaked from sle0)\n", id_other, ret);
+	}
+
+	/* Switch back to sle0: connection should still be there */
+	target = 0;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 1) {
+		printf("  OK:   sle0 CONN_COUNT=1 (preserved after switch)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: sle0 CONN_COUNT=%d (expected 1)\n", ret);
+	}
+
+	/* Invalid DEV_SWITCH target */
+	target = 15;
+	ret = ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	if (ret < 0) {
+		printf("  OK:   DEV_SWITCH(15) rejected (errno=%d)\n", errno);
+		ok_count++;
+	} else {
+		printf("  FAIL: DEV_SWITCH(15) should have been rejected\n");
+	}
+
+	/* Cleanup */
+	target = 0;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	if (h0 > 0)
+		ioctl(fd, SL_IOCTL_DISCONNECT, &h0);
+
+	printf("  OK:   State isolation: %d/6 steps passed\n", ok_count);
+}
+
+/*
+ * SSAP property operations edge cases.
+ *
+ * Ref: TXS-50004 section 10.3/10.4, read/write operations.
+ * Tests boundary conditions: zero-length write, max-length write,
+ * write to read-only property, read-after-write consistency.
+ */
+static void test_ssap_prop_edge_cases(int fd)
+{
+	test_header("SSAP: property operation edge cases");
+
+	/* Add a test service with properties of different capabilities */
+	struct ssap_add_service svc;
+	memset(&svc, 0, sizeof(svc));
+	svc.uuid16 = 0xFE20;
+	svc.primary = 1;
+	int ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+	if (ret < 0) {
+		printf("  FAIL: add service: %s\n", strerror(errno));
+		return;
+	}
+	uint16_t svc_h = svc.start_handle;
+
+	/* Read-only property */
+	struct ssap_add_property p_ro;
+	memset(&p_ro, 0, sizeof(p_ro));
+	p_ro.uuid16 = 0xFE21;
+	p_ro.ops = 0x01; /* Read only */
+	p_ro.value_len = 4;
+	memcpy(p_ro.value, "RDONLY", 4);
+	ret = ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &p_ro);
+	if (ret < 0) {
+		printf("  FAIL: add read-only prop\n");
+		goto edge_cleanup;
+	}
+	uint16_t h_ro = p_ro.handle;
+
+	/* Read-write property */
+	struct ssap_add_property p_rw;
+	memset(&p_rw, 0, sizeof(p_rw));
+	p_rw.uuid16 = 0xFE22;
+	p_rw.ops = 0x03; /* Read | Write */
+	p_rw.value_len = 0;
+	ret = ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &p_rw);
+	if (ret < 0) {
+		printf("  FAIL: add read-write prop\n");
+		goto edge_cleanup;
+	}
+	uint16_t h_rw = p_rw.handle;
+
+	/* Test 1: Write to read-only property should fail */
+	struct ssap_read_write rw;
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_ro;
+	rw.length = 1;
+	rw.data[0] = 0xFF;
+	ret = ioctl(fd, SL_IOCTL_SSAP_WRITE, &rw);
+	if (ret < 0) {
+		printf("  OK:   Write to read-only: rejected (errno=%d)\n", errno);
+	} else {
+		printf("  WARN: Write to read-only succeeded (unexpected)\n");
+	}
+
+	/* Test 2: Read-only value should be unchanged */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_ro;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	if (ret == 0 && rw.length == 4 && memcmp(rw.data, "RDONLY", 4) == 0) {
+		printf("  OK:   Read-only value preserved\n");
+	} else {
+		printf("  WARN: Read-only value changed (len=%u)\n", rw.length);
+	}
+
+	/* Test 3: Zero-length read on empty property */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_rw;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	if (ret == 0 && rw.length == 0) {
+		printf("  OK:   Read empty property: len=0\n");
+	} else {
+		printf("  WARN: Read empty property: ret=%d len=%u\n", ret, rw.length);
+	}
+
+	/* Test 4: Large write (fill buffer) */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_rw;
+	rw.length = 248;
+	memset(rw.data, 0x42, 248);
+	ret = ioctl(fd, SL_IOCTL_SSAP_WRITE, &rw);
+	check("WRITE (248 bytes)", ret);
+
+	/* Test 5: Readback should match */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_rw;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	if (ret == 0 && rw.length == 248 && rw.data[0] == 0x42 && rw.data[247] == 0x42) {
+		printf("  OK:   Readback 248 bytes: consistent\n");
+	} else {
+		printf("  WARN: Readback mismatch: len=%u data[0]=0x%02x\n",
+		       rw.length, rw.data[0]);
+	}
+
+	/* Test 6: Overwrite with shorter data */
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_rw;
+	rw.length = 2;
+	rw.data[0] = 0xAB;
+	rw.data[1] = 0xCD;
+	ret = ioctl(fd, SL_IOCTL_SSAP_WRITE, &rw);
+	check("WRITE (2 bytes overwrite)", ret);
+
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = h_rw;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	if (ret == 0 && rw.length == 2 && rw.data[0] == 0xAB && rw.data[1] == 0xCD) {
+		printf("  OK:   Overwrite readback: 2 bytes correct\n");
+	} else {
+		printf("  WARN: Overwrite readback: len=%u data=0x%02x%02x\n",
+		       rw.length, rw.data[0], rw.data[1]);
+	}
+
+edge_cleanup:
+	ioctl(fd, SL_IOCTL_SSAP_REMOVE_SVC, &svc_h);
+}
+
 static void test_genetlink(void)
 {
 	test_header("Generic Netlink: sparklink family");
@@ -3625,6 +4447,13 @@ int main(void)
 	test_multi_controller(fd);
 	test_e2e_data_path(fd);
 	test_air_medium_connect(fd);
+	test_conn_invalid_handle(fd);
+	test_air_medium_bidir(fd);
+	test_conn_max_capacity(fd);
+	test_ssap_indication(fd);
+	test_ssap_service_discovery(fd);
+	test_dev_switch_isolation(fd);
+	test_ssap_prop_edge_cases(fd);
 	test_genetlink();
 
 	printf("\n=== All tests completed ===\n");

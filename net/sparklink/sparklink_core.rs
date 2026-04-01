@@ -1649,15 +1649,36 @@ pub(crate) fn sle_detach_device(dev_id: u16) {
         // Remove the transport binding first.
         ss.dev_bindings.remove(dev_id);
 
-        // If this was the active device, clear the active pointer.
+        // If this was the active device, clear the active pointer
+        // and revert controller to Virtual backend.
         if ss.active_dev_id == Some(dev_id) {
             ss.active_dev_id = None;
+            let virt_addr = [0x5E, 0x00, 0x00, 0x00, 0x00, 0x00];
+            ss.controller = sle_dli::ControllerBackend::new_virtual(virt_addr);
+            pr_info!("sparklink: reverted to virtual controller\n");
         }
 
         // Unregister the device from the registry.
         let _ = ss.dev_registry.unregister(dev_id);
 
         pr_info!("sparklink: device sle{} detached\n", dev_id);
+    }
+}
+
+/// Switch the subsystem controller backend to USB.
+///
+/// Called from USB probe after sle_attach_device and C-side registration
+/// succeed. This replaces the current controller (typically Virtual) with
+/// a USB controller that dispatches commands through the C FFI layer.
+pub(crate) fn sle_switch_controller_usb(dev_id: u16, addr: [u8; 6]) {
+    let mut ss = SUBSYSTEM.lock();
+    if let Some(ss) = ss.as_mut() {
+        ss.controller = sle_dli::ControllerBackend::new_usb(addr, dev_id);
+        ss.active_dev_id = Some(dev_id);
+        pr_info!(
+            "sparklink: controller switched to USB (sle{})\n",
+            dev_id
+        );
     }
 }
 

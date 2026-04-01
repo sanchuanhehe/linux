@@ -298,3 +298,251 @@ int sle_usb_sync_bulk_in(struct usb_device *udev, u8 ep,
 			   &actual_len, timeout_ms);
 	return ret ? ret : actual_len;
 }
+
+/* =======================================================================
+ * Per-device USB state table
+ *
+ * Maps dev_id (from sle_attach_device) to USB resources. This allows
+ * Rust code to send commands/data by dev_id without dealing with
+ * raw USB device pointers.
+ * ======================================================================= */
+
+#define SLE_USB_MAX_DEVS 16
+
+/* DLI packet type bytes (T/XS 10003-2025 section 5.2) */
+#define DLI_PKT_COMMAND    0xA1
+#define DLI_PKT_ASYNC_DATA 0xA3
+
+/* Endpoint addresses (host perspective) */
+#define SLE_EP_EVENT_IN   0x81
+#define SLE_EP_DATA_IN    0x82
+#define SLE_EP_CMD_OUT    0x03
+
+/* Transfer buffer sizes */
+#define SLE_CMD_BUF_SIZE  260  /* 4-byte header + 255 params + 1 spare */
+#define SLE_DATA_BUF_SIZE 520  /* 5-byte header + 511 payload + 4 spare */
+#define SLE_EVENT_BUF_SIZE 64
+#define SLE_RX_BUF_SIZE   520
+
+/* Timeout for synchronous command transfers (ms) */
+#define SLE_CMD_TIMEOUT_MS 5000
+
+/* Forward declarations for device table functions */
+int sle_usb_dev_register(int dev_id, void *intf_ptr);
+void sle_usb_dev_unregister(int dev_id);
+int sle_usb_dev_send_cmd(int dev_id, u16 opcode, const u8 *params, int plen);
+int sle_usb_dev_send_data(int dev_id, u16 handle, const u8 *data, int len);
+int sle_usb_dev_start_evt(int dev_id);
+void sle_usb_dev_stop_evt(int dev_id);
+
+struct sle_usb_dev {
+	bool active;
+	struct usb_interface *intf;
+	struct usb_device *udev;
+	struct sle_urb_ctx *evt_urb;  /* interrupt IN for events */
+	struct sle_urb_ctx *rx_urb;   /* bulk IN for data */
+	spinlock_t lock;
+};
+
+static struct sle_usb_dev usb_dev_table[SLE_USB_MAX_DEVS];
+
+/**
+ * sle_usb_dev_register - Register a USB device for I/O by dev_id.
+ * @dev_id:   device id from sle_attach_device
+ * @intf_ptr: raw struct usb_interface pointer (from Rust probe)
+ *
+ * Extracts the usb_device, allocates URB contexts for event and data
+ * reception. Returns 0 on success.
+ */
+int sle_usb_dev_register(int dev_id, void *intf_ptr)
+{
+	struct sle_usb_dev *d;
+	struct usb_interface *intf;
+
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS || !intf_ptr)
+		return -EINVAL;
+
+	d = &usb_dev_table[dev_id];
+	if (d->active)
+		return -EBUSY;
+
+	intf = (struct usb_interface *)intf_ptr;
+
+	spin_lock_init(&d->lock);
+	d->intf = intf;
+	d->udev = interface_to_usbdev(intf);
+
+	d->evt_urb = sle_usb_alloc_ctx(SLE_EVENT_BUF_SIZE);
+	if (!d->evt_urb)
+		return -ENOMEM;
+
+	d->rx_urb = sle_usb_alloc_ctx(SLE_RX_BUF_SIZE);
+	if (!d->rx_urb) {
+		sle_usb_free_ctx(d->evt_urb);
+		d->evt_urb = NULL;
+		return -ENOMEM;
+	}
+
+	d->active = true;
+	return 0;
+}
+
+/**
+ * sle_usb_dev_unregister - Remove a device from the USB I/O table.
+ * @dev_id: device id
+ *
+ * Cancels pending URBs and frees resources.
+ */
+void sle_usb_dev_unregister(int dev_id)
+{
+	struct sle_usb_dev *d;
+
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
+		return;
+
+	d = &usb_dev_table[dev_id];
+	if (!d->active)
+		return;
+
+	d->active = false;
+
+	if (d->evt_urb) {
+		sle_usb_kill_ctx(d->evt_urb);
+		sle_usb_free_ctx(d->evt_urb);
+		d->evt_urb = NULL;
+	}
+	if (d->rx_urb) {
+		sle_usb_kill_ctx(d->rx_urb);
+		sle_usb_free_ctx(d->rx_urb);
+		d->rx_urb = NULL;
+	}
+
+	d->intf = NULL;
+	d->udev = NULL;
+}
+
+/**
+ * sle_usb_dev_send_cmd - Send a DLI command via USB bulk OUT.
+ * @dev_id: device id
+ * @opcode: DLI opcode (host byte order)
+ * @params: parameter bytes
+ * @plen:   parameter length
+ *
+ * Builds a DLI command packet and sends synchronously.
+ * Returns 0 on success, negative errno on failure.
+ */
+int sle_usb_dev_send_cmd(int dev_id, u16 opcode, const u8 *params, int plen)
+{
+	struct sle_usb_dev *d;
+	u8 pkt[SLE_CMD_BUF_SIZE];
+	int total;
+	int actual_len;
+	unsigned int pipe;
+
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
+		return -EINVAL;
+
+	d = &usb_dev_table[dev_id];
+	if (!d->active || !d->udev)
+		return -ENODEV;
+
+	if (plen > 255)
+		plen = 255;
+
+	/* Build DLI command packet */
+	pkt[0] = DLI_PKT_COMMAND;
+	pkt[1] = (u8)(opcode & 0xFF);
+	pkt[2] = (u8)(opcode >> 8);
+	pkt[3] = (u8)plen;
+	if (plen > 0 && params)
+		memcpy(&pkt[4], params, plen);
+	total = 4 + plen;
+
+	pipe = usb_sndbulkpipe(d->udev, SLE_EP_CMD_OUT);
+	return usb_bulk_msg(d->udev, pipe, pkt, total,
+			    &actual_len, SLE_CMD_TIMEOUT_MS);
+}
+
+/**
+ * sle_usb_dev_send_data - Send a DLI async data packet via USB bulk OUT.
+ * @dev_id: device id
+ * @handle: link handle
+ * @data:   payload bytes
+ * @len:    payload length
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int sle_usb_dev_send_data(int dev_id, u16 handle, const u8 *data, int len)
+{
+	struct sle_usb_dev *d;
+	u8 pkt[SLE_DATA_BUF_SIZE];
+	int total;
+	int actual_len;
+	unsigned int pipe;
+	u16 link_id_seg;
+	u16 data_len_field;
+
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
+		return -EINVAL;
+
+	d = &usb_dev_table[dev_id];
+	if (!d->active || !d->udev)
+		return -ENODEV;
+
+	if (len > 511)
+		len = 511;
+
+	/* Build DLI async unicast data packet */
+	link_id_seg = ((handle & 0x0FFF) << 4);
+	data_len_field = (u16)(len & 0x01FF);
+
+	pkt[0] = DLI_PKT_ASYNC_DATA;
+	pkt[1] = (u8)(link_id_seg & 0xFF);
+	pkt[2] = (u8)(link_id_seg >> 8);
+	pkt[3] = (u8)(data_len_field & 0xFF);
+	pkt[4] = (u8)(data_len_field >> 8);
+	if (len > 0 && data)
+		memcpy(&pkt[5], data, len);
+	total = 5 + len;
+
+	pipe = usb_sndbulkpipe(d->udev, SLE_EP_CMD_OUT);
+	return usb_bulk_msg(d->udev, pipe, pkt, total,
+			    &actual_len, SLE_CMD_TIMEOUT_MS);
+}
+
+/**
+ * sle_usb_dev_start_evt - Start listening for events on interrupt IN.
+ * @dev_id: device id
+ *
+ * Submits the event interrupt URB which auto-resubmits on completion.
+ */
+int sle_usb_dev_start_evt(int dev_id)
+{
+	struct sle_usb_dev *d;
+
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
+		return -EINVAL;
+
+	d = &usb_dev_table[dev_id];
+	if (!d->active || !d->udev || !d->evt_urb)
+		return -ENODEV;
+
+	return sle_usb_submit_intr_in(d->evt_urb, d->udev,
+				      SLE_EP_EVENT_IN, NULL, 4);
+}
+
+/**
+ * sle_usb_dev_stop_evt - Stop listening for events.
+ * @dev_id: device id
+ */
+void sle_usb_dev_stop_evt(int dev_id)
+{
+	struct sle_usb_dev *d;
+
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
+		return;
+
+	d = &usb_dev_table[dev_id];
+	if (d->evt_urb)
+		sle_usb_kill_ctx(d->evt_urb);
+}

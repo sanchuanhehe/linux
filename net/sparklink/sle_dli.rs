@@ -932,6 +932,7 @@ pub enum ControllerBackend {
     Virtual(VirtualController),
     Uart(super::sle_uart::UartController),
     Spi(super::sle_spi::SpiController),
+    Usb(super::sle_usb::UsbController),
 }
 
 // SAFETY: ControllerBackend is always stored inside Mutex<ControllerBackend>
@@ -951,6 +952,10 @@ impl ControllerBackend {
 
     pub fn new_spi(addr: [u8; 6], config: super::sle_spi::SpiConfig) -> Self {
         Self::Spi(super::sle_spi::SpiController::new(addr, config))
+    }
+
+    pub fn new_usb(addr: [u8; 6], dev_id: u16) -> Self {
+        Self::Usb(super::sle_usb::UsbController::new(addr, dev_id))
     }
 }
 
@@ -1025,6 +1030,7 @@ impl SleController for ControllerBackend {
             Self::Virtual(c) => c.info(),
             Self::Uart(c) => c.info(),
             Self::Spi(c) => c.info(),
+            Self::Usb(c) => c.info(),
         }
     }
 
@@ -1033,6 +1039,7 @@ impl SleController for ControllerBackend {
             Self::Virtual(c) => c.open(),
             Self::Uart(c) => c.open(),
             Self::Spi(c) => c.open(),
+            Self::Usb(c) => c.open(),
         }
     }
 
@@ -1041,6 +1048,7 @@ impl SleController for ControllerBackend {
             Self::Virtual(c) => c.close(),
             Self::Uart(c) => c.close(),
             Self::Spi(c) => c.close(),
+            Self::Usb(c) => c.close(),
         }
     }
 
@@ -1049,6 +1057,7 @@ impl SleController for ControllerBackend {
             Self::Virtual(c) => c.send_command(opcode, params),
             Self::Uart(c) => c.send_command(opcode, params),
             Self::Spi(c) => c.send_command(opcode, params),
+            Self::Usb(c) => c.send_command(opcode, params),
         }
     }
 
@@ -1057,6 +1066,7 @@ impl SleController for ControllerBackend {
             Self::Virtual(c) => c.send_data(handle, data),
             Self::Uart(c) => c.send_data(handle, data),
             Self::Spi(c) => c.send_data(handle, data),
+            Self::Usb(c) => c.send_data(handle, data),
         }
     }
 
@@ -1065,6 +1075,7 @@ impl SleController for ControllerBackend {
             Self::Virtual(c) => c.poll_event(),
             Self::Uart(c) => c.poll_event(),
             Self::Spi(c) => c.poll_event(),
+            Self::Usb(c) => c.poll_event(),
         }
     }
 
@@ -1073,6 +1084,7 @@ impl SleController for ControllerBackend {
             Self::Virtual(c) => c.reset(),
             Self::Uart(c) => c.reset(),
             Self::Spi(c) => c.reset(),
+            Self::Usb(c) => c.reset(),
         }
     }
 }

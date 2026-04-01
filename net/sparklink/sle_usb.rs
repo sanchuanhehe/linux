@@ -87,6 +87,24 @@ extern "C" {
         size: i32,
         timeout_ms: i32,
     ) -> i32;
+
+    // Per-device USB state table: high-level send functions
+    fn sle_usb_dev_register(dev_id: i32, intf_ptr: *mut core::ffi::c_void) -> i32;
+    fn sle_usb_dev_unregister(dev_id: i32);
+    fn sle_usb_dev_send_cmd(
+        dev_id: i32,
+        opcode: u16,
+        params: *const u8,
+        plen: i32,
+    ) -> i32;
+    fn sle_usb_dev_send_data(
+        dev_id: i32,
+        handle: u16,
+        data: *const u8,
+        len: i32,
+    ) -> i32;
+    fn sle_usb_dev_start_evt(dev_id: i32) -> i32;
+    fn sle_usb_dev_stop_evt(dev_id: i32);
 }
 
 // ---------------------------------------------------------------------------
@@ -770,14 +788,14 @@ fn raw_to_status(raw: u8) -> SleStatus {
 /// Uses bulk and interrupt transfers to communicate with the radio
 /// controller firmware over the DLI protocol.
 ///
-/// Integration with the USB subsystem requires a separate kernel module
-/// (`sparklink_usb`) that implements `usb::Driver` and creates an
-/// instance of `UsbController` per interface. The current implementation
-/// provides the SleController trait and packet framing — actual USB I/O
-/// is deferred until hardware integration.
+/// Actual USB I/O is delegated to the C FFI layer which maintains a
+/// per-device table mapping `dev_id` to `usb_device` and URB contexts.
 pub struct UsbController {
     addr: [u8; 6],
     opened: bool,
+    /// Device ID in the sle_dev registry. Used to index the C-side
+    /// USB device table for actual I/O.
+    dev_id: u16,
 }
 
 impl UsbController {
@@ -785,10 +803,12 @@ impl UsbController {
     ///
     /// `addr` is the 6-byte SLE MAC address read from the controller
     /// during probe via the ReadLocalAddr (0x0404) command.
-    pub fn new(addr: [u8; 6]) -> Self {
+    /// `dev_id` is the device ID returned by `sle_attach_device`.
+    pub fn new(addr: [u8; 6], dev_id: u16) -> Self {
         Self {
             addr,
             opened: false,
+            dev_id,
         }
     }
 }
@@ -813,42 +833,74 @@ impl SleController for UsbController {
     }
 
     fn open(&self) -> Result {
-        // Real implementation: send Reset (0x0401) command via bulk OUT,
-        // wait for CommandComplete event on interrupt IN, then read
-        // firmware version and features.
-        //
-        // Requires: usb_bulk_msg() for EP3 write, usb_interrupt_msg()
-        //           for EP1 read.
-        pr_info!("sparklink-usb: open (no hardware attached)\n");
-        Err(ENODEV)
+        // Register event listener via the C device table.
+        // SAFETY: dev_id was validated during probe.
+        let ret = unsafe { sle_usb_dev_start_evt(self.dev_id as i32) };
+        if ret < 0 {
+            pr_warn!("sparklink-usb: event listener start failed: {}\n", ret);
+            // Non-fatal: controller can still send commands.
+        }
+        pr_info!("sparklink-usb: open dev_id={}\n", self.dev_id);
+        Ok(())
     }
 
     fn close(&self) {
-        pr_info!("sparklink-usb: close\n");
+        unsafe { sle_usb_dev_stop_evt(self.dev_id as i32) };
+        pr_info!("sparklink-usb: close dev_id={}\n", self.dev_id);
     }
 
     fn send_command(&self, opcode: SleOpcode, params: &[u8]) -> Result {
         let pkt = build_command_packet(opcode, params)?;
-        // Real implementation: usb_bulk_msg(udev, pipe_out, pkt,
-        //                                   pkt.len(), &actual, timeout)
+        // Use the C device table for actual USB bulk OUT.
+        // dev_send_cmd builds the DLI packet internally, but we
+        // already have the raw opcode — pass it directly.
+        let ret = unsafe {
+            sle_usb_dev_send_cmd(
+                self.dev_id as i32,
+                opcode as u16,
+                params.as_ptr(),
+                params.len() as i32,
+            )
+        };
+        if ret < 0 {
+            pr_debug!(
+                "sparklink-usb: cmd 0x{:04x} failed: {}\n",
+                opcode as u16,
+                ret
+            );
+            return Err(Error::from_errno(ret));
+        }
         pr_debug!(
-            "sparklink-usb: cmd 0x{:04x} ({} bytes)\n",
+            "sparklink-usb: cmd 0x{:04x} sent ({} bytes)\n",
             opcode as u16,
             pkt.len()
         );
-        Err(ENODEV)
+        Ok(())
     }
 
     fn send_data(&self, handle: u16, data: &[u8]) -> Result {
-        let pkt = build_async_data_packet(handle, 0, false, data)?;
-        // Real implementation: usb_bulk_msg(udev, pipe_out, pkt,
-        //                                   pkt.len(), &actual, timeout)
+        let ret = unsafe {
+            sle_usb_dev_send_data(
+                self.dev_id as i32,
+                handle,
+                data.as_ptr(),
+                data.len() as i32,
+            )
+        };
+        if ret < 0 {
+            pr_debug!(
+                "sparklink-usb: data tx handle={} failed: {}\n",
+                handle,
+                ret
+            );
+            return Err(Error::from_errno(ret));
+        }
         pr_debug!(
             "sparklink-usb: data tx handle={} ({} bytes)\n",
             handle,
-            pkt.len()
+            data.len()
         );
-        Err(ENODEV)
+        Ok(())
     }
 
     fn poll_event(&self) -> Option<SleEvent> {
@@ -906,7 +958,7 @@ impl usb::Driver for SleUsbDriver {
     const ID_TABLE: usb::IdTable<Self::IdInfo> = &SLE_USB_IDS;
 
     fn probe(
-        _interface: &usb::Interface<device::Core>,
+        interface: &usb::Interface<device::Core>,
         _id: &usb::DeviceId,
         _info: &Self::IdInfo,
     ) -> impl PinInit<Self, Error> {
@@ -923,6 +975,27 @@ impl usb::Driver for SleUsbDriver {
         let dev_id = super::sle_attach_device(&attach).unwrap_or(u16::MAX);
         if dev_id != u16::MAX {
             pr_info!("sparklink-usb: attached as sle{}\n", dev_id);
+
+            // Register the USB interface in the C-side device table so
+            // send_command / send_data can perform actual I/O.
+            //
+            // SAFETY: Interface is #[repr(transparent)] over
+            // Opaque<bindings::usb_interface>. The pointer cast yields
+            // the underlying C struct which the C code casts back to
+            // struct usb_interface *. The interface survives as long as
+            // the driver is bound (guaranteed by USB core).
+            let intf_ptr = interface as *const usb::Interface<device::Core>
+                as *mut core::ffi::c_void;
+            let reg_ret = unsafe { sle_usb_dev_register(dev_id as i32, intf_ptr) };
+            if reg_ret < 0 {
+                pr_warn!(
+                    "sparklink-usb: C device table register failed: {}\n",
+                    reg_ret
+                );
+            }
+
+            // Switch the subsystem controller backend to USB.
+            super::sle_switch_controller_usb(dev_id, addr);
         }
 
         try_pin_init!(Self { dev_id })
@@ -934,6 +1007,8 @@ impl usb::Driver for SleUsbDriver {
 
         let dev_id = data.dev_id;
         if dev_id != u16::MAX {
+            // Stop URBs and unregister from C device table.
+            unsafe { sle_usb_dev_unregister(dev_id as i32) };
             super::sle_detach_device(dev_id);
             pr_info!("sparklink-usb: detached sle{}\n", dev_id);
         }

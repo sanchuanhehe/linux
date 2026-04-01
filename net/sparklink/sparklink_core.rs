@@ -23,6 +23,7 @@ mod sle_ssap;
 mod sle_power;
 mod sle_dli;
 mod sle_dev;
+mod sle_mgmt;
 mod sle_event;
 mod sle_usb;
 mod sle_netlink;
@@ -494,6 +495,12 @@ const SL_IOCTL_DLI_POLL_EVENT: u32 = _IOR::<SleDliEvent>(SL_MAGIC, 0x82);
 
 /// Reset the DLI controller.
 const SL_IOCTL_DLI_RESET: u32 = _IO(SL_MAGIC, 0x83);
+
+/// Send a DLI command to the controller (management plane).
+const SL_IOCTL_DLI_SEND_CMD: u32 = _IOWR::<SleDliCmd>(SL_MAGIC, 0x84);
+
+/// Get management plane pending queue statistics.
+const SL_IOCTL_MGMT_STATS: u32 = _IOR::<SleMgmtStats>(SL_MAGIC, 0x85);
 
 // --- PHY layer ioctls ---
 
@@ -1162,6 +1169,51 @@ impl Default for SleDliEvent {
     }
 }
 
+/// DLI command sent to the controller via DLI_SEND_CMD ioctl.
+///
+/// On input: opcode + params. On output: seq (assigned sequence number)
+/// so userspace can track the pending command.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleDliCmd {
+    /// DLI opcode (OGF|OCF).
+    pub opcode: u16,
+    /// Parameter length.
+    pub param_len: u16,
+    /// Assigned sequence number (output, filled by kernel).
+    pub seq: u32,
+    /// Command parameters.
+    pub params: [u8; 240],
+}
+
+impl Default for SleDliCmd {
+    fn default() -> Self {
+        // SAFETY: repr(C) with primitive fields.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+// SAFETY: SleDliCmd is repr(C) with only primitive fields.
+unsafe impl FromBytes for SleDliCmd {}
+
+/// Management plane pending queue statistics.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleMgmtStats {
+    /// Currently pending (unresolved) commands.
+    pub pending: u16,
+    _pad: u16,
+    /// Total commands submitted.
+    pub total_submitted: u32,
+    /// Total commands resolved (complete or timeout).
+    pub total_resolved: u32,
+    /// Total command timeouts.
+    pub total_timeouts: u32,
+}
+
+// SAFETY: SleMgmtStats is repr(C) with only primitive fields.
+unsafe impl FromBytes for SleMgmtStats {}
+
 fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
     let mut out = SleDliEvent::default();
     match ev {
@@ -1452,6 +1504,8 @@ struct SubsystemShared {
     dev_registry: sle_dev::SleDevRegistry,
     /// Index of the active device in the registry (`None` = no controller).
     active_dev_id: Option<u16>,
+    /// Command pending queue for management plane.
+    cmd_pending: sle_mgmt::CmdPendingQueue,
 }
 
 impl SubsystemShared {
@@ -1520,11 +1574,27 @@ impl WorkItem for EventPump {
     fn run(this: Arc<EventPump>) {
         // Drain all pending controller events into both the broadcast ring
         // (for read() delivery) and the DLI event ring (for DLI_POLL_EVENT).
+        // Also resolve pending commands from the management plane.
         let mut pumped = 0u32;
         {
             let mut ss = SUBSYSTEM.lock();
             if let Some(ref mut shared) = *ss {
                 while let Some(ev) = shared.controller.poll_event() {
+                    // Resolve pending management commands on CommandComplete/CommandStatus.
+                    match &ev {
+                        sle_dli::SleEvent::CommandComplete { opcode, status, data } => {
+                            shared.cmd_pending.resolve(
+                                *opcode as u16, *status as u8, data.as_slice(),
+                            );
+                        }
+                        sle_dli::SleEvent::CommandStatus { opcode, status } => {
+                            shared.cmd_pending.resolve(
+                                *opcode as u16, *status as u8, &[],
+                            );
+                        }
+                        _ => {}
+                    }
+
                     let wire = sle_dli_event_to_broadcast(&ev);
                     shared.broadcast.publish(wire);
                     let dli_ev = sle_dli_event_to_wire(&ev);
@@ -1534,6 +1604,13 @@ impl WorkItem for EventPump {
                         break; // yield after 32 events per cycle
                     }
                 }
+
+                // Expire stale commands and garbage-collect resolved entries.
+                let expired = shared.cmd_pending.expire_stale();
+                if expired > 0 {
+                    pr_warn!("sparklink: {} pending command(s) timed out\n", expired);
+                }
+                shared.cmd_pending.gc();
             }
         }
         // Re-arm the delayed work for the next cycle.
@@ -1794,6 +1871,7 @@ impl kernel::InPlaceModule for SparkLinkModule {
                     _event_pump: pump,
                     dev_registry,
                     active_dev_id: dev_id,
+                    cmd_pending: sle_mgmt::CmdPendingQueue::new(),
                 });
                 pr_info!("sparklink: shared subsystem initialised\n");
                 SubsystemGuard
@@ -2649,6 +2727,46 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.controller.reset()?;
+                Ok(0)
+            }
+            // --- DLI send command (management plane) ---
+            SL_IOCTL_DLI_SEND_CMD => {
+                let mut cmd: SleDliCmd = read_user_struct(arg)?;
+                let param_len = (cmd.param_len as usize).min(240);
+
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+
+                // Submit to pending queue first.
+                let seq = s.cmd_pending.submit(cmd.opcode)?;
+                // Send the command to the controller via raw opcode.
+                match s.controller.send_command_raw(cmd.opcode, &cmd.params[..param_len]) {
+                    Ok(()) => {
+                        cmd.seq = seq;
+                        drop(ss);
+                        write_user_struct(arg, &cmd)?;
+                        Ok(0)
+                    }
+                    Err(e) => {
+                        // Resolve immediately as failed so the slot is freed.
+                        s.cmd_pending.resolve(cmd.opcode, 0xFF, &[]);
+                        Err(e)
+                    }
+                }
+            }
+            // --- Management plane statistics ---
+            SL_IOCTL_MGMT_STATS => {
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let stats = SleMgmtStats {
+                    pending: s.cmd_pending.pending(),
+                    _pad: 0,
+                    total_submitted: s.cmd_pending.total_submitted as u32,
+                    total_resolved: s.cmd_pending.total_resolved as u32,
+                    total_timeouts: s.cmd_pending.total_timeouts as u32,
+                };
+                drop(ss);
+                write_user_struct(arg, &stats)?;
                 Ok(0)
             }
             // --- USB device discovery ---

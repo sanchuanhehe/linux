@@ -959,6 +959,17 @@ impl ControllerBackend {
 // transport-level byte arrays directly (T/XS 10003-2025 section 8).
 
 impl ControllerBackend {
+    /// Send a command using a raw opcode value (u16).
+    ///
+    /// Used by the management plane DLI_SEND_CMD ioctl where the opcode
+    /// comes from userspace as a raw u16.
+    pub fn send_command_raw(&self, raw_opcode: u16, params: &[u8]) -> Result {
+        // SAFETY: SleOpcode is repr(u16). Unknown opcodes are forwarded
+        // to the controller which rejects them with an appropriate status.
+        let opcode: SleOpcode = unsafe { core::mem::transmute(raw_opcode) };
+        self.send_command(opcode, params)
+    }
+
     /// Enable or disable broadcasting (section 8.2.4).
     pub fn enable_broadcast(&self, enable: bool) -> Result {
         self.send_command(SleOpcode::EnableBroadcast, &[enable as u8])

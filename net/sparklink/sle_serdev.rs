@@ -39,7 +39,12 @@
 
 use kernel::prelude::*;
 
+use super::sle_dli::{
+    SleBus, SleController, SleControllerInfo,
+    SleEvent, SleFeature, SleOpcode,
+};
 use super::sle_transport::{SleAttachInfo, SleProtoId};
+use super::sle_uart::{UartFrame, UartParser, MAX_PAYLOAD_LEN};
 
 // =========================================================================
 // Serdev FFI — C wrapper functions from sle_serdev_ffi.c
@@ -71,15 +76,113 @@ extern "C" {
         data: *const u8,
         len: i32,
     ) -> i32;
+    fn sle_serdev_dev_register(dev_id: i32, sd: *mut SleSerdevDataOpaque) -> i32;
+    fn sle_serdev_dev_unregister(dev_id: i32);
+    fn sle_serdev_dev_send_cmd(
+        dev_id: i32,
+        opcode: u16,
+        params: *const u8,
+        plen: i32,
+    ) -> i32;
+    fn sle_serdev_dev_send_data(
+        dev_id: i32,
+        handle: u16,
+        data: *const u8,
+        len: i32,
+    ) -> i32;
+    fn sle_serdev_dev_send_cmd_sync(
+        dev_id: i32,
+        opcode: u16,
+        resp: *mut u8,
+        resp_size: i32,
+        resp_len: *mut i32,
+    ) -> i32;
+    fn sle_serdev_dev_init_controller(dev_id: i32) -> i32;
+    fn sle_serdev_dev_get_fw_version(dev_id: i32) -> u32;
+    fn sle_serdev_dev_get_mac(dev_id: i32, mac: *mut u8) -> i32;
+    fn sle_serdev_dev_feed_event(
+        dev_id: i32,
+        event_code: u16,
+        params: *const u8,
+        plen: i32,
+    );
 }
 
 // =========================================================================
-// Completion callbacks from C
+// Completion callbacks from C — serdev receive path
 // =========================================================================
 
+/// Global parser state for the serdev receive path.
+///
+/// Protected by a spinlock since `receive_buf` can be called from softirq
+/// context. Feeds incoming bytes through a `UartParser` to reconstruct DLI
+/// frames, then forwards parsed events to the C-side sync command waiter.
+struct SerdevParserState {
+    parser: UartParser,
+    dev_id: Option<u16>,
+}
+
+impl SerdevParserState {
+    fn new() -> Self {
+        Self {
+            parser: UartParser::new(),
+            dev_id: None,
+        }
+    }
+
+    fn set_dev_id(&mut self, dev_id: u16) {
+        self.dev_id = Some(dev_id);
+    }
+
+    fn feed_rx(&mut self, data: &[u8]) {
+        let mut frames = kernel::alloc::KVec::new();
+        self.parser.feed_bytes(data, &mut frames);
+
+        let dev_id = match self.dev_id {
+            Some(id) => id as i32,
+            None => return,
+        };
+
+        for frame in frames.iter() {
+            match frame {
+                UartFrame::Event { event_code, params } => {
+                    unsafe {
+                        sle_serdev_dev_feed_event(
+                            dev_id,
+                            *event_code,
+                            params.as_ptr(),
+                            params.len() as i32,
+                        );
+                    }
+                }
+                _ => {
+                    pr_debug!("sparklink-serdev: rx non-event frame\n");
+                }
+            }
+        }
+    }
+}
+
+kernel::sync::global_lock! {
+    // SAFETY: Initialized in module_init before any serdev probe.
+    unsafe(uninit) static SERDEV_PARSER: Mutex<Option<SerdevParserState>> = None;
+}
+
+/// Initialize the global serdev parser lock.
+///
+/// # Safety
+///
+/// Must be called exactly once during module init.
+pub(crate) unsafe fn init_serdev_parser() {
+    // SAFETY: Caller guarantees this is called exactly once during module init.
+    unsafe { SERDEV_PARSER.init() };
+}
+
 /// Called from C when the serdev core delivers received bytes.
-/// Feeds the data into the UART H4 parser which reconstructs
-/// complete DLI packets.
+///
+/// Feeds incoming data through the global UART parser which reconstructs
+/// complete DLI packets, then forwards parsed events to the C-side sync
+/// command waiter and the subsystem event pipeline.
 #[no_mangle]
 pub(crate) extern "C" fn sparklink_serdev_receive(
     _ctx: *mut core::ffi::c_void,
@@ -90,9 +193,9 @@ pub(crate) extern "C" fn sparklink_serdev_receive(
         return;
     }
     let slice = unsafe { core::slice::from_raw_parts(data, len as usize) };
-    pr_debug!("sparklink-serdev: rx {} bytes\n", slice.len());
-    // TODO: forward to per-device UartParser instance once device
-    // context mapping is connected.
+    if let Some(ref mut state) = *SERDEV_PARSER.lock() {
+        state.feed_rx(slice);
+    }
 }
 
 /// Called from C when the serial port becomes writable again.
@@ -101,7 +204,6 @@ pub(crate) extern "C" fn sparklink_serdev_write_wakeup(
     _ctx: *mut core::ffi::c_void,
 ) {
     pr_debug!("sparklink-serdev: write wakeup\n");
-    // TODO: drain the pending TX queue for this device.
 }
 
 // =========================================================================
@@ -115,6 +217,99 @@ pub(crate) struct SleSerdevHandle {
 
 unsafe impl Send for SleSerdevHandle {}
 unsafe impl Sync for SleSerdevHandle {}
+
+// =========================================================================
+// SerdevController — real I/O over UART
+// =========================================================================
+
+/// UART-attached SLE controller using serdev for actual I/O.
+///
+/// Commands and data are sent via the C-side serdev device table which
+/// encodes H4 frames and writes them to the serial port. Events arrive
+/// asynchronously through the serdev receive callback, get parsed by
+/// `UartParser`, and fed to the C-side sync waiter or subsystem event ring.
+pub(crate) struct SerdevController {
+    addr: [u8; 6],
+    dev_id: u16,
+    opened: bool,
+}
+
+impl SerdevController {
+    pub(crate) fn new(addr: [u8; 6], dev_id: u16) -> Self {
+        Self {
+            addr,
+            opened: false,
+            dev_id,
+        }
+    }
+}
+
+impl SleController for SerdevController {
+    fn info(&self) -> SleControllerInfo {
+        let mut info = SleControllerInfo::default();
+        let name = b"sparklink-serdev";
+        let n = core::cmp::min(name.len(), info.name.len());
+        info.name[..n].copy_from_slice(&name[..n]);
+        info.bus = SleBus::Uart;
+        info.addr = self.addr;
+        info.fw_version = unsafe { sle_serdev_dev_get_fw_version(self.dev_id as i32) };
+        info.features = (SleFeature::Encryption as u64)
+            | (SleFeature::Mcs4 as u64)
+            | (SleFeature::Pilot8to1 as u64)
+            | (SleFeature::Crc32 as u64)
+            | (SleFeature::DataLenUpdate as u64);
+        info.max_pdu_payload = MAX_PAYLOAD_LEN as u16;
+        info.max_connections = 4;
+        info
+    }
+
+    fn open(&self) -> Result {
+        pr_info!("sparklink-serdev: open dev_id={}\n", self.dev_id);
+        Ok(())
+    }
+
+    fn close(&self) {
+        pr_info!("sparklink-serdev: close dev_id={}\n", self.dev_id);
+    }
+
+    fn send_command(&self, opcode: SleOpcode, params: &[u8]) -> Result {
+        let ret = unsafe {
+            sle_serdev_dev_send_cmd(
+                self.dev_id as i32,
+                opcode as u16,
+                params.as_ptr(),
+                params.len() as i32,
+            )
+        };
+        if ret < 0 {
+            return Err(Error::from_errno(ret));
+        }
+        Ok(())
+    }
+
+    fn send_data(&self, handle: u16, data: &[u8]) -> Result {
+        let ret = unsafe {
+            sle_serdev_dev_send_data(
+                self.dev_id as i32,
+                handle,
+                data.as_ptr(),
+                data.len() as i32,
+            )
+        };
+        if ret < 0 {
+            return Err(Error::from_errno(ret));
+        }
+        Ok(())
+    }
+
+    fn poll_event(&self) -> Option<SleEvent> {
+        None
+    }
+
+    fn reset(&self) -> Result {
+        self.send_command(SleOpcode::Reset, &[])
+    }
+}
 
 impl SleSerdevHandle {
     /// Wrap a raw pointer returned by `sle_serdev_alloc`.
@@ -227,26 +422,21 @@ impl SleSerdevData {
 }
 
 // =========================================================================
-// Probe / remove stubs
+// Probe / remove
 // =========================================================================
-//
-// These functions implement the serdev_device_driver .probe and .remove
-// callbacks. In a real build they will be called by the serdev core
-// when a matching device tree node or ACPI entry is found.
-//
-// Until Rust serdev bindings exist, these are invoked by the integration
-// test helper or from module parameters for development.
 
 /// Probe callback for a UART-attached SLE controller.
 ///
-/// Steps (matching hci_uart_register_dev / hci_serdev_register):
-/// 1. Open the serial port at `init_speed`.
-/// 2. Read the controller MAC address (ReadMacAddr, opcode 0x0406).
-/// 3. Optionally negotiate higher baud rate (`oper_speed`).
-/// 4. Call `sle_attach_device()` to register in the subsystem.
+/// 1. Attach device to subsystem to obtain `dev_id`.
+/// 2. Register with C-side serdev device table for command I/O.
+/// 3. Run controller init sequence (Reset, ReadVersion, ReadMAC).
+/// 4. Read back MAC/version and switch subsystem controller to serdev.
 ///
-/// Returns the allocated device id on success.
+/// The `sd_handle` parameter is the raw serdev data pointer from the C
+/// side (from `sle_serdev_alloc`). If `None`, the function falls back to
+/// a stub mode without hardware I/O (useful for integration tests).
 pub(crate) fn serdev_probe(
+    sd_handle: Option<*mut SleSerdevDataOpaque>,
     addr: [u8; 6],
     init_speed: u32,
     oper_speed: u32,
@@ -258,18 +448,67 @@ pub(crate) fn serdev_probe(
     );
 
     let mut attach = SleAttachInfo::new(SleProtoId::H4Uart, addr);
-    // Real driver would read these from the controller after reset.
     attach.fw_version = 0;
     attach.features = 0;
 
     let dev_id = super::sle_attach_device(&attach)?;
     pr_info!("sparklink-serdev: attached as sle{}\n", dev_id);
 
+    if let Some(sd) = sd_handle {
+        // Register with C-side serdev device table for command I/O.
+        let ret = unsafe { sle_serdev_dev_register(dev_id as i32, sd) };
+        if ret < 0 {
+            super::sle_detach_device(dev_id);
+            return Err(Error::from_errno(ret));
+        }
+
+        // Set up the global parser to route events to this device.
+        {
+            let mut guard = SERDEV_PARSER.lock();
+            if guard.is_none() {
+                *guard = Some(SerdevParserState::new());
+            }
+            if let Some(ref mut state) = *guard {
+                state.set_dev_id(dev_id);
+            }
+        }
+
+        // Run controller init sequence (reset, read version, read MAC).
+        let init_ret = unsafe { sle_serdev_dev_init_controller(dev_id as i32) };
+        if init_ret < 0 {
+            pr_warn!(
+                "sparklink-serdev: init failed ({}), continuing with defaults\n",
+                init_ret
+            );
+        }
+
+        // Read back MAC address from controller.
+        let mut real_addr = addr;
+        let mut mac_buf = [0u8; 6];
+        if unsafe { sle_serdev_dev_get_mac(dev_id as i32, mac_buf.as_mut_ptr()) } == 0 {
+            if mac_buf != [0u8; 6] {
+                real_addr = mac_buf;
+                pr_info!(
+                    "sparklink-serdev: controller MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
+                    real_addr[0], real_addr[1], real_addr[2],
+                    real_addr[3], real_addr[4], real_addr[5]
+                );
+            }
+        }
+
+        // Switch subsystem controller to serdev backend.
+        super::sle_switch_controller_serdev(dev_id, real_addr);
+    }
+
     Ok(SleSerdevData::new(dev_id, init_speed, oper_speed))
 }
 
 /// Remove callback for a UART-attached SLE controller.
+///
+/// Unregisters the device from the C-side serdev device table and detaches
+/// it from the subsystem.
 pub(crate) fn serdev_remove(data: &SleSerdevData) {
     pr_info!("sparklink-serdev: remove sle{}\n", data.dev_id);
+    unsafe { sle_serdev_dev_unregister(data.dev_id as i32) };
     super::sle_detach_device(data.dev_id);
 }

@@ -1707,6 +1707,22 @@ pub(crate) fn sle_resume_device(dev_id: u16) {
     }
 }
 
+/// Switch the subsystem controller backend to Serdev (UART).
+///
+/// Called from serdev probe after sle_attach_device and C-side registration
+/// succeed.
+pub(crate) fn sle_switch_controller_serdev(dev_id: u16, addr: [u8; 6]) {
+    let mut ss = SUBSYSTEM.lock();
+    if let Some(ss) = ss.as_mut() {
+        ss.controller = sle_dli::ControllerBackend::new_serdev(addr, dev_id);
+        ss.active_dev_id = Some(dev_id);
+        pr_info!(
+            "sparklink: controller switched to serdev (sle{})\n",
+            dev_id
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Background event pump
 // ---------------------------------------------------------------------------
@@ -2024,6 +2040,8 @@ impl kernel::InPlaceModule for SparkLinkModule {
 
         // SAFETY: Called exactly once during module init.
         unsafe { SUBSYSTEM.init() };
+        // SAFETY: Called exactly once during module init.
+        unsafe { sle_serdev::init_serdev_parser() };
 
         let options = MiscDeviceOptions {
             name: c"sparklink",

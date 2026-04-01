@@ -24,6 +24,8 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/mod_devicetable.h>
+#include <linux/completion.h>
+#include <linux/spinlock.h>
 
 /* -----------------------------------------------------------------------
  * Rust completion callbacks
@@ -45,6 +47,62 @@ int sle_serdev_write(struct sle_serdev_data *sd, const u8 *data,
 		     int len, int timeout_ms);
 int sle_serdev_write_buf(struct sle_serdev_data *sd, const u8 *data,
 			 int len);
+
+/* -----------------------------------------------------------------------
+ * Per-device command I/O table
+ *
+ * Mirrors the USB device table pattern. Stores per-device serdev state
+ * and provides synchronous command/response via a completion variable.
+ * The receive callback feeds into cmd_resp when a command is pending.
+ * -----------------------------------------------------------------------
+ */
+#define SLE_SERDEV_MAX_DEVS     4
+#define SLE_SERDEV_CMD_TIMEOUT  3000   /* ms */
+#define SLE_SERDEV_CMD_BUF      260    /* 4-byte header + 255 params + 1 spare */
+
+/* DLI packet type bytes */
+#define SLE_H4_COMMAND   0xA1
+#define SLE_H4_EVENT     0xA2
+#define SLE_H4_ASYNC     0xA3
+
+/* DLI event: CommandComplete */
+#define SLE_SERDEV_EVT_CMD_COMPLETE 0x0002
+
+/* DLI init opcodes */
+#define SLE_SERDEV_OP_READ_VER  0x0404
+#define SLE_SERDEV_OP_READ_MAC  0x0406
+#define SLE_SERDEV_OP_RESET     0x0408
+
+struct sle_serdev_dev {
+	bool active;
+	bool cmd_pending;
+	struct sle_serdev_data *sd;
+	struct completion cmd_done;
+	u8 cmd_resp[SLE_SERDEV_CMD_BUF];
+	int cmd_resp_len;
+	u16 cmd_pending_opcode;
+	spinlock_t lock;
+	/* Read-back from controller during init */
+	u8 mac_addr[6];
+	u32 fw_version;
+};
+
+static struct sle_serdev_dev serdev_dev_table[SLE_SERDEV_MAX_DEVS];
+
+/* Forward declarations for device table functions */
+int sle_serdev_dev_register(int dev_id, struct sle_serdev_data *sd);
+void sle_serdev_dev_unregister(int dev_id);
+int sle_serdev_dev_send_cmd(int dev_id, u16 opcode,
+			    const u8 *params, int plen);
+int sle_serdev_dev_send_data(int dev_id, u16 handle,
+			     const u8 *data, int len);
+int sle_serdev_dev_send_cmd_sync(int dev_id, u16 opcode,
+				 u8 *resp, int resp_size, int *resp_len);
+int sle_serdev_dev_init_controller(int dev_id);
+u32 sle_serdev_dev_get_fw_version(int dev_id);
+int sle_serdev_dev_get_mac(int dev_id, u8 *mac);
+void sle_serdev_dev_feed_event(int dev_id, u16 event_code,
+			       const u8 *params, int plen);
 
 /* -----------------------------------------------------------------------
  * Per-device driver data
@@ -201,4 +259,339 @@ int sle_serdev_write_buf(struct sle_serdev_data *sd, const u8 *data,
 	if (!sd || !sd->serdev || !data || len <= 0)
 		return -EINVAL;
 	return serdev_device_write_buf(sd->serdev, data, len);
+}
+
+/* -----------------------------------------------------------------------
+ * Per-device serdev command I/O
+ * -----------------------------------------------------------------------
+ */
+
+/**
+ * sle_serdev_dev_register - Register a serdev device for command I/O.
+ * @dev_id: device id from sle_attach_device
+ * @sd:     serdev driver data (from sle_serdev_alloc)
+ */
+int sle_serdev_dev_register(int dev_id, struct sle_serdev_data *sd)
+{
+	struct sle_serdev_dev *d;
+
+	if (dev_id < 0 || dev_id >= SLE_SERDEV_MAX_DEVS || !sd)
+		return -EINVAL;
+
+	d = &serdev_dev_table[dev_id];
+	if (d->active)
+		return -EBUSY;
+
+	spin_lock_init(&d->lock);
+	init_completion(&d->cmd_done);
+	d->sd = sd;
+	d->cmd_pending = false;
+	d->cmd_resp_len = 0;
+	d->cmd_pending_opcode = 0;
+	memset(d->mac_addr, 0, 6);
+	d->fw_version = 0;
+	d->active = true;
+
+	pr_info("sparklink-serdev: dev %d registered\n", dev_id);
+	return 0;
+}
+
+/**
+ * sle_serdev_dev_unregister - Unregister a serdev device.
+ * @dev_id: device id
+ */
+void sle_serdev_dev_unregister(int dev_id)
+{
+	struct sle_serdev_dev *d;
+
+	if (dev_id < 0 || dev_id >= SLE_SERDEV_MAX_DEVS)
+		return;
+
+	d = &serdev_dev_table[dev_id];
+	if (!d->active)
+		return;
+
+	/* Wake up any pending sync command */
+	if (d->cmd_pending) {
+		d->cmd_pending = false;
+		complete(&d->cmd_done);
+	}
+
+	d->active = false;
+	d->sd = NULL;
+	pr_info("sparklink-serdev: dev %d unregistered\n", dev_id);
+}
+
+/**
+ * sle_serdev_dev_send_cmd - Send a DLI command (fire-and-forget).
+ * @dev_id: device id
+ * @opcode: DLI opcode
+ * @params: parameter buffer (may be NULL if plen==0)
+ * @plen:   parameter length
+ *
+ * Encodes an H4 command frame and writes it to the serial port.
+ */
+int sle_serdev_dev_send_cmd(int dev_id, u16 opcode,
+			    const u8 *params, int plen)
+{
+	struct sle_serdev_dev *d;
+	u8 buf[SLE_SERDEV_CMD_BUF];
+	int total;
+
+	if (dev_id < 0 || dev_id >= SLE_SERDEV_MAX_DEVS)
+		return -EINVAL;
+
+	d = &serdev_dev_table[dev_id];
+	if (!d->active || !d->sd)
+		return -ENODEV;
+
+	if (plen < 0 || plen > 255)
+		return -EINVAL;
+
+	/* Encode H4 command frame */
+	total = 4 + plen; /* type(1) + opcode(2) + len(1) + params */
+	buf[0] = SLE_H4_COMMAND;
+	buf[1] = (u8)(opcode & 0xFF);
+	buf[2] = (u8)((opcode >> 8) & 0xFF);
+	buf[3] = (u8)plen;
+	if (plen > 0 && params)
+		memcpy(&buf[4], params, plen);
+
+	return sle_serdev_write(d->sd, buf, total, SLE_SERDEV_CMD_TIMEOUT);
+}
+
+/**
+ * sle_serdev_dev_send_data - Send a DLI async data frame.
+ * @dev_id: device id
+ * @handle: connection handle
+ * @data:   payload
+ * @len:    payload length
+ */
+int sle_serdev_dev_send_data(int dev_id, u16 handle,
+			     const u8 *data, int len)
+{
+	struct sle_serdev_dev *d;
+	u8 buf[SLE_SERDEV_CMD_BUF];
+	int total;
+
+	if (dev_id < 0 || dev_id >= SLE_SERDEV_MAX_DEVS)
+		return -EINVAL;
+
+	d = &serdev_dev_table[dev_id];
+	if (!d->active || !d->sd)
+		return -ENODEV;
+
+	if (len < 0 || len > 255)
+		return -EINVAL;
+
+	/* Encode H4 async data frame */
+	total = 5 + len; /* type(1) + handle(2) + len(2) + payload */
+	buf[0] = SLE_H4_ASYNC;
+	buf[1] = (u8)(handle & 0xFF);
+	buf[2] = (u8)((handle >> 8) & 0xFF);
+	buf[3] = (u8)(len & 0xFF);
+	buf[4] = (u8)((len >> 8) & 0xFF);
+	if (len > 0 && data)
+		memcpy(&buf[5], data, len);
+
+	return sle_serdev_write(d->sd, buf, total, SLE_SERDEV_CMD_TIMEOUT);
+}
+
+/**
+ * sle_serdev_dev_feed_event - Feed a parsed event to sync command waiter.
+ * @dev_id:     device id
+ * @event_code: DLI event code
+ * @params:     event parameters
+ * @plen:       parameter length
+ *
+ * Called from Rust receive callback after H4 parsing. If a synchronous
+ * command is pending and the event carries a matching CommandComplete,
+ * the response is stored and the completion is signalled.
+ */
+void sle_serdev_dev_feed_event(int dev_id, u16 event_code,
+			       const u8 *params, int plen)
+{
+	struct sle_serdev_dev *d;
+	unsigned long flags;
+
+	if (dev_id < 0 || dev_id >= SLE_SERDEV_MAX_DEVS)
+		return;
+
+	d = &serdev_dev_table[dev_id];
+	if (!d->active)
+		return;
+
+	spin_lock_irqsave(&d->lock, flags);
+
+	if (d->cmd_pending && event_code == SLE_SERDEV_EVT_CMD_COMPLETE) {
+		/* Check opcode match: params[0..1] = opcode LE16 */
+		if (plen >= 2) {
+			u16 resp_op = (u16)params[0] | ((u16)params[1] << 8);
+
+			if (resp_op == d->cmd_pending_opcode) {
+				int copy = min(plen, (int)sizeof(d->cmd_resp));
+
+				memcpy(d->cmd_resp, params, copy);
+				d->cmd_resp_len = copy;
+				d->cmd_pending = false;
+				spin_unlock_irqrestore(&d->lock, flags);
+				complete(&d->cmd_done);
+				return;
+			}
+		}
+	}
+
+	spin_unlock_irqrestore(&d->lock, flags);
+}
+
+/**
+ * sle_serdev_dev_send_cmd_sync - Send command and wait for response.
+ * @dev_id:    device id
+ * @opcode:    DLI opcode
+ * @resp:      response buffer
+ * @resp_size: response buffer size
+ * @resp_len:  actual response length (output)
+ */
+int sle_serdev_dev_send_cmd_sync(int dev_id, u16 opcode,
+				 u8 *resp, int resp_size, int *resp_len)
+{
+	struct sle_serdev_dev *d;
+	unsigned long flags;
+	int ret;
+	unsigned long timeout;
+
+	if (dev_id < 0 || dev_id >= SLE_SERDEV_MAX_DEVS)
+		return -EINVAL;
+
+	d = &serdev_dev_table[dev_id];
+	if (!d->active || !d->sd)
+		return -ENODEV;
+
+	/* Set up pending command */
+	spin_lock_irqsave(&d->lock, flags);
+	reinit_completion(&d->cmd_done);
+	d->cmd_pending = true;
+	d->cmd_pending_opcode = opcode;
+	d->cmd_resp_len = 0;
+	spin_unlock_irqrestore(&d->lock, flags);
+
+	/* Send the command */
+	ret = sle_serdev_dev_send_cmd(dev_id, opcode, NULL, 0);
+	if (ret < 0) {
+		spin_lock_irqsave(&d->lock, flags);
+		d->cmd_pending = false;
+		spin_unlock_irqrestore(&d->lock, flags);
+		return ret;
+	}
+
+	/* Wait for response */
+	timeout = msecs_to_jiffies(SLE_SERDEV_CMD_TIMEOUT);
+	ret = wait_for_completion_interruptible_timeout(&d->cmd_done, timeout);
+	if (ret == 0) {
+		spin_lock_irqsave(&d->lock, flags);
+		d->cmd_pending = false;
+		spin_unlock_irqrestore(&d->lock, flags);
+		pr_err("sparklink-serdev: cmd 0x%04x timeout\n", opcode);
+		return -ETIMEDOUT;
+	}
+	if (ret < 0) {
+		spin_lock_irqsave(&d->lock, flags);
+		d->cmd_pending = false;
+		spin_unlock_irqrestore(&d->lock, flags);
+		return ret;
+	}
+
+	/* Copy response */
+	if (resp && resp_size > 0) {
+		int copy = min(d->cmd_resp_len, resp_size);
+
+		memcpy(resp, d->cmd_resp, copy);
+		if (resp_len)
+			*resp_len = copy;
+	}
+
+	return 0;
+}
+
+/**
+ * sle_serdev_dev_init_controller - Run controller init sequence over UART.
+ * @dev_id: device id
+ *
+ * Sends Reset, ReadLocalVersion, ReadMacAddr synchronously.
+ */
+int sle_serdev_dev_init_controller(int dev_id)
+{
+	struct sle_serdev_dev *d;
+	u8 resp[64];
+	int resp_len = 0;
+	int ret;
+
+	if (dev_id < 0 || dev_id >= SLE_SERDEV_MAX_DEVS)
+		return -EINVAL;
+
+	d = &serdev_dev_table[dev_id];
+	if (!d->active || !d->sd)
+		return -ENODEV;
+
+	/* Step 1: Reset */
+	ret = sle_serdev_dev_send_cmd_sync(dev_id, SLE_SERDEV_OP_RESET,
+					   resp, sizeof(resp), &resp_len);
+	if (ret) {
+		pr_err("sparklink-serdev: reset failed: %d\n", ret);
+		return ret;
+	}
+	pr_info("sparklink-serdev: controller reset OK\n");
+
+	/* Step 2: ReadLocalVersion */
+	ret = sle_serdev_dev_send_cmd_sync(dev_id, SLE_SERDEV_OP_READ_VER,
+					   resp, sizeof(resp), &resp_len);
+	if (ret) {
+		pr_warn("sparklink-serdev: read version failed: %d\n", ret);
+	} else if (resp_len >= 7) {
+		/* resp: opcode(2) + status(1) + version(4) */
+		d->fw_version = (u32)resp[3] | ((u32)resp[4] << 8) |
+				((u32)resp[5] << 16) | ((u32)resp[6] << 24);
+		pr_info("sparklink-serdev: fw version 0x%08x\n", d->fw_version);
+	}
+
+	/* Step 3: ReadMacAddr */
+	ret = sle_serdev_dev_send_cmd_sync(dev_id, SLE_SERDEV_OP_READ_MAC,
+					   resp, sizeof(resp), &resp_len);
+	if (ret) {
+		pr_warn("sparklink-serdev: read MAC failed: %d\n", ret);
+	} else if (resp_len >= 9) {
+		/* resp: opcode(2) + status(1) + mac(6) */
+		memcpy(d->mac_addr, &resp[3], 6);
+		pr_info("sparklink-serdev: MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
+			d->mac_addr[0], d->mac_addr[1], d->mac_addr[2],
+			d->mac_addr[3], d->mac_addr[4], d->mac_addr[5]);
+	}
+
+	return 0;
+}
+
+/**
+ * sle_serdev_dev_get_fw_version - Get cached firmware version.
+ * @dev_id: device id
+ */
+u32 sle_serdev_dev_get_fw_version(int dev_id)
+{
+	if (dev_id < 0 || dev_id >= SLE_SERDEV_MAX_DEVS)
+		return 0;
+	return serdev_dev_table[dev_id].fw_version;
+}
+
+/**
+ * sle_serdev_dev_get_mac - Get cached MAC address.
+ * @dev_id: device id
+ * @mac:    output buffer (6 bytes)
+ */
+int sle_serdev_dev_get_mac(int dev_id, u8 *mac)
+{
+	if (dev_id < 0 || dev_id >= SLE_SERDEV_MAX_DEVS || !mac)
+		return -EINVAL;
+	if (!serdev_dev_table[dev_id].active)
+		return -ENODEV;
+	memcpy(mac, serdev_dev_table[dev_id].mac_addr, 6);
+	return 0;
 }

@@ -105,6 +105,9 @@ extern "C" {
     ) -> i32;
     fn sle_usb_dev_start_evt(dev_id: i32) -> i32;
     fn sle_usb_dev_stop_evt(dev_id: i32);
+    fn sle_usb_dev_init_controller(dev_id: i32) -> i32;
+    fn sle_usb_dev_get_fw_version(dev_id: i32) -> u32;
+    fn sle_usb_dev_get_mac(dev_id: i32, mac: *mut u8) -> i32;
 }
 
 // ---------------------------------------------------------------------------
@@ -969,7 +972,7 @@ impl usb::Driver for SleUsbDriver {
         // In a real driver this would read the MAC address and firmware
         // version from the device via control transfers.
         let count = USB_DEV_COUNT.load(Ordering::Relaxed);
-        let addr = [0x5E, 0x00, 0x00, 0x00, 0x01, count as u8];
+        let mut addr = [0x5E, 0x00, 0x00, 0x00, 0x01, count as u8];
         let attach = SleAttachInfo::new(SleProtoId::UsbBulk, addr);
 
         let dev_id = super::sle_attach_device(&attach).unwrap_or(u16::MAX);
@@ -992,6 +995,31 @@ impl usb::Driver for SleUsbDriver {
                     "sparklink-usb: C device table register failed: {}\n",
                     reg_ret
                 );
+            } else {
+                // Run the init sequence: Reset → ReadLocalVersion → ReadMacAddr.
+                // Failures are non-fatal: the driver continues with placeholder
+                // values from sle_attach_device.
+                let init_ret = unsafe { sle_usb_dev_init_controller(dev_id as i32) };
+                if init_ret == 0 {
+                    // Read back real MAC address and firmware version
+                    // from the C device table and update the device info.
+                    let mut real_mac = [0u8; 6];
+                    let mac_ret = unsafe {
+                        sle_usb_dev_get_mac(dev_id as i32, real_mac.as_mut_ptr())
+                    };
+                    if mac_ret == 0 && real_mac != [0u8; 6] {
+                        // Use real MAC from controller
+                        addr = real_mac;
+                    }
+                    let real_fw = unsafe {
+                        sle_usb_dev_get_fw_version(dev_id as i32)
+                    };
+                    pr_info!(
+                        "sparklink-usb: init OK fw=0x{:08x} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
+                        real_fw,
+                        addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]
+                    );
+                }
             }
 
             // Switch the subsystem controller backend to USB.

@@ -334,6 +334,9 @@ int sle_usb_dev_send_cmd(int dev_id, u16 opcode, const u8 *params, int plen);
 int sle_usb_dev_send_data(int dev_id, u16 handle, const u8 *data, int len);
 int sle_usb_dev_start_evt(int dev_id);
 void sle_usb_dev_stop_evt(int dev_id);
+int sle_usb_dev_init_controller(int dev_id);
+u32 sle_usb_dev_get_fw_version(int dev_id);
+int sle_usb_dev_get_mac(int dev_id, u8 *mac);
 
 struct sle_usb_dev {
 	bool active;
@@ -342,6 +345,17 @@ struct sle_usb_dev {
 	struct sle_urb_ctx *evt_urb;  /* interrupt IN for events */
 	struct sle_urb_ctx *rx_urb;   /* bulk IN for data */
 	spinlock_t lock;
+	/* Discovered endpoint addresses (from endpoint descriptors) */
+	u8 ep_bulk_in;                /* e.g. 0x82 */
+	u8 ep_bulk_out;               /* e.g. 0x03 */
+	u8 ep_intr_in;                /* e.g. 0x81 */
+	u16 ep_bulk_in_size;          /* wMaxPacketSize */
+	u16 ep_intr_in_size;
+	u8 ep_intr_in_interval;       /* bInterval */
+	bool endpoints_valid;
+	/* Read-back from controller during init */
+	u8 mac_addr[6];
+	u32 fw_version;
 };
 
 static struct sle_usb_dev usb_dev_table[SLE_USB_MAX_DEVS];
@@ -358,6 +372,8 @@ int sle_usb_dev_register(int dev_id, void *intf_ptr)
 {
 	struct sle_usb_dev *d;
 	struct usb_interface *intf;
+	struct usb_endpoint_descriptor *bulk_in, *bulk_out, *int_in;
+	int ret;
 
 	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS || !intf_ptr)
 		return -EINVAL;
@@ -372,17 +388,50 @@ int sle_usb_dev_register(int dev_id, void *intf_ptr)
 	d->intf = intf;
 	d->udev = interface_to_usbdev(intf);
 
-	d->evt_urb = sle_usb_alloc_ctx(SLE_EVENT_BUF_SIZE);
+	/* Discover endpoints from the interface descriptor */
+	ret = usb_find_common_endpoints(intf->cur_altsetting,
+					&bulk_in, &bulk_out, &int_in, NULL);
+	if (ret) {
+		/* Endpoints not found — use hard-coded defaults (test mode) */
+		d->ep_bulk_in  = SLE_EP_DATA_IN;
+		d->ep_bulk_out = SLE_EP_CMD_OUT;
+		d->ep_intr_in  = SLE_EP_EVENT_IN;
+		d->ep_bulk_in_size  = 64;
+		d->ep_intr_in_size  = 16;
+		d->ep_intr_in_interval = 4;
+		d->endpoints_valid = false;
+		pr_warn("sparklink-usb: endpoints not found in descriptors, using defaults\n");
+	} else {
+		d->ep_bulk_in  = bulk_in->bEndpointAddress;
+		d->ep_bulk_out = bulk_out->bEndpointAddress;
+		d->ep_intr_in  = int_in->bEndpointAddress;
+		d->ep_bulk_in_size  = usb_endpoint_maxp(bulk_in);
+		d->ep_intr_in_size  = usb_endpoint_maxp(int_in);
+		d->ep_intr_in_interval = int_in->bInterval;
+		d->endpoints_valid = true;
+		pr_info("sparklink-usb: endpoints: bulk_in=0x%02x(%d) "
+			"bulk_out=0x%02x int_in=0x%02x(%d,ivl=%d)\n",
+			d->ep_bulk_in, d->ep_bulk_in_size,
+			d->ep_bulk_out,
+			d->ep_intr_in, d->ep_intr_in_size,
+			d->ep_intr_in_interval);
+	}
+
+	d->evt_urb = sle_usb_alloc_ctx(d->ep_intr_in_size > 0 ?
+					d->ep_intr_in_size : SLE_EVENT_BUF_SIZE);
 	if (!d->evt_urb)
 		return -ENOMEM;
 
-	d->rx_urb = sle_usb_alloc_ctx(SLE_RX_BUF_SIZE);
+	d->rx_urb = sle_usb_alloc_ctx(d->ep_bulk_in_size > 0 ?
+				       d->ep_bulk_in_size : SLE_RX_BUF_SIZE);
 	if (!d->rx_urb) {
 		sle_usb_free_ctx(d->evt_urb);
 		d->evt_urb = NULL;
 		return -ENOMEM;
 	}
 
+	memset(d->mac_addr, 0, 6);
+	d->fw_version = 0;
 	d->active = true;
 	return 0;
 }
@@ -458,7 +507,7 @@ int sle_usb_dev_send_cmd(int dev_id, u16 opcode, const u8 *params, int plen)
 		memcpy(&pkt[4], params, plen);
 	total = 4 + plen;
 
-	pipe = usb_sndbulkpipe(d->udev, SLE_EP_CMD_OUT);
+	pipe = usb_sndbulkpipe(d->udev, d->ep_bulk_out);
 	return usb_bulk_msg(d->udev, pipe, pkt, total,
 			    &actual_len, SLE_CMD_TIMEOUT_MS);
 }
@@ -505,7 +554,7 @@ int sle_usb_dev_send_data(int dev_id, u16 handle, const u8 *data, int len)
 		memcpy(&pkt[5], data, len);
 	total = 5 + len;
 
-	pipe = usb_sndbulkpipe(d->udev, SLE_EP_CMD_OUT);
+	pipe = usb_sndbulkpipe(d->udev, d->ep_bulk_out);
 	return usb_bulk_msg(d->udev, pipe, pkt, total,
 			    &actual_len, SLE_CMD_TIMEOUT_MS);
 }
@@ -528,7 +577,8 @@ int sle_usb_dev_start_evt(int dev_id)
 		return -ENODEV;
 
 	return sle_usb_submit_intr_in(d->evt_urb, d->udev,
-				      SLE_EP_EVENT_IN, NULL, 4);
+				      d->ep_intr_in, NULL,
+				      d->ep_intr_in_interval);
 }
 
 /**
@@ -545,4 +595,165 @@ void sle_usb_dev_stop_evt(int dev_id)
 	d = &usb_dev_table[dev_id];
 	if (d->evt_urb)
 		sle_usb_kill_ctx(d->evt_urb);
+}
+
+/* -----------------------------------------------------------------------
+ * Device initialisation sequence
+ *
+ * Performs the standard SLE controller bring-up over USB:
+ *   1. Send Reset command (opcode 0x0408)
+ *   2. Send ReadLocalVersion (opcode 0x0404) → extract fw_version
+ *   3. Send ReadMacAddr (opcode 0x0406) → extract MAC address
+ *
+ * The responses are received synchronously via the bulk IN endpoint.
+ * On success, fw_version and mac_addr fields of the device table entry
+ * are populated.
+ *
+ * DLI command packet format (T/XS 10003-2025):
+ *   [0]    = 0xA1 (Command)
+ *   [1..2] = opcode (LE16)
+ *   [3]    = param_len
+ *   [4..N] = params
+ *
+ * DLI event packet format:
+ *   [0..1] = event_code (LE16) — expect CmdComplete 0x0002
+ *   [2]    = param_len
+ *   [3..4] = opcode echo (LE16)
+ *   [5]    = status (0 = success)
+ *   [6..N] = return params
+ * ----------------------------------------------------------------------- */
+
+/* DLI opcodes from T/XS 10003-2025 */
+#define SLE_OP_READ_LOCAL_VERSION 0x0404
+#define SLE_OP_READ_MAC_ADDR      0x0406
+#define SLE_OP_RESET              0x0408
+
+/* DLI event: CommandComplete */
+#define SLE_EVT_CMD_COMPLETE      0x0002
+
+/* How long to wait for a command response (ms) */
+#define SLE_INIT_TIMEOUT_MS       3000
+
+static int sle_usb_send_cmd_sync(struct sle_usb_dev *d, u16 opcode,
+				 u8 *resp, int resp_size, int *resp_len)
+{
+	u8 cmd[4];
+	int actual_len;
+	unsigned int pipe_out, pipe_in;
+	int ret;
+
+	cmd[0] = DLI_PKT_COMMAND;
+	cmd[1] = (u8)(opcode & 0xFF);
+	cmd[2] = (u8)(opcode >> 8);
+	cmd[3] = 0; /* no parameters */
+
+	pipe_out = usb_sndbulkpipe(d->udev, d->ep_bulk_out);
+	ret = usb_bulk_msg(d->udev, pipe_out, cmd, 4,
+			   &actual_len, SLE_INIT_TIMEOUT_MS);
+	if (ret)
+		return ret;
+
+	/* Read response from bulk IN */
+	pipe_in = usb_rcvbulkpipe(d->udev, d->ep_bulk_in);
+	ret = usb_bulk_msg(d->udev, pipe_in, resp, resp_size,
+			   resp_len, SLE_INIT_TIMEOUT_MS);
+	return ret;
+}
+
+/**
+ * sle_usb_dev_init_controller - Run the SLE controller init sequence.
+ * @dev_id: device id (must be registered)
+ *
+ * Sends Reset, ReadLocalVersion, ReadMacAddr commands and stores the
+ * results in the per-device state. If the device does not respond (e.g.
+ * no real hardware attached), returns -ENODEV without failing the probe
+ * — the driver remains functional in degraded mode with placeholder
+ * values from sle_attach_device.
+ *
+ * Returns 0 on full success. Negative errno if any command fails.
+ * Partial success is allowed: fw_version and mac_addr are updated
+ * independently.
+ */
+int sle_usb_dev_init_controller(int dev_id)
+{
+	struct sle_usb_dev *d;
+	u8 resp[64];
+	int resp_len = 0;
+	int ret;
+
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
+		return -EINVAL;
+
+	d = &usb_dev_table[dev_id];
+	if (!d->active || !d->udev)
+		return -ENODEV;
+
+	/* Step 1: Reset controller */
+	ret = sle_usb_send_cmd_sync(d, SLE_OP_RESET, resp, sizeof(resp),
+				    &resp_len);
+	if (ret) {
+		pr_info("sparklink-usb: init reset failed (%d), "
+			"continuing with defaults\n", ret);
+		return ret;
+	}
+	pr_info("sparklink-usb: controller reset OK\n");
+
+	/* Step 2: ReadLocalVersion → fw_version at resp[6..9] */
+	ret = sle_usb_send_cmd_sync(d, SLE_OP_READ_LOCAL_VERSION,
+				    resp, sizeof(resp), &resp_len);
+	if (!ret && resp_len >= 10) {
+		/* Response: [evt_code:2][plen:1][opcode:2][status:1][version:4] */
+		if (resp[5] == 0) {
+			d->fw_version = le32_to_cpup((__le32 *)&resp[6]);
+			pr_info("sparklink-usb: fw_version=0x%08x\n",
+				d->fw_version);
+		}
+	}
+
+	/* Step 3: ReadMacAddr → 6-byte MAC at resp[6..11] */
+	ret = sle_usb_send_cmd_sync(d, SLE_OP_READ_MAC_ADDR,
+				    resp, sizeof(resp), &resp_len);
+	if (!ret && resp_len >= 12) {
+		if (resp[5] == 0) {
+			memcpy(d->mac_addr, &resp[6], 6);
+			pr_info("sparklink-usb: mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+				d->mac_addr[0], d->mac_addr[1],
+				d->mac_addr[2], d->mac_addr[3],
+				d->mac_addr[4], d->mac_addr[5]);
+		}
+	}
+
+	return 0;
+}
+
+/**
+ * sle_usb_dev_get_fw_version - Read back the firmware version.
+ * @dev_id: device id
+ *
+ * Returns the firmware version obtained during init, or 0.
+ */
+u32 sle_usb_dev_get_fw_version(int dev_id)
+{
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
+		return 0;
+	if (!usb_dev_table[dev_id].active)
+		return 0;
+	return usb_dev_table[dev_id].fw_version;
+}
+
+/**
+ * sle_usb_dev_get_mac - Read back the MAC address.
+ * @dev_id: device id
+ * @mac:    output buffer (6 bytes)
+ *
+ * Returns 0 on success.
+ */
+int sle_usb_dev_get_mac(int dev_id, u8 *mac)
+{
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS || !mac)
+		return -EINVAL;
+	if (!usb_dev_table[dev_id].active)
+		return -ENODEV;
+	memcpy(mac, usb_dev_table[dev_id].mac_addr, 6);
+	return 0;
 }

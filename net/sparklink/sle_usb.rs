@@ -1018,6 +1018,7 @@ impl usb::Driver for SleUsbDriver {
         let attach = SleAttachInfo::new(SleProtoId::UsbBulk, addr);
 
         let dev_id = super::sle_attach_device(&attach).unwrap_or(u16::MAX);
+        let mut fw_version: u32 = 0;
         if dev_id != u16::MAX {
             pr_info!("sparklink-usb: attached as sle{}\n", dev_id);
 
@@ -1053,19 +1054,34 @@ impl usb::Driver for SleUsbDriver {
                         // Use real MAC from controller
                         addr = real_mac;
                     }
-                    let real_fw = unsafe {
+                    fw_version = unsafe {
                         sle_usb_dev_get_fw_version(dev_id as i32)
                     };
                     pr_info!(
                         "sparklink-usb: init OK fw=0x{:08x} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
-                        real_fw,
+                        fw_version,
                         addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]
                     );
+
+                    // Attempt firmware download (non-fatal if firmware
+                    // blob is absent or already programmed).
+                    let fw_name = kernel::c_str!("sparklink/sle_usb_v1.bin");
+                    let kern_dev: &kernel::device::Device<kernel::device::Core> = interface.as_ref();
+                    match super::sle_fw::load_usb_firmware(dev_id, fw_name, kern_dev) {
+                        Ok(r) => pr_info!(
+                            "sparklink-usb: firmware loaded ({} bytes)\n",
+                            r.size
+                        ),
+                        Err(_) => pr_debug!(
+                            "sparklink-usb: firmware load skipped\n"
+                        ),
+                    }
                 }
             }
 
-            // Switch the subsystem controller backend to USB.
-            super::sle_switch_controller_usb(dev_id, addr);
+            // Switch the subsystem controller backend to USB and sync
+            // the device registry with real hardware info.
+            super::sle_switch_controller_usb(dev_id, addr, fw_version);
         }
 
         try_pin_init!(Self { dev_id })

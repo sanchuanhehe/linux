@@ -1672,11 +1672,13 @@ pub(crate) fn sle_detach_device(dev_id: u16) {
 /// Called from USB probe after sle_attach_device and C-side registration
 /// succeed. This replaces the current controller (typically Virtual) with
 /// a USB controller that dispatches commands through the C FFI layer.
-pub(crate) fn sle_switch_controller_usb(dev_id: u16, addr: [u8; 6]) {
+pub(crate) fn sle_switch_controller_usb(dev_id: u16, addr: [u8; 6], fw_version: u32) {
     let mut ss = SUBSYSTEM.lock();
     if let Some(ss) = ss.as_mut() {
         ss.controller = sle_dli::ControllerBackend::new_usb(addr, dev_id);
         ss.active_dev_id = Some(dev_id);
+        // Sync device model with real hardware info from probe.
+        let _ = ss.dev_registry.update_hw_info(dev_id, addr, fw_version);
         pr_info!(
             "sparklink: controller switched to USB (sle{})\n",
             dev_id
@@ -1712,11 +1714,13 @@ pub(crate) fn sle_resume_device(dev_id: u16) {
 ///
 /// Called from serdev probe after sle_attach_device and C-side registration
 /// succeed.
-pub(crate) fn sle_switch_controller_serdev(dev_id: u16, addr: [u8; 6]) {
+pub(crate) fn sle_switch_controller_serdev(dev_id: u16, addr: [u8; 6], fw_version: u32) {
     let mut ss = SUBSYSTEM.lock();
     if let Some(ss) = ss.as_mut() {
         ss.controller = sle_dli::ControllerBackend::new_serdev(addr, dev_id);
         ss.active_dev_id = Some(dev_id);
+        // Sync device model with real hardware info from probe.
+        let _ = ss.dev_registry.update_hw_info(dev_id, addr, fw_version);
         pr_info!(
             "sparklink: controller switched to serdev (sle{})\n",
             dev_id

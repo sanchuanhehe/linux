@@ -168,6 +168,12 @@ impl SleDev {
         self.max_connections
     }
 
+    /// Update hardware info read back during probe (MAC, firmware version).
+    pub(crate) fn update_hw_info(&mut self, addr: [u8; 6], fw_version: u32) {
+        self.addr = addr;
+        self.fw_version = fw_version;
+    }
+
     // -- Flag operations ---------------------------------------------------
 
     /// Test whether a flag is set.
@@ -297,6 +303,16 @@ impl SleDevRegistry {
     /// Iterate over all registered devices.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &SleDev> {
         self.slots.iter().filter_map(|s| s.as_ref())
+    }
+
+    /// Update hardware-read metadata for a registered device.
+    ///
+    /// Called after USB/serdev probe reads the real MAC and firmware version
+    /// from the controller, so that the registry reflects actual hardware state.
+    pub(crate) fn update_hw_info(&mut self, id: u16, addr: [u8; 6], fw_version: u32) {
+        if let Some(dev) = self.get_mut(id) {
+            dev.update_hw_info(addr, fw_version);
+        }
     }
 
     /// Return the ID allocation bitmask.

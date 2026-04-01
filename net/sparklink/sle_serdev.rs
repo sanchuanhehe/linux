@@ -502,7 +502,7 @@ pub(crate) fn serdev_probe(
             );
         }
 
-        // Read back MAC address from controller.
+        // Read back MAC address and firmware version from controller.
         let mut real_addr = addr;
         let mut mac_buf = [0u8; 6];
         if unsafe { sle_serdev_dev_get_mac(dev_id as i32, mac_buf.as_mut_ptr()) } == 0 {
@@ -515,9 +515,11 @@ pub(crate) fn serdev_probe(
                 );
             }
         }
+        let fw_version = unsafe { sle_serdev_dev_get_fw_version(dev_id as i32) };
 
-        // Switch subsystem controller to serdev backend.
-        super::sle_switch_controller_serdev(dev_id, real_addr);
+        // Switch subsystem controller to serdev backend and sync
+        // the device registry with real hardware info.
+        super::sle_switch_controller_serdev(dev_id, real_addr, fw_version);
     }
 
     Ok(SleSerdevData::new(dev_id, init_speed, oper_speed))

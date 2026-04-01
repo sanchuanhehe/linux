@@ -32,6 +32,7 @@ use super::sle_dli::{
     DliPacketType, SleBus, SleController, SleControllerInfo, SleEvent, SleFeature,
     SleOpcode, SleStatus,
 };
+use super::sle_transport::{SleAttachInfo, SleProtoId};
 
 // ---------------------------------------------------------------------------
 // USB descriptor class / subclass / protocol
@@ -639,7 +640,8 @@ kernel::usb_device_table!(
 /// Per-device state stored as driver data during probe.
 #[pin_data]
 pub(crate) struct SleUsbDriver {
-    _dummy: (),
+    /// Allocated device id from the SleDev registry (u16::MAX = not attached).
+    dev_id: u16,
 }
 
 impl usb::Driver for SleUsbDriver {
@@ -653,12 +655,31 @@ impl usb::Driver for SleUsbDriver {
     ) -> impl PinInit<Self, Error> {
         pr_info!("sparklink-usb: SLE controller discovered\n");
         USB_DEV_COUNT.fetch_add(1, Ordering::Relaxed);
-        try_pin_init!(Self { _dummy: () })
+
+        // Build attach info for the transport framework.
+        // In a real driver this would read the MAC address and firmware
+        // version from the device via control transfers.
+        let count = USB_DEV_COUNT.load(Ordering::Relaxed);
+        let addr = [0x5E, 0x00, 0x00, 0x00, 0x01, count as u8];
+        let attach = SleAttachInfo::new(SleProtoId::UsbBulk, addr);
+
+        let dev_id = super::sle_attach_device(&attach).unwrap_or(u16::MAX);
+        if dev_id != u16::MAX {
+            pr_info!("sparklink-usb: attached as sle{}\n", dev_id);
+        }
+
+        try_pin_init!(Self { dev_id })
     }
 
-    fn disconnect(_interface: &usb::Interface<device::Core>, _data: Pin<&Self>) {
+    fn disconnect(_interface: &usb::Interface<device::Core>, data: Pin<&Self>) {
         pr_info!("sparklink-usb: SLE controller removed\n");
         USB_DEV_COUNT.fetch_sub(1, Ordering::Relaxed);
+
+        let dev_id = data.dev_id;
+        if dev_id != u16::MAX {
+            super::sle_detach_device(dev_id);
+            pr_info!("sparklink-usb: detached sle{}\n", dev_id);
+        }
     }
 }
 

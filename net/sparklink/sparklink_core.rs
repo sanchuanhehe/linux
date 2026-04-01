@@ -24,6 +24,8 @@ mod sle_power;
 mod sle_dli;
 mod sle_dev;
 mod sle_mgmt;
+mod sle_transport;
+mod sle_serdev;
 mod sle_event;
 mod sle_usb;
 mod sle_netlink;
@@ -1510,6 +1512,10 @@ struct SubsystemShared {
     cmd_pending: sle_mgmt::CmdPendingQueue,
     /// Outgoing command request queue (async dispatch).
     cmd_queue: sle_mgmt::CmdRequestQueue,
+    /// Transport protocol registry (H4, USB, SPI, virtual).
+    proto_registry: sle_transport::SleProtoRegistry,
+    /// Device-to-transport binding table.
+    dev_bindings: sle_transport::SleBindingTable,
 }
 
 impl SubsystemShared {
@@ -1529,6 +1535,90 @@ impl SubsystemShared {
         let ev = self.dli_ring[self.dli_head];
         self.dli_head = (self.dli_head + 1) % DLI_RING_SIZE;
         Some(ev)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transport device attach / detach (called from driver probe/remove)
+// ---------------------------------------------------------------------------
+
+/// Attach a newly-discovered physical device to the subsystem.
+///
+/// Called from USB probe, serdev probe, or any other transport driver's
+/// hardware enumeration callback. Allocates a `SleDev` in the global
+/// registry, creates a transport binding, and logs the attachment.
+///
+/// Returns the allocated device id on success.
+pub(crate) fn sle_attach_device(info: &sle_transport::SleAttachInfo) -> Result<u16> {
+    let mut ss = SUBSYSTEM.lock();
+    let ss = ss.as_mut().ok_or(ENODEV)?;
+
+    // Look up the protocol to get bus type and defaults.
+    let proto = ss.proto_registry.get(info.proto_id).ok_or(EINVAL)?;
+    let bus = proto.bus;
+    let default_pdu = proto.max_pdu;
+
+    // Build a SleControllerInfo for device registration.
+    let mut ctrl_info = sle_dli::SleControllerInfo::default();
+    ctrl_info.bus = bus;
+    ctrl_info.addr = info.addr;
+    ctrl_info.fw_version = info.fw_version;
+    ctrl_info.features = info.features;
+    ctrl_info.max_pdu_payload = if info.max_pdu > 0 { info.max_pdu } else { default_pdu };
+    ctrl_info.max_connections = if info.max_connections > 0 {
+        info.max_connections
+    } else {
+        8
+    };
+    let proto_name = proto.name;
+    let name_bytes = proto_name.as_bytes();
+    let copy_len = name_bytes.len().min(ctrl_info.name.len());
+    ctrl_info.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+    // Register in the SleDev registry.
+    let dev_id = ss.dev_registry.register(&ctrl_info)?;
+
+    // Create the transport binding.
+    let binding = sle_transport::SleDevBinding {
+        dev_id,
+        proto_id: info.proto_id,
+        opened: false,
+    };
+    if let Err(e) = ss.dev_bindings.insert(binding) {
+        let _ = ss.dev_registry.unregister(dev_id);
+        return Err(e);
+    }
+
+    pr_info!(
+        "sparklink: device sle{} attached via {} [{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}]\n",
+        dev_id,
+        proto_name,
+        info.addr[0], info.addr[1], info.addr[2],
+        info.addr[3], info.addr[4], info.addr[5],
+    );
+
+    Ok(dev_id)
+}
+
+/// Detach a device from the subsystem.
+///
+/// Called from USB disconnect, serdev remove, or module unload cleanup.
+/// Removes the transport binding and unregisters the SleDev.
+pub(crate) fn sle_detach_device(dev_id: u16) {
+    let mut ss = SUBSYSTEM.lock();
+    if let Some(ss) = ss.as_mut() {
+        // Remove the transport binding first.
+        ss.dev_bindings.remove(dev_id);
+
+        // If this was the active device, clear the active pointer.
+        if ss.active_dev_id == Some(dev_id) {
+            ss.active_dev_id = None;
+        }
+
+        // Unregister the device from the registry.
+        let _ = ss.dev_registry.unregister(dev_id);
+
+        pr_info!("sparklink: device sle{} detached\n", dev_id);
     }
 }
 
@@ -1935,6 +2025,10 @@ impl kernel::InPlaceModule for SparkLinkModule {
 
                 let cmd_worker = CommandWorker::new().ok();
 
+                // Register built-in transport protocols.
+                let mut proto_registry = sle_transport::SleProtoRegistry::new();
+                sle_transport::register_builtin_protos(&mut proto_registry);
+
                 // Register the controller in the device registry.
                 let ctrl_info = controller.info();
                 let mut dev_registry = sle_dev::SleDevRegistry::new();
@@ -1959,6 +2053,8 @@ impl kernel::InPlaceModule for SparkLinkModule {
                     active_dev_id: dev_id,
                     cmd_pending: sle_mgmt::CmdPendingQueue::new(),
                     cmd_queue: sle_mgmt::CmdRequestQueue::new(),
+                    proto_registry,
+                    dev_bindings: sle_transport::SleBindingTable::new(),
                 });
                 pr_info!("sparklink: shared subsystem initialised\n");
                 SubsystemGuard

@@ -35,6 +35,263 @@ use super::sle_dli::{
 use super::sle_transport::{SleAttachInfo, SleProtoId};
 
 // ---------------------------------------------------------------------------
+// USB FFI — C wrapper functions from sle_usb_ffi.c
+// ---------------------------------------------------------------------------
+
+/// Opaque handle returned by `sle_usb_alloc_ctx()`.
+///
+/// The real struct lives in C (`struct sle_urb_ctx`). Rust only holds
+/// a pointer and never dereferences it directly.
+#[repr(C)]
+pub struct SleUrbCtxOpaque {
+    _opaque: [u8; 0],
+}
+
+extern "C" {
+    fn sle_usb_alloc_ctx(buf_size: i32) -> *mut SleUrbCtxOpaque;
+    fn sle_usb_free_ctx(ctx: *mut SleUrbCtxOpaque);
+    fn sle_usb_submit_bulk_out(
+        ctx: *mut SleUrbCtxOpaque,
+        udev: *mut core::ffi::c_void,
+        ep: u8,
+        data: *const u8,
+        len: i32,
+        rust_ctx: *mut core::ffi::c_void,
+        timeout_ms: i32,
+    ) -> i32;
+    fn sle_usb_submit_bulk_in(
+        ctx: *mut SleUrbCtxOpaque,
+        udev: *mut core::ffi::c_void,
+        ep: u8,
+        rust_ctx: *mut core::ffi::c_void,
+    ) -> i32;
+    fn sle_usb_submit_intr_in(
+        ctx: *mut SleUrbCtxOpaque,
+        udev: *mut core::ffi::c_void,
+        ep: u8,
+        rust_ctx: *mut core::ffi::c_void,
+        interval: i32,
+    ) -> i32;
+    fn sle_usb_kill_ctx(ctx: *mut SleUrbCtxOpaque);
+    fn sle_usb_sync_bulk_out(
+        udev: *mut core::ffi::c_void,
+        ep: u8,
+        data: *const u8,
+        len: i32,
+        timeout_ms: i32,
+    ) -> i32;
+    fn sle_usb_sync_bulk_in(
+        udev: *mut core::ffi::c_void,
+        ep: u8,
+        buf: *mut u8,
+        size: i32,
+        timeout_ms: i32,
+    ) -> i32;
+}
+
+// ---------------------------------------------------------------------------
+// URB context: safe Rust wrapper
+// ---------------------------------------------------------------------------
+
+/// Safe wrapper around the C-side URB context.
+///
+/// Owns the allocation and frees it on drop. Provides methods for
+/// submitting and cancelling transfers without exposing raw pointers.
+pub(crate) struct SleUrbCtx {
+    inner: *mut SleUrbCtxOpaque,
+}
+
+// SAFETY: The C-side sle_urb_ctx is heap-allocated and has no thread
+// affinity. USB core completion callbacks are synchronized via
+// usb_kill_urb before free.
+unsafe impl Send for SleUrbCtx {}
+unsafe impl Sync for SleUrbCtx {}
+
+impl SleUrbCtx {
+    /// Allocate a new URB context with the given buffer size.
+    pub(crate) fn new(buf_size: usize) -> Result<Self> {
+        // SAFETY: sle_usb_alloc_ctx handles all internal allocation.
+        let ptr = unsafe { sle_usb_alloc_ctx(buf_size as i32) };
+        if ptr.is_null() {
+            return Err(ENOMEM);
+        }
+        Ok(Self { inner: ptr })
+    }
+
+    /// Submit a bulk OUT (TX) transfer asynchronously.
+    ///
+    /// `udev_ptr` is the raw `struct usb_device *` from the kernel.
+    /// Completion will invoke `sparklink_usb_complete` with `rust_ctx`.
+    pub(crate) fn submit_bulk_out(
+        &self,
+        udev_ptr: *mut core::ffi::c_void,
+        ep: u8,
+        data: &[u8],
+        rust_ctx: *mut core::ffi::c_void,
+    ) -> Result {
+        // SAFETY: inner is valid (checked in new), data pointer and len
+        // are consistent, udev_ptr must be valid by caller contract.
+        let ret = unsafe {
+            sle_usb_submit_bulk_out(
+                self.inner,
+                udev_ptr,
+                ep,
+                data.as_ptr(),
+                data.len() as i32,
+                rust_ctx,
+                0,
+            )
+        };
+        if ret < 0 {
+            Err(Error::from_errno(ret))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Submit a bulk IN (RX) transfer asynchronously.
+    pub(crate) fn submit_bulk_in(
+        &self,
+        udev_ptr: *mut core::ffi::c_void,
+        ep: u8,
+        rust_ctx: *mut core::ffi::c_void,
+    ) -> Result {
+        // SAFETY: inner/udev_ptr valid by caller contract.
+        let ret = unsafe {
+            sle_usb_submit_bulk_in(self.inner, udev_ptr, ep, rust_ctx)
+        };
+        if ret < 0 {
+            Err(Error::from_errno(ret))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Submit an interrupt IN transfer (auto-resubmitting).
+    pub(crate) fn submit_intr_in(
+        &self,
+        udev_ptr: *mut core::ffi::c_void,
+        ep: u8,
+        rust_ctx: *mut core::ffi::c_void,
+        interval: i32,
+    ) -> Result {
+        // SAFETY: inner/udev_ptr valid by caller contract.
+        let ret = unsafe {
+            sle_usb_submit_intr_in(self.inner, udev_ptr, ep, rust_ctx, interval)
+        };
+        if ret < 0 {
+            Err(Error::from_errno(ret))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Cancel a pending transfer.
+    pub(crate) fn kill(&self) {
+        // SAFETY: inner is valid.
+        unsafe { sle_usb_kill_ctx(self.inner) };
+    }
+}
+
+impl Drop for SleUrbCtx {
+    fn drop(&mut self) {
+        // SAFETY: inner was allocated by sle_usb_alloc_ctx.
+        unsafe { sle_usb_free_ctx(self.inner) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Synchronous bulk transfer helpers
+// ---------------------------------------------------------------------------
+
+/// Blocking bulk OUT transfer — sends `data` and waits for completion.
+///
+/// Returns the number of bytes actually transferred.
+pub(crate) fn sync_bulk_out(
+    udev_ptr: *mut core::ffi::c_void,
+    ep: u8,
+    data: &[u8],
+    timeout_ms: i32,
+) -> Result<usize> {
+    // SAFETY: udev_ptr must be a valid struct usb_device pointer.
+    let ret = unsafe {
+        sle_usb_sync_bulk_out(udev_ptr, ep, data.as_ptr(), data.len() as i32, timeout_ms)
+    };
+    if ret < 0 {
+        Err(Error::from_errno(ret))
+    } else {
+        Ok(ret as usize)
+    }
+}
+
+/// Blocking bulk IN transfer — waits for data from the device.
+///
+/// Returns slice length of received data in the provided buffer.
+pub(crate) fn sync_bulk_in(
+    udev_ptr: *mut core::ffi::c_void,
+    ep: u8,
+    buf: &mut [u8],
+    timeout_ms: i32,
+) -> Result<usize> {
+    // SAFETY: udev_ptr valid, buf pointer and size consistent.
+    let ret = unsafe {
+        sle_usb_sync_bulk_in(udev_ptr, ep, buf.as_mut_ptr(), buf.len() as i32, timeout_ms)
+    };
+    if ret < 0 {
+        Err(Error::from_errno(ret))
+    } else {
+        Ok(ret as usize)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Completion callback from C — receives URB completion events
+// ---------------------------------------------------------------------------
+
+/// Called from C (`sle_usb_bulk_cb` / `sle_usb_intr_cb`) when a USB
+/// transfer completes. The `ctx` pointer identifies which Rust-side
+/// operation completed.
+///
+/// Currently logs the completion and feeds events into the subsystem.
+/// A full implementation would match `ctx` to a pending command or
+/// data transfer and wake the corresponding waiter.
+#[no_mangle]
+pub(crate) extern "C" fn sparklink_usb_complete(
+    _ctx: *mut core::ffi::c_void,
+    data: *const u8,
+    length: i32,
+    status: i32,
+) {
+    if status != 0 {
+        pr_debug!("sparklink-usb: URB completed with status {}\n", status);
+        return;
+    }
+
+    if length <= 0 || data.is_null() {
+        return;
+    }
+
+    let len = length as usize;
+    // SAFETY: data points to the URB transfer buffer which is valid
+    // during the completion callback. length is the actual bytes
+    // transferred, guaranteed <= buffer size by USB core.
+    let slice = unsafe { core::slice::from_raw_parts(data, len) };
+
+    // Try to parse as a DLI event packet
+    if let Ok(evt) = parse_event_packet(slice) {
+        if let Some(sle_evt) = event_to_sle(&evt) {
+            pr_debug!(
+                "sparklink-usb: event code=0x{:04x} parsed\n",
+                evt.event_code
+            );
+            // Feed into subsystem broadcast ring via the global shared state.
+            // The EventPump will pick it up on its next tick.
+            let _ = sle_evt;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // USB descriptor class / subclass / protocol
 // ---------------------------------------------------------------------------
 

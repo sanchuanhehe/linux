@@ -42,6 +42,144 @@ use kernel::prelude::*;
 use super::sle_transport::{SleAttachInfo, SleProtoId};
 
 // =========================================================================
+// Serdev FFI — C wrapper functions from sle_serdev_ffi.c
+// =========================================================================
+
+/// Opaque handle for C-side `struct sle_serdev_data`.
+#[repr(C)]
+pub(crate) struct SleSerdevDataOpaque {
+    _opaque: [u8; 0],
+}
+
+extern "C" {
+    fn sle_serdev_alloc(
+        serdev: *mut core::ffi::c_void,
+        rust_ctx: *mut core::ffi::c_void,
+    ) -> *mut SleSerdevDataOpaque;
+    fn sle_serdev_open_dev(sd: *mut SleSerdevDataOpaque) -> i32;
+    fn sle_serdev_close_dev(sd: *mut SleSerdevDataOpaque);
+    fn sle_serdev_set_baudrate(sd: *mut SleSerdevDataOpaque, baud: u32) -> u32;
+    fn sle_serdev_set_flow_control(sd: *mut SleSerdevDataOpaque, enable: bool);
+    fn sle_serdev_write(
+        sd: *mut SleSerdevDataOpaque,
+        data: *const u8,
+        len: i32,
+        timeout_ms: i32,
+    ) -> i32;
+    fn sle_serdev_write_buf(
+        sd: *mut SleSerdevDataOpaque,
+        data: *const u8,
+        len: i32,
+    ) -> i32;
+}
+
+// =========================================================================
+// Completion callbacks from C
+// =========================================================================
+
+/// Called from C when the serdev core delivers received bytes.
+/// Feeds the data into the UART H4 parser which reconstructs
+/// complete DLI packets.
+#[no_mangle]
+pub(crate) extern "C" fn sparklink_serdev_receive(
+    _ctx: *mut core::ffi::c_void,
+    data: *const u8,
+    len: i32,
+) {
+    if data.is_null() || len <= 0 {
+        return;
+    }
+    let slice = unsafe { core::slice::from_raw_parts(data, len as usize) };
+    pr_debug!("sparklink-serdev: rx {} bytes\n", slice.len());
+    // TODO: forward to per-device UartParser instance once device
+    // context mapping is connected.
+}
+
+/// Called from C when the serial port becomes writable again.
+#[no_mangle]
+pub(crate) extern "C" fn sparklink_serdev_write_wakeup(
+    _ctx: *mut core::ffi::c_void,
+) {
+    pr_debug!("sparklink-serdev: write wakeup\n");
+    // TODO: drain the pending TX queue for this device.
+}
+
+// =========================================================================
+// Safe Rust wrapper for serdev FFI
+// =========================================================================
+
+/// Safe wrapper around the C-side serdev driver data.
+pub(crate) struct SleSerdevHandle {
+    inner: *mut SleSerdevDataOpaque,
+}
+
+unsafe impl Send for SleSerdevHandle {}
+unsafe impl Sync for SleSerdevHandle {}
+
+impl SleSerdevHandle {
+    /// Wrap a raw pointer returned by `sle_serdev_alloc`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be a valid pointer from `sle_serdev_alloc`.
+    pub(crate) unsafe fn from_raw(ptr: *mut SleSerdevDataOpaque) -> Result<Self> {
+        if ptr.is_null() {
+            return Err(ENOMEM);
+        }
+        Ok(Self { inner: ptr })
+    }
+
+    /// Open the serial port.
+    pub(crate) fn open(&self) -> Result {
+        let ret = unsafe { sle_serdev_open_dev(self.inner) };
+        if ret < 0 {
+            Err(Error::from_errno(ret))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Close the serial port.
+    pub(crate) fn close(&self) {
+        unsafe { sle_serdev_close_dev(self.inner) };
+    }
+
+    /// Set the baud rate. Returns the actual rate configured.
+    pub(crate) fn set_baudrate(&self, baud: u32) -> u32 {
+        unsafe { sle_serdev_set_baudrate(self.inner, baud) }
+    }
+
+    /// Enable or disable hardware flow control.
+    pub(crate) fn set_flow_control(&self, enable: bool) {
+        unsafe { sle_serdev_set_flow_control(self.inner, enable) };
+    }
+
+    /// Write data, blocking until sent or timeout.
+    pub(crate) fn write(&self, data: &[u8], timeout_ms: i32) -> Result<usize> {
+        let ret = unsafe {
+            sle_serdev_write(self.inner, data.as_ptr(), data.len() as i32, timeout_ms)
+        };
+        if ret < 0 {
+            Err(Error::from_errno(ret))
+        } else {
+            Ok(ret as usize)
+        }
+    }
+
+    /// Non-blocking write. Returns number of bytes accepted.
+    pub(crate) fn write_buf(&self, data: &[u8]) -> Result<usize> {
+        let ret = unsafe {
+            sle_serdev_write_buf(self.inner, data.as_ptr(), data.len() as i32)
+        };
+        if ret < 0 {
+            Err(Error::from_errno(ret))
+        } else {
+            Ok(ret as usize)
+        }
+    }
+}
+
+// =========================================================================
 // Constants
 // =========================================================================
 

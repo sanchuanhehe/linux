@@ -15,6 +15,8 @@
 # Usage:
 #   ./run_qemu_test.sh            # Run tests
 #   ./run_qemu_test.sh --verbose  # Show full QEMU console output
+#   QEMU_BIN=/path/to/custom/qemu-system-x86_64 ./run_qemu_test.sh
+#   SLE_DLI_DEVICE=1 ./run_qemu_test.sh  # Enable usb-sle-dli device
 
 set -euo pipefail
 
@@ -23,6 +25,8 @@ LINUX_SRC="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 KBUILD="${KBUILD:-$LINUX_SRC/build}"
 BZIMAGE="$KBUILD/arch/x86/boot/bzImage"
 WORKDIR="$SCRIPT_DIR/.qemu_test"
+QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
+SLE_DLI_DEVICE="${SLE_DLI_DEVICE:-0}"
 
 VERBOSE=0
 if [[ "${1:-}" == "--verbose" ]]; then
@@ -188,8 +192,26 @@ if [[ -r /dev/kvm ]]; then
     KVM_OPTS="-enable-kvm"
 fi
 
+# Detect custom QEMU with usb-sle-dli support
+SLE_USB_OPTS=""
+CUSTOM_QEMU_DIR="$SCRIPT_DIR/qemu-sle-dli/bin/bin"
+if [[ "$SLE_DLI_DEVICE" == "1" ]]; then
+    # Use custom QEMU if built, otherwise warn
+    if [[ -x "$CUSTOM_QEMU_DIR/qemu-system-x86_64" ]]; then
+        QEMU_BIN="$CUSTOM_QEMU_DIR/qemu-system-x86_64"
+        SLE_USB_OPTS="-device qemu-xhci,id=xhci -device usb-sle-dli,bus=xhci.0"
+        info "Using custom QEMU with usb-sle-dli device"
+    elif "$QEMU_BIN" -device help 2>&1 | grep -q usb-sle-dli; then
+        SLE_USB_OPTS="-device qemu-xhci,id=xhci -device usb-sle-dli,bus=xhci.0"
+        info "System QEMU supports usb-sle-dli"
+    else
+        warn "usb-sle-dli device not available; running without virtual controller"
+        warn "Build custom QEMU: cd qemu-sle-dli && ./build-qemu.sh"
+    fi
+fi
+
 set +e
-timeout "$TIMEOUT" qemu-system-x86_64 \
+timeout "$TIMEOUT" "$QEMU_BIN" \
     -kernel "$BZIMAGE" \
     -initrd "$WORKDIR/initramfs.cpio.gz" \
     -append "console=ttyS0 earlyprintk=serial panic=1 oops=panic" \
@@ -199,6 +221,7 @@ timeout "$TIMEOUT" qemu-system-x86_64 \
     -m 256M \
     -smp 2 \
     $KVM_OPTS \
+    $SLE_USB_OPTS \
     2>/dev/null
 QEMU_EXIT=$?
 set -e

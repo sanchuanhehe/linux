@@ -148,7 +148,7 @@ void sle_usb_free_ctx(struct sle_urb_ctx *ctx)
  * sle_usb_submit_bulk_out - Submit a bulk OUT transfer (host to device).
  * @ctx:       URB context
  * @udev:      USB device
- * @ep:        endpoint address (e.g. 0x03)
+ * @ep:        endpoint address (e.g. 0x12)
  * @data:      payload to send
  * @len:       payload length
  * @rust_ctx:  opaque pointer passed to completion callback
@@ -191,7 +191,7 @@ int sle_usb_submit_bulk_out(struct sle_urb_ctx *ctx,
  * sle_usb_submit_bulk_in - Submit a bulk IN transfer (device to host).
  * @ctx:       URB context
  * @udev:      USB device
- * @ep:        endpoint address (e.g. 0x82)
+ * @ep:        endpoint address (e.g. 0x92)
  * @rust_ctx:  opaque pointer passed to completion callback
  *
  * Returns 0 on success, negative errno on failure.
@@ -219,7 +219,7 @@ int sle_usb_submit_bulk_in(struct sle_urb_ctx *ctx,
  * sle_usb_submit_intr_in - Submit an interrupt IN transfer (events).
  * @ctx:       URB context
  * @udev:      USB device
- * @ep:        endpoint address (e.g. 0x81)
+ * @ep:        endpoint address (e.g. 0x91)
  * @rust_ctx:  opaque pointer passed to completion callback
  * @interval:  polling interval (from endpoint descriptor)
  *
@@ -313,10 +313,10 @@ int sle_usb_sync_bulk_in(struct usb_device *udev, u8 ep,
 #define DLI_PKT_COMMAND    0xA1
 #define DLI_PKT_ASYNC_DATA 0xA3
 
-/* Endpoint addresses (host perspective) */
-#define SLE_EP_EVENT_IN   0x81
-#define SLE_EP_DATA_IN    0x82
-#define SLE_EP_CMD_OUT    0x03
+/* Endpoint addresses (host perspective, T/XS 10003-2025 Table 3) */
+#define SLE_EP_EVENT_IN   0x91
+#define SLE_EP_DATA_IN    0x92
+#define SLE_EP_CMD_OUT    0x12
 
 /* Transfer buffer sizes */
 #define SLE_CMD_BUF_SIZE  260  /* 4-byte header + 255 params + 1 spare */
@@ -351,9 +351,9 @@ struct sle_usb_dev {
 	struct sle_urb_ctx *rx_urb;   /* bulk IN for data */
 	spinlock_t lock;
 	/* Discovered endpoint addresses (from endpoint descriptors) */
-	u8 ep_bulk_in;                /* e.g. 0x82 */
-	u8 ep_bulk_out;               /* e.g. 0x03 */
-	u8 ep_intr_in;                /* e.g. 0x81 */
+	u8 ep_bulk_in;                /* 0x92 per T/XS 10003 */
+	u8 ep_bulk_out;               /* 0x12 per T/XS 10003 */
+	u8 ep_intr_in;                /* 0x91 per T/XS 10003 */
 	u16 ep_bulk_in_size;          /* wMaxPacketSize */
 	u16 ep_intr_in_size;
 	u8 ep_intr_in_interval;       /* bInterval */

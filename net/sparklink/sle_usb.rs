@@ -13,11 +13,11 @@
 //!   bInterfaceSubClass  = 0x01   RF Controller
 //!   bInterfaceProtocol  = 0x05   SparkLink DLI
 //!
-//! Endpoint mapping (host perspective):
-//!   EP0  Control           Setup requests for DLI instructions
-//!   EP1  Interrupt IN 0x81 DLI events from controller (16B, 4 ms)
-//!   EP2  Bulk IN      0x82 Async/sync data from controller
-//!   EP3  Bulk OUT     0x03 Commands and TX data to controller
+//! Endpoint mapping (host perspective, T/XS 10003-2025 Table 3):
+//!   EP0  Control           DLI instructions (standard path)
+//!   INT  Interrupt IN 0x91 DLI events from controller (16B)
+//!   BLK  Bulk IN      0x92 Async data from controller
+//!   BLK  Bulk OUT     0x12 Async data and commands to controller
 
 #![allow(dead_code, unreachable_pub)]
 
@@ -351,12 +351,12 @@ pub const SLE_USB_PROTOCOL: u8 = 0x05;
 // Endpoint addresses and sizes (host perspective)
 // ---------------------------------------------------------------------------
 
-/// Interrupt IN endpoint for DLI events (controller-to-host).
-pub const EP_EVENT_IN: u8 = 0x81;
-/// Bulk IN endpoint for async/sync data reception.
-pub const EP_DATA_IN: u8 = 0x82;
-/// Bulk OUT endpoint for commands and TX data.
-pub const EP_CMD_DATA_OUT: u8 = 0x03;
+/// Interrupt IN endpoint for DLI events (T/XS 10003-2025 Table 3).
+pub const EP_EVENT_IN: u8 = 0x91;
+/// Bulk IN endpoint for async data reception (T/XS 10003-2025 Table 3).
+pub const EP_DATA_IN: u8 = 0x92;
+/// Bulk OUT endpoint for async data and commands (T/XS 10003-2025 Table 3).
+pub const EP_CMD_DATA_OUT: u8 = 0x12;
 
 /// Interrupt endpoint max packet size.
 pub const EP_EVENT_MAX_PKT: usize = 16;

@@ -12,13 +12,16 @@
 //! ARQ sequence numbering for the async link.
 //!
 //! Each connection carries a set of transport channels (T/XS 20002-2025):
-//! a management channel (TCID 0x01), a service management channel
-//! (TCID 0x0A), and a default data channel (TCID 0x40).
+//! a management channel (SLE-CMTC, TCID 0x02), a service management channel
+//! (SLE-SMTC, TCID 0x0A), and a default unicast data channel (SLE-DUDTC,
+//! TCID 0x1F).
 
 #![allow(dead_code, unreachable_pub)]
 
 use kernel::alloc::KVec;
 use kernel::prelude::*;
+
+use super::sle_ssap::SsapSession;
 
 // ---------------------------------------------------------------------------
 // Transport Channel abstraction (T/XS 20002-2025)
@@ -29,14 +32,15 @@ use kernel::prelude::*;
 // the full SLB logical channel framework.
 // ---------------------------------------------------------------------------
 
-/// Transport Channel Identifier (TCID) — fixed channel assignments.
+/// Transport Channel Identifier (TCID) — fixed channel assignments per
+/// T/XS 00001-2025 and T/XS 20002-2025 Table 1.
 pub mod tcid {
-    /// Management channel: link control, PHY update, encryption setup.
-    pub const MANAGEMENT: u16 = 0x01;
-    /// Service management channel: SSAP service discovery and interaction.
+    /// SLE Common Management Transport Channel (SLE-CMTC).
+    pub const MANAGEMENT: u16 = 0x02;
+    /// SLE Service Management Transport Channel (SLE-SMTC).
     pub const SERVICE_MGMT: u16 = 0x0A;
-    /// Default data channel: general-purpose application data.
-    pub const DEFAULT_DATA: u16 = 0x40;
+    /// SLE Default Unicast Data Transport Channel (SLE-DUDTC).
+    pub const DEFAULT_DATA: u16 = 0x1F;
 }
 
 /// Transport mode for a channel (T/XS 20002-2025).
@@ -107,11 +111,11 @@ impl TransportChannel {
 /// minimal implementation.
 #[derive(Copy, Clone, Debug)]
 pub struct ChannelSet {
-    /// Link management channel (TCID 0x01): reliable, small MTU.
+    /// SLE-CMTC management channel (TCID 0x02): reliable, small MTU.
     pub mgmt: TransportChannel,
-    /// Service management channel (TCID 0x0A): reliable, used by SSAP.
+    /// SLE-SMTC service management channel (TCID 0x0A): reliable, used by SSAP.
     pub svc_mgmt: TransportChannel,
-    /// Default data channel (TCID 0x40): mode inherited from controller caps.
+    /// SLE-DUDTC default unicast data channel (TCID 0x1F): mode from caps.
     pub data: TransportChannel,
 }
 
@@ -545,6 +549,8 @@ pub struct ConnEntry {
     pub params: NegotiatedParams,
     /// Transport channels (management, service management, data).
     pub channels: ChannelSet,
+    /// SSAP session for service management (created on connection).
+    pub ssap_session: Option<SsapSession>,
     /// Sequence number tracker.
     pub seq: SeqTracker,
     /// Transmit data queue (userspace -> peer).
@@ -569,6 +575,7 @@ impl ConnEntry {
             local_cap: AccessCapability::default(),
             params: NegotiatedParams::default(),
             channels: ChannelSet::default(),
+            ssap_session: None,
             seq: SeqTracker::new_async(),
             tx_queue: DataRingBuffer::try_new()?,
             rx_queue: DataRingBuffer::try_new()?,
@@ -795,6 +802,7 @@ impl ConnManager {
                 entry.params = params;
                 entry.channels.negotiate(params.max_pdu_size, 512);
                 entry.channels.open_all();
+                entry.ssap_session = Some(SsapSession::new(handle));
                 entry.state = ConnState::Connected;
                 pr_info!(
                     "sparklink: handle {} connected (bw={}MHz mcs={} timeout={}0ms)\n",

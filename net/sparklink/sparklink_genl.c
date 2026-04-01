@@ -23,6 +23,39 @@
  */
 extern u32  sparklink_genl_get_dev_count(void);
 extern u32  sparklink_genl_get_proto_version(void);
+extern u8   sparklink_genl_get_role(void);
+extern int  sparklink_genl_set_role(u8 role);
+
+struct genl_conn_info {
+	__u16 handle;
+	__u8  state;
+	__u8  role;
+	__u8  peer_addr[6];
+	__u8  bandwidth_mhz;
+	__u8  mcs_index;
+	__u64 tx_bytes;
+	__u64 rx_bytes;
+};
+extern int sparklink_genl_get_conn_info(__u16 handle,
+					struct genl_conn_info *out);
+
+struct genl_pm_info {
+	__u8  state;
+	__u8  force_active;
+	__u8  power_pct;
+	__u8  _pad;
+	__u32 transitions;
+};
+extern int sparklink_genl_get_pm_info(struct genl_pm_info *out);
+
+struct genl_dli_info {
+	__u8  bus_type;
+	__u8  max_conn;
+	__u8  _pad[2];
+	__u32 fw_version;
+	__u64 features;
+};
+extern int sparklink_genl_get_dli_info(struct genl_dli_info *out);
 
 /* Forward declarations (also used externally from Rust via FFI) */
 int sparklink_genl_register(void);
@@ -67,6 +100,16 @@ static int sparklink_genl_get_dev_info(struct sk_buff *skb,
 				       struct genl_info *info);
 static int sparklink_genl_get_version(struct sk_buff *skb,
 				      struct genl_info *info);
+static int sparklink_genl_do_set_role(struct sk_buff *skb,
+				      struct genl_info *info);
+static int sparklink_genl_do_get_role(struct sk_buff *skb,
+				      struct genl_info *info);
+static int sparklink_genl_do_get_conn_info(struct sk_buff *skb,
+					   struct genl_info *info);
+static int sparklink_genl_do_get_pm_info(struct sk_buff *skb,
+					 struct genl_info *info);
+static int sparklink_genl_do_get_dli_info(struct sk_buff *skb,
+					  struct genl_info *info);
 
 static const struct genl_small_ops sparklink_genl_ops[] = {
 	{
@@ -76,6 +119,27 @@ static const struct genl_small_ops sparklink_genl_ops[] = {
 	{
 		.cmd	= SPARKLINK_CMD_GET_VERSION,
 		.doit	= sparklink_genl_get_version,
+	},
+	{
+		.cmd	= SPARKLINK_CMD_SET_ROLE,
+		.doit	= sparklink_genl_do_set_role,
+		.flags	= GENL_ADMIN_PERM,
+	},
+	{
+		.cmd	= SPARKLINK_CMD_GET_ROLE,
+		.doit	= sparklink_genl_do_get_role,
+	},
+	{
+		.cmd	= SPARKLINK_CMD_GET_CONN_INFO,
+		.doit	= sparklink_genl_do_get_conn_info,
+	},
+	{
+		.cmd	= SPARKLINK_CMD_GET_PM_INFO,
+		.doit	= sparklink_genl_do_get_pm_info,
+	},
+	{
+		.cmd	= SPARKLINK_CMD_GET_DLI_INFO,
+		.doit	= sparklink_genl_do_get_dli_info,
 	},
 };
 
@@ -163,6 +227,224 @@ static int sparklink_genl_get_version(struct sk_buff *skb,
 		goto nla_put_failure;
 	if (nla_put_u32(msg, SPARKLINK_ATTR_GENL_VERSION,
 			SPARKLINK_GENL_VERSION))
+		goto nla_put_failure;
+
+	genlmsg_end(msg, hdr);
+	return genlmsg_reply(msg, info);
+
+nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+	nlmsg_free(msg);
+	return -EMSGSIZE;
+}
+
+/* -----------------------------------------------------------------------
+ * SET_ROLE handler (requires CAP_NET_ADMIN)
+ * -----------------------------------------------------------------------
+ */
+static int sparklink_genl_do_set_role(struct sk_buff *skb,
+				      struct genl_info *info)
+{
+	struct sk_buff *msg;
+	void *hdr;
+	u8 role;
+	int ret;
+
+	if (!info->attrs[SPARKLINK_ATTR_GT_ROLE])
+		return -EINVAL;
+
+	role = nla_get_u8(info->attrs[SPARKLINK_ATTR_GT_ROLE]);
+	if (role > 1)
+		return -EINVAL;
+
+	ret = sparklink_genl_set_role(role);
+	if (ret)
+		return ret;
+
+	msg = genlmsg_new(GENLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	hdr = genlmsg_put(msg, info->snd_portid, info->snd_seq,
+			  &sparklink_genl_family, 0,
+			  SPARKLINK_CMD_SET_ROLE);
+	if (!hdr) {
+		nlmsg_free(msg);
+		return -EMSGSIZE;
+	}
+
+	if (nla_put_u8(msg, SPARKLINK_ATTR_GT_ROLE, role))
+		goto nla_put_failure;
+
+	genlmsg_end(msg, hdr);
+	return genlmsg_reply(msg, info);
+
+nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+	nlmsg_free(msg);
+	return -EMSGSIZE;
+}
+
+/* -----------------------------------------------------------------------
+ * GET_ROLE handler
+ * -----------------------------------------------------------------------
+ */
+static int sparklink_genl_do_get_role(struct sk_buff *skb,
+				      struct genl_info *info)
+{
+	struct sk_buff *msg;
+	void *hdr;
+
+	msg = genlmsg_new(GENLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	hdr = genlmsg_put(msg, info->snd_portid, info->snd_seq,
+			  &sparklink_genl_family, 0,
+			  SPARKLINK_CMD_GET_ROLE);
+	if (!hdr) {
+		nlmsg_free(msg);
+		return -EMSGSIZE;
+	}
+
+	if (nla_put_u8(msg, SPARKLINK_ATTR_GT_ROLE,
+		       sparklink_genl_get_role()))
+		goto nla_put_failure;
+
+	genlmsg_end(msg, hdr);
+	return genlmsg_reply(msg, info);
+
+nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+	nlmsg_free(msg);
+	return -EMSGSIZE;
+}
+
+/* -----------------------------------------------------------------------
+ * GET_CONN_INFO handler
+ * -----------------------------------------------------------------------
+ */
+static int sparklink_genl_do_get_conn_info(struct sk_buff *skb,
+					   struct genl_info *info)
+{
+	struct sk_buff *msg;
+	void *hdr;
+	struct genl_conn_info ci;
+	u16 handle;
+	int ret;
+
+	if (!info->attrs[SPARKLINK_ATTR_HANDLE])
+		return -EINVAL;
+
+	handle = nla_get_u16(info->attrs[SPARKLINK_ATTR_HANDLE]);
+
+	ret = sparklink_genl_get_conn_info(handle, &ci);
+	if (ret)
+		return ret;
+
+	msg = genlmsg_new(GENLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	hdr = genlmsg_put(msg, info->snd_portid, info->snd_seq,
+			  &sparklink_genl_family, 0,
+			  SPARKLINK_CMD_GET_CONN_INFO);
+	if (!hdr) {
+		nlmsg_free(msg);
+		return -EMSGSIZE;
+	}
+
+	if (nla_put_u16(msg, SPARKLINK_ATTR_HANDLE, ci.handle) ||
+	    nla_put_u8(msg, SPARKLINK_ATTR_CONN_STATE, ci.state) ||
+	    nla_put_u8(msg, SPARKLINK_ATTR_GT_ROLE, ci.role) ||
+	    nla_put(msg, SPARKLINK_ATTR_PEER_ADDR, 6, ci.peer_addr) ||
+	    nla_put_u8(msg, SPARKLINK_ATTR_BANDWIDTH, ci.bandwidth_mhz) ||
+	    nla_put_u8(msg, SPARKLINK_ATTR_MCS_INDEX, ci.mcs_index) ||
+	    nla_put_u64_64bit(msg, SPARKLINK_ATTR_TX_BYTES, ci.tx_bytes, 0) ||
+	    nla_put_u64_64bit(msg, SPARKLINK_ATTR_RX_BYTES, ci.rx_bytes, 0))
+		goto nla_put_failure;
+
+	genlmsg_end(msg, hdr);
+	return genlmsg_reply(msg, info);
+
+nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+	nlmsg_free(msg);
+	return -EMSGSIZE;
+}
+
+/* -----------------------------------------------------------------------
+ * GET_PM_INFO handler
+ * -----------------------------------------------------------------------
+ */
+static int sparklink_genl_do_get_pm_info(struct sk_buff *skb,
+					 struct genl_info *info)
+{
+	struct sk_buff *msg;
+	void *hdr;
+	struct genl_pm_info pm;
+
+	sparklink_genl_get_pm_info(&pm);
+
+	msg = genlmsg_new(GENLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	hdr = genlmsg_put(msg, info->snd_portid, info->snd_seq,
+			  &sparklink_genl_family, 0,
+			  SPARKLINK_CMD_GET_PM_INFO);
+	if (!hdr) {
+		nlmsg_free(msg);
+		return -EMSGSIZE;
+	}
+
+	if (nla_put_u8(msg, SPARKLINK_ATTR_PM_STATE, pm.state) ||
+	    nla_put_u8(msg, SPARKLINK_ATTR_FORCE_ACTIVE, pm.force_active) ||
+	    nla_put_u8(msg, SPARKLINK_ATTR_POWER_PCT, pm.power_pct))
+		goto nla_put_failure;
+
+	genlmsg_end(msg, hdr);
+	return genlmsg_reply(msg, info);
+
+nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+	nlmsg_free(msg);
+	return -EMSGSIZE;
+}
+
+/* -----------------------------------------------------------------------
+ * GET_DLI_INFO handler
+ * -----------------------------------------------------------------------
+ */
+static int sparklink_genl_do_get_dli_info(struct sk_buff *skb,
+					  struct genl_info *info)
+{
+	struct sk_buff *msg;
+	void *hdr;
+	struct genl_dli_info dli;
+	int ret;
+
+	ret = sparklink_genl_get_dli_info(&dli);
+	if (ret)
+		return ret;
+
+	msg = genlmsg_new(GENLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	hdr = genlmsg_put(msg, info->snd_portid, info->snd_seq,
+			  &sparklink_genl_family, 0,
+			  SPARKLINK_CMD_GET_DLI_INFO);
+	if (!hdr) {
+		nlmsg_free(msg);
+		return -EMSGSIZE;
+	}
+
+	if (nla_put_u8(msg, SPARKLINK_ATTR_DLI_BUS, dli.bus_type) ||
+	    nla_put_u8(msg, SPARKLINK_ATTR_DLI_MAX_CONN, dli.max_conn) ||
+	    nla_put_u32(msg, SPARKLINK_ATTR_DLI_FW_VER, dli.fw_version) ||
+	    nla_put_u64_64bit(msg, SPARKLINK_ATTR_DLI_FEATURES,
+			      dli.features, 0))
 		goto nla_put_failure;
 
 	genlmsg_end(msg, hdr);

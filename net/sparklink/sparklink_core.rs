@@ -118,6 +118,144 @@ pub extern "C" fn sparklink_genl_get_proto_version() -> u32 {
     0x000300 // v0.3.0
 }
 
+/// Get the current GT role (C FFI export). 0=TNode, 1=GNode.
+#[no_mangle]
+pub extern "C" fn sparklink_genl_get_role() -> u8 {
+    let ss = SUBSYSTEM.lock();
+    match ss.as_ref() {
+        Some(shared) => shared.local_role as u8,
+        None => 0,
+    }
+}
+
+/// Set the local GT role (C FFI export). 0=TNode, 1=GNode.
+/// Returns 0 on success, negative errno on failure.
+#[no_mangle]
+pub extern "C" fn sparklink_genl_set_role(role: u8) -> i32 {
+    let mut ss = SUBSYSTEM.lock();
+    match ss.as_mut() {
+        Some(shared) => {
+            shared.local_role = if role == 1 { GtRole::GNode } else { GtRole::TNode };
+            0
+        }
+        None => -(bindings::ENODEV as i32),
+    }
+}
+
+/// Connection info result for genl (C FFI).
+#[repr(C)]
+pub struct GenlConnInfo {
+    /// Connection handle.
+    pub handle: u16,
+    /// Connection state.
+    pub state: u8,
+    /// Local GT role (0=T, 1=G).
+    pub role: u8,
+    /// Peer SLE address (6 bytes).
+    pub peer_addr: [u8; 6],
+    /// Bandwidth in MHz.
+    pub bandwidth_mhz: u8,
+    /// MCS index.
+    pub mcs_index: u8,
+    /// Total TX bytes.
+    pub tx_bytes: u64,
+    /// Total RX bytes.
+    pub rx_bytes: u64,
+}
+
+/// Get connection info by handle (C FFI export).
+/// Returns 0 on success, negative errno on failure.
+#[no_mangle]
+pub extern "C" fn sparklink_genl_get_conn_info(handle: u16, out: *mut GenlConnInfo) -> i32 {
+    let ss = SUBSYSTEM.lock();
+    match ss.as_ref() {
+        Some(shared) => match shared.conn.info(handle) {
+            Ok(entry) => {
+                // SAFETY: caller guarantees out is a valid pointer.
+                let info = unsafe { &mut *out };
+                info.handle = entry.handle;
+                info.state = entry.state as u8;
+                info.role = entry.local_role as u8;
+                info.peer_addr = entry.peer_addr;
+                info.bandwidth_mhz = entry.params.bandwidth_mhz;
+                info.mcs_index = entry.params.mcs_index;
+                info.tx_bytes = entry.tx_bytes;
+                info.rx_bytes = entry.rx_bytes;
+                0
+            }
+            Err(_) => -(bindings::ENOENT as i32),
+        },
+        None => -(bindings::ENODEV as i32),
+    }
+}
+
+/// Power management info result for genl (C FFI).
+#[repr(C)]
+pub struct GenlPmInfo {
+    /// Power state.
+    pub state: u8,
+    /// Force-active flag.
+    pub force_active: u8,
+    /// Estimated power percentage.
+    pub power_pct: u8,
+    /// Padding.
+    _pad: u8,
+    /// State transition count.
+    pub transitions: u32,
+}
+
+/// Get power management info (C FFI export).
+#[no_mangle]
+pub extern "C" fn sparklink_genl_get_pm_info(out: *mut GenlPmInfo) -> i32 {
+    let ss = SUBSYSTEM.lock();
+    match ss.as_ref() {
+        Some(shared) => {
+            let info = unsafe { &mut *out };
+            info.state = shared.power.state as u8;
+            info.force_active = if shared.power.is_forced_active() { 1 } else { 0 };
+            info.power_pct = shared.power.estimated_power_pct();
+            info._pad = 0;
+            info.transitions = shared.power.stats.transitions;
+            0
+        }
+        None => -(bindings::ENODEV as i32),
+    }
+}
+
+/// DLI controller info result for genl (C FFI).
+#[repr(C)]
+pub struct GenlDliInfo {
+    /// DLI bus type.
+    pub bus_type: u8,
+    /// Max concurrent connections.
+    pub max_conn: u8,
+    /// Padding.
+    _pad: [u8; 2],
+    /// Firmware version.
+    pub fw_version: u32,
+    /// Feature bitmask.
+    pub features: u64,
+}
+
+/// Get DLI controller info (C FFI export).
+#[no_mangle]
+pub extern "C" fn sparklink_genl_get_dli_info(out: *mut GenlDliInfo) -> i32 {
+    let ss = SUBSYSTEM.lock();
+    match ss.as_ref() {
+        Some(shared) => {
+            let ci = shared.controller.info();
+            let info = unsafe { &mut *out };
+            info.bus_type = ci.bus as u8;
+            info.max_conn = ci.max_connections;
+            info._pad = [0u8; 2];
+            info.fw_version = ci.fw_version;
+            info.features = ci.features;
+            0
+        }
+        None => -(bindings::ENODEV as i32),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Generic Netlink C bridge (conditional on CONFIG_SPARKLINK_GENL)
 // ---------------------------------------------------------------------------

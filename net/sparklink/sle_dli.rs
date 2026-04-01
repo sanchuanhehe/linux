@@ -75,9 +75,8 @@ impl ControllerEventRing {
         if self.head == self.tail {
             return None;
         }
-        let (dev_id, ev) = core::mem::replace(
+        let (dev_id, ev) = core::mem::take(
             &mut self.events[self.head],
-            (None, None),
         );
         self.head = (self.head + 1) % CTRL_EVENT_RING_SIZE;
         ev.map(|e| (dev_id, e))
@@ -920,6 +919,8 @@ pub struct VirtualController {
 // SAFETY: VirtualController is only used inside Mutex<ControllerBackend> in
 // SparkLinkCtl.  The Mutex ensures exclusive access, making Cell/RefCell safe.
 unsafe impl Send for VirtualController {}
+// SAFETY: VirtualController is only used inside Mutex<ControllerBackend> in
+// SparkLinkCtl.  The Mutex ensures exclusive access, making Cell/RefCell safe.
 unsafe impl Sync for VirtualController {}
 
 impl VirtualController {
@@ -997,7 +998,7 @@ impl SleController for VirtualController {
                 let mut addr = [0u8; 6];
                 addr.copy_from_slice(&params[..6]);
                 // Simulate ConnComplete with handle = first non-zero addr byte
-                let handle = params[5] as u16;
+                let handle = u16::from(params[5]);
                 self.enqueue_event(SleEvent::ConnComplete {
                     handle: if handle == 0 { 1 } else { handle },
                     addr,
@@ -1057,6 +1058,9 @@ pub enum ControllerBackend {
 // in SparkLinkCtl.  The Mutex provides exclusive access, so Cell/RefCell
 // interior mutability in the contained controllers is sound.
 unsafe impl Send for ControllerBackend {}
+// SAFETY: ControllerBackend is always stored inside Mutex<ControllerBackend>
+// in SparkLinkCtl.  The Mutex provides exclusive access, so Cell/RefCell
+// interior mutability in the contained controllers is sound.
 unsafe impl Sync for ControllerBackend {}
 
 impl ControllerBackend {
@@ -1231,12 +1235,12 @@ impl ControllerBackend {
 
     /// Enable or disable broadcasting (section 8.2.4).
     pub fn enable_broadcast(&self, enable: bool) -> Result {
-        self.send_command(SleOpcode::EnableBroadcast, &[enable as u8])
+        self.send_command(SleOpcode::EnableBroadcast, &[u8::from(enable)])
     }
 
     /// Enable or disable scanning (section 8.3.3).
     pub fn enable_scan(&self, enable: bool) -> Result {
-        self.send_command(SleOpcode::EnableScan, &[enable as u8])
+        self.send_command(SleOpcode::EnableScan, &[u8::from(enable)])
     }
 
     /// Set the coding & modulation scheme (MCS index, section 8.5.3).

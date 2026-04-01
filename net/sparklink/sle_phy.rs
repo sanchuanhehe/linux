@@ -117,7 +117,7 @@ pub fn mcs_lookup(index: u8) -> Option<&'static McsParams> {
 /// bandwidth in MHz (1, 2, or 4).
 pub fn data_rate_kbps(mcs_index: u8, bandwidth_mhz: u8) -> Option<u32> {
     let params = mcs_lookup(mcs_index)?;
-    Some(params.data_rate_1m_kbps as u32 * bandwidth_mhz as u32)
+    Some(u32::from(params.data_rate_1m_kbps) * u32::from(bandwidth_mhz))
 }
 
 /// Select the best MCS index that satisfies the given minimum data rate
@@ -149,7 +149,7 @@ pub fn mcs_select(min_kbps: u32, bandwidth_mhz: u8, sinr_db_x10: i16) -> u8 {
 
     let mut best = 0u8;
     for i in 0..13u8 {
-        let rate = MCS_TABLE[i as usize].data_rate_1m_kbps as u32 * bandwidth_mhz as u32;
+        let rate = u32::from(MCS_TABLE[i as usize].data_rate_1m_kbps) * u32::from(bandwidth_mhz);
         if rate >= min_kbps && SINR_THRESH[i as usize] <= sinr_db_x10 {
             best = i;
         }
@@ -288,8 +288,8 @@ impl HoppingState {
     /// 2. If unmapped_channel is in the channel map, use it directly
     /// 3. Otherwise, remap: used_channel[unmapped_channel mod used_count]
     pub fn next_channel(&mut self) -> u8 {
-        let unmapped = (self.last_channel as u16 + self.hop_increment as u16)
-            % NUM_CHANNELS as u16;
+        let unmapped = (u16::from(self.last_channel) + u16::from(self.hop_increment))
+            % u16::from(NUM_CHANNELS);
         let unmapped = unmapped as u8;
 
         let channel = if self.channel_map.is_used(unmapped) {
@@ -312,7 +312,7 @@ impl HoppingState {
     /// Get the RF frequency in MHz for a channel index.
     /// Channel 0 = 2402 MHz, Channel 78 = 2480 MHz.
     pub fn channel_to_freq(channel: u8) -> u16 {
-        2402 + channel as u16
+        2402 + u16::from(channel)
     }
 
     /// Update the channel map (e.g., after AFH classification).
@@ -458,7 +458,7 @@ impl PhyConfig {
     pub fn effective_data_rate_kbps(&self) -> u32 {
         let base = data_rate_kbps(self.mcs_index, self.bandwidth_mhz)
             .unwrap_or(500);
-        let mimo_factor = self.antenna.mode.throughput_factor() as u32;
+        let mimo_factor = u32::from(self.antenna.mode.throughput_factor());
         base * mimo_factor / 100
     }
 
@@ -484,7 +484,7 @@ impl PhyConfig {
 
     /// Set TX power with range validation (-20 to +20 dBm).
     pub fn set_tx_power(&mut self, power_dbm: i8) -> Result {
-        if power_dbm < -20 || power_dbm > 20 {
+        if !(-20..=20).contains(&power_dbm) {
             return Err(EINVAL);
         }
         self.tx_power_dbm = power_dbm;
@@ -558,7 +558,7 @@ impl PhyConfig {
         let mut bits = 0u64;
         // MCS feature bits (SleFeature::Mcs0 = 1<<14, ..Mcs12 = 1<<26)
         if self.mcs_index <= 12 {
-            bits |= 1u64 << (14 + self.mcs_index as u32);
+            bits |= 1u64 << (14 + u32::from(self.mcs_index));
         }
         // Bandwidth
         if self.bandwidth_mhz >= 2 {

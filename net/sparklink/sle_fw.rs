@@ -129,7 +129,7 @@ pub(crate) fn load_usb_firmware(
     // sle_usb_dev_download_fw copies from it synchronously.
     let ret = unsafe {
         sle_usb_dev_download_fw(
-            dev_id as i32,
+            i32::from(dev_id),
             fw.data().as_ptr(),
             size as i32,
             FW_DEFAULT_CHUNK_SIZE,

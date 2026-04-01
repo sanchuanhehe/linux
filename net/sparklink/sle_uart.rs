@@ -84,9 +84,10 @@ const TX_BUF_SIZE: usize = 512;
 // =========================================================================
 
 /// Parser states for the DLI UART byte stream.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 enum RxState {
     /// Waiting for a packet type indicator byte.
+    #[default]
     WaitType,
     /// Reading the type-specific header bytes.
     ReadHeader {
@@ -104,12 +105,6 @@ enum RxState {
         /// Total payload bytes expected.
         expected: usize,
     },
-}
-
-impl Default for RxState {
-    fn default() -> Self {
-        Self::WaitType
-    }
 }
 
 /// Parsed DLI frame from the UART stream.
@@ -336,7 +331,7 @@ pub fn encode_data(
         return 0;
     }
     buf[0] = pkt_type as u8;
-    let raw_handle = (handle & 0x0FFF) | ((flags as u16 & 0x0F) << 12);
+    let raw_handle = (handle & 0x0FFF) | ((u16::from(flags) & 0x0F) << 12);
     let hb = raw_handle.to_le_bytes();
     buf[1] = hb[0];
     buf[2] = hb[1];
@@ -387,6 +382,8 @@ pub struct UartController {
 // SAFETY: UartController is stored inside Mutex<ControllerBackend> in
 // SparkLinkCtl.  Mutex provides exclusive access, making Cell/RefCell sound.
 unsafe impl Send for UartController {}
+// SAFETY: UartController is stored inside Mutex<ControllerBackend> in
+// SparkLinkCtl.  Mutex provides exclusive access, making Cell/RefCell sound.
 unsafe impl Sync for UartController {}
 
 impl UartController {

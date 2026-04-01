@@ -219,7 +219,7 @@ impl SecurityInner {
         let ctr = self.tx_counter;
         sle_crypto::sm4_ctr(ctx, &self.nonce, ctr, data);
         // Advance counter past the blocks used
-        let blocks = ((data.len() + 15) / 16) as u32;
+        let blocks = data.len().div_ceil(16) as u32;
         self.tx_counter = self.tx_counter.wrapping_add(blocks);
         Ok(ctr)
     }
@@ -232,7 +232,7 @@ impl SecurityInner {
         let ctx = self.sm4_ctx.as_ref().ok_or(EINVAL)?;
         let ctr = self.rx_counter;
         sle_crypto::sm4_ctr(ctx, &self.nonce, ctr, data);
-        let blocks = ((data.len() + 15) / 16) as u32;
+        let blocks = data.len().div_ceil(16) as u32;
         self.rx_counter = self.rx_counter.wrapping_add(blocks);
         Ok(())
     }

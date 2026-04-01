@@ -109,7 +109,7 @@ impl configfs::AttributeOperations<1> for SparkLinkConfig {
 
     fn show(_data: &SparkLinkConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
         let val = MAX_CONNECTIONS.load(Ordering::Relaxed);
-        Ok(int_to_page(val as u32, page))
+        Ok(int_to_page(u32::from(val), page))
     }
 
     fn store(_data: &SparkLinkConfig, page: &[u8]) -> Result {
@@ -130,13 +130,13 @@ impl configfs::AttributeOperations<2> for SparkLinkConfig {
 
     fn show(_data: &SparkLinkConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
         let val = ADV_INTERVAL_MS.load(Ordering::Relaxed);
-        Ok(int_to_page(val as u32, page))
+        Ok(int_to_page(u32::from(val), page))
     }
 
     fn store(_data: &SparkLinkConfig, page: &[u8]) -> Result {
         let s = core::str::from_utf8(page).map_err(|_| EINVAL)?;
         let val: u16 = s.trim().parse().map_err(|_| EINVAL)?;
-        if val < 20 || val > 10240 {
+        if !(20..=10240).contains(&val) {
             return Err(EINVAL);
         }
         ADV_INTERVAL_MS.store(val, Ordering::Relaxed);
@@ -151,13 +151,13 @@ impl configfs::AttributeOperations<3> for SparkLinkConfig {
 
     fn show(_data: &SparkLinkConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
         let val = SCAN_WINDOW_MS.load(Ordering::Relaxed);
-        Ok(int_to_page(val as u32, page))
+        Ok(int_to_page(u32::from(val), page))
     }
 
     fn store(_data: &SparkLinkConfig, page: &[u8]) -> Result {
         let s = core::str::from_utf8(page).map_err(|_| EINVAL)?;
         let val: u16 = s.trim().parse().map_err(|_| EINVAL)?;
-        if val < 10 || val > 10240 {
+        if !(10..=10240).contains(&val) {
             return Err(EINVAL);
         }
         SCAN_WINDOW_MS.store(val, Ordering::Relaxed);

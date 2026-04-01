@@ -287,6 +287,8 @@ pub struct SpiController {
 // SAFETY: SpiController is stored inside Mutex<ControllerBackend> in
 // SparkLinkCtl.  Mutex provides exclusive access, making Cell/RefCell sound.
 unsafe impl Send for SpiController {}
+// SAFETY: SpiController is stored inside Mutex<ControllerBackend> in
+// SparkLinkCtl.  Mutex provides exclusive access, making Cell/RefCell sound.
 unsafe impl Sync for SpiController {}
 
 impl SpiController {

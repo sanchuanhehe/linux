@@ -88,7 +88,7 @@ impl CmdPendingEntry {
         self.data[..copy_len].copy_from_slice(&response[..copy_len]);
         self.data_len = copy_len as u16;
         self.status.store(
-            CMD_RESOLVED_BIT | (dli_status as u32),
+            CMD_RESOLVED_BIT | (u32::from(dli_status)),
             Ordering::Release,
         );
     }
@@ -197,14 +197,12 @@ impl CmdPendingQueue {
     ///
     /// Returns `true` if a matching entry was found and resolved.
     pub(crate) fn resolve(&mut self, opcode: u16, status: u8, data: &[u8]) -> bool {
-        for slot in self.entries.iter_mut() {
-            if let Some(ref mut entry) = slot {
-                if entry.opcode == opcode && entry.is_pending() {
-                    entry.resolve(status, data);
-                    self.pending_count = self.pending_count.saturating_sub(1);
-                    self.total_resolved += 1;
-                    return true;
-                }
+        for entry in self.entries.iter_mut().flatten() {
+            if entry.opcode == opcode && entry.is_pending() {
+                entry.resolve(status, data);
+                self.pending_count = self.pending_count.saturating_sub(1);
+                self.total_resolved += 1;
+                return true;
             }
         }
         false
@@ -215,15 +213,13 @@ impl CmdPendingQueue {
     /// Returns the number of entries that were timed out.
     pub(crate) fn expire_stale(&mut self) -> u32 {
         let mut expired = 0u32;
-        for slot in self.entries.iter_mut() {
-            if let Some(ref mut entry) = slot {
-                if entry.is_pending() && entry.is_expired() {
-                    entry.timeout();
-                    self.pending_count = self.pending_count.saturating_sub(1);
-                    self.total_resolved += 1;
-                    self.total_timeouts += 1;
-                    expired += 1;
-                }
+        for entry in self.entries.iter_mut().flatten() {
+            if entry.is_pending() && entry.is_expired() {
+                entry.timeout();
+                self.pending_count = self.pending_count.saturating_sub(1);
+                self.total_resolved += 1;
+                self.total_timeouts += 1;
+                expired += 1;
             }
         }
         expired

@@ -144,13 +144,14 @@ impl SerdevParserState {
         self.parser.feed_bytes(data, &mut frames);
 
         let dev_id = match self.dev_id {
-            Some(id) => id as i32,
+            Some(id) => i32::from(id),
             None => return,
         };
 
         for frame in frames.iter() {
             match frame {
                 UartFrame::Event { event_code, params } => {
+                    // SAFETY: dev_id is valid, params pointer and length are consistent.
                     unsafe {
                         sle_serdev_dev_feed_event(
                             dev_id,
@@ -210,7 +211,11 @@ pub(crate) extern "C" fn sparklink_serdev_receive(
     if data.is_null() || len <= 0 {
         return;
     }
-    let slice = unsafe { core::slice::from_raw_parts(data, len as usize) };
+    // SAFETY: data is non-null and len > 0, checked above; the C caller
+    // guarantees the buffer is valid for len bytes.
+    let slice = unsafe {
+        core::slice::from_raw_parts(data, len as usize)
+    };
     if let Some(ref mut state) = *SERDEV_PARSER.lock() {
         state.feed_rx(slice);
     }
@@ -233,7 +238,12 @@ pub(crate) struct SleSerdevHandle {
     inner: *mut SleSerdevDataOpaque,
 }
 
+// SAFETY: SleSerdevHandle wraps a C pointer to serdev device data which
+// is heap-allocated and has no thread affinity; access is synchronized
+// by the serdev core serialization guarantees.
 unsafe impl Send for SleSerdevHandle {}
+// SAFETY: All operations on the inner pointer call synchronized C
+// functions; concurrent access is safe.
 unsafe impl Sync for SleSerdevHandle {}
 
 // =========================================================================
@@ -270,7 +280,10 @@ impl SleController for SerdevController {
         info.name[..n].copy_from_slice(&name[..n]);
         info.bus = SleBus::Uart;
         info.addr = self.addr;
-        info.fw_version = unsafe { sle_serdev_dev_get_fw_version(self.dev_id as i32) };
+        // SAFETY: dev_id is valid.
+        info.fw_version = unsafe {
+            sle_serdev_dev_get_fw_version(i32::from(self.dev_id))
+        };
         info.features = (SleFeature::Encryption as u64)
             | (SleFeature::Mcs4 as u64)
             | (SleFeature::Pilot8to1 as u64)
@@ -296,9 +309,10 @@ impl SleController for SerdevController {
     }
 
     fn send_command(&self, opcode: SleOpcode, params: &[u8]) -> Result {
+        // SAFETY: dev_id is valid, opcode and params pointer/length are consistent.
         let ret = unsafe {
             sle_serdev_dev_send_cmd(
-                self.dev_id as i32,
+                i32::from(self.dev_id),
                 opcode as u16,
                 params.as_ptr(),
                 params.len() as i32,
@@ -311,9 +325,10 @@ impl SleController for SerdevController {
     }
 
     fn send_data(&self, handle: u16, data: &[u8]) -> Result {
+        // SAFETY: dev_id is valid, data pointer and length are from a valid slice.
         let ret = unsafe {
             sle_serdev_dev_send_data(
-                self.dev_id as i32,
+                i32::from(self.dev_id),
                 handle,
                 data.as_ptr(),
                 data.len() as i32,
@@ -353,6 +368,7 @@ impl SleSerdevHandle {
 
     /// Open the serial port.
     pub(crate) fn open(&self) -> Result {
+        // SAFETY: self.inner is a valid pointer obtained during probe.
         let ret = unsafe { sle_serdev_open_dev(self.inner) };
         if ret < 0 {
             Err(Error::from_errno(ret))
@@ -363,21 +379,25 @@ impl SleSerdevHandle {
 
     /// Close the serial port.
     pub(crate) fn close(&self) {
+        // SAFETY: self.inner is a valid pointer obtained during probe.
         unsafe { sle_serdev_close_dev(self.inner) };
     }
 
     /// Set the baud rate. Returns the actual rate configured.
     pub(crate) fn set_baudrate(&self, baud: u32) -> u32 {
+        // SAFETY: self.inner is a valid pointer obtained during probe.
         unsafe { sle_serdev_set_baudrate(self.inner, baud) }
     }
 
     /// Enable or disable hardware flow control.
     pub(crate) fn set_flow_control(&self, enable: bool) {
+        // SAFETY: self.inner is a valid pointer obtained during probe.
         unsafe { sle_serdev_set_flow_control(self.inner, enable) };
     }
 
     /// Write data, blocking until sent or timeout.
     pub(crate) fn write(&self, data: &[u8], timeout_ms: i32) -> Result<usize> {
+        // SAFETY: self.inner is valid, data pointer and length are consistent.
         let ret = unsafe {
             sle_serdev_write(self.inner, data.as_ptr(), data.len() as i32, timeout_ms)
         };
@@ -390,6 +410,7 @@ impl SleSerdevHandle {
 
     /// Non-blocking write. Returns number of bytes accepted.
     pub(crate) fn write_buf(&self, data: &[u8]) -> Result<usize> {
+        // SAFETY: self.inner is valid, data pointer and length are consistent.
         let ret = unsafe {
             sle_serdev_write_buf(self.inner, data.as_ptr(), data.len() as i32)
         };
@@ -483,7 +504,8 @@ pub(crate) fn serdev_probe(
 
     if let Some(sd) = sd_handle {
         // Register with C-side serdev device table for command I/O.
-        let ret = unsafe { sle_serdev_dev_register(dev_id as i32, sd) };
+        // SAFETY: dev_id is valid; sd pointer is valid for driver lifetime.
+        let ret = unsafe { sle_serdev_dev_register(i32::from(dev_id), sd) };
         if ret < 0 {
             super::sle_detach_device(dev_id);
             return Err(Error::from_errno(ret));
@@ -501,7 +523,8 @@ pub(crate) fn serdev_probe(
         }
 
         // Run controller init sequence (reset, read version, read MAC).
-        let init_ret = unsafe { sle_serdev_dev_init_controller(dev_id as i32) };
+        // SAFETY: dev_id is valid.
+        let init_ret = unsafe { sle_serdev_dev_init_controller(i32::from(dev_id)) };
         if init_ret < 0 {
             pr_warn!(
                 "sparklink-serdev: init failed ({}), continuing with defaults\n",
@@ -512,17 +535,19 @@ pub(crate) fn serdev_probe(
         // Read back MAC address and firmware version from controller.
         let mut real_addr = addr;
         let mut mac_buf = [0u8; 6];
-        if unsafe { sle_serdev_dev_get_mac(dev_id as i32, mac_buf.as_mut_ptr()) } == 0 {
-            if mac_buf != [0u8; 6] {
-                real_addr = mac_buf;
-                pr_info!(
-                    "sparklink-serdev: controller MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
-                    real_addr[0], real_addr[1], real_addr[2],
-                    real_addr[3], real_addr[4], real_addr[5]
-                );
-            }
+        // SAFETY: dev_id is valid, mac_buf is a valid 6-byte buffer.
+        if unsafe {
+            sle_serdev_dev_get_mac(i32::from(dev_id), mac_buf.as_mut_ptr())
+        } == 0 && mac_buf != [0u8; 6] {
+            real_addr = mac_buf;
+            pr_info!(
+                "sparklink-serdev: controller MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
+                real_addr[0], real_addr[1], real_addr[2],
+                real_addr[3], real_addr[4], real_addr[5]
+            );
         }
-        let fw_version = unsafe { sle_serdev_dev_get_fw_version(dev_id as i32) };
+        // SAFETY: dev_id is valid.
+        let fw_version = unsafe { sle_serdev_dev_get_fw_version(i32::from(dev_id)) };
 
         // Switch subsystem controller to serdev backend and sync
         // the device registry with real hardware info.
@@ -538,6 +563,7 @@ pub(crate) fn serdev_probe(
 /// it from the subsystem.
 pub(crate) fn serdev_remove(data: &SleSerdevData) {
     pr_info!("sparklink-serdev: remove sle{}\n", data.dev_id);
-    unsafe { sle_serdev_dev_unregister(data.dev_id as i32) };
+    // SAFETY: dev_id is valid; unregister is safe and idempotent.
+    unsafe { sle_serdev_dev_unregister(i32::from(data.dev_id)) };
     super::sle_detach_device(data.dev_id);
 }

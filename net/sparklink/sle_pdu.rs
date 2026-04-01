@@ -139,11 +139,11 @@ impl AdvPduHeader {
     /// The caller must append CRC-12 over the first 20 bits if needed.
     pub fn encode(&self) -> [u8; 4] {
         let mut w: u32 = 0;
-        w |= (self.link_quality as u32) & 0xFF;
-        w |= ((self.broadcast_type as u32) & 0x07) << 8;
-        w |= ((self.packet_type as u32) & 0x07) << 11;
+        w |= u32::from(self.link_quality) & 0xFF;
+        w |= (self.broadcast_type as u32 & 0x07) << 8;
+        w |= (self.packet_type as u32 & 0x07) << 11;
         // bits 14-19 reserved = 0
-        w |= ((self.data_length as u32) & 0xFF) << 20;
+        w |= (u32::from(self.data_length) & 0xFF) << 20;
         // bits 28-31 will be filled by CRC-12 (only top 4 bits fit here)
         w.to_le_bytes()
     }

@@ -276,7 +276,7 @@ impl SleWireEvent {
     pub fn as_bytes(&self) -> &[u8] {
         let size = core::mem::size_of::<Self>();
         // SAFETY: SleWireEvent is repr(C) with only primitive fields.
-        unsafe { core::slice::from_raw_parts(self as *const Self as *const u8, size) }
+        unsafe { core::slice::from_raw_parts(core::ptr::from_ref(self).cast::<u8>(), size) }
     }
 
     /// Build a wire event from a typed payload.
@@ -285,7 +285,7 @@ impl SleWireEvent {
         let copy_len = payload_size.min(EVENT_PAYLOAD_MAX);
         // SAFETY: T is repr(C) with only primitive fields.
         let payload_bytes = unsafe {
-            core::slice::from_raw_parts(payload as *const T as *const u8, copy_len)
+            core::slice::from_raw_parts(core::ptr::from_ref(payload).cast::<u8>(), copy_len)
         };
         let mut wire = SleWireEvent {
             event_type: event_type as u8,
@@ -476,9 +476,9 @@ pub struct EventQueue {
 impl EventQueue {
     /// Create an empty event queue with pre-allocated ring buffer.
     pub fn new() -> Self {
-        // SAFETY: SleWireEvent is repr(C) with only primitive fields;
-        // all-zero is a valid bit pattern.
         Self {
+            // SAFETY: SleWireEvent is repr(C) with only primitive fields;
+            // all-zero is a valid bit pattern.
             buf: unsafe { core::mem::zeroed() },
             head: 0,
             count: 0,
@@ -629,7 +629,7 @@ impl EventQueue {
 
         // SAFETY: T is repr(C) with only primitive fields.
         let payload_bytes = unsafe {
-            core::slice::from_raw_parts(payload as *const T as *const u8, copy_len)
+            core::slice::from_raw_parts(core::ptr::from_ref(payload).cast::<u8>(), copy_len)
         };
 
         let mut wire = SleWireEvent {

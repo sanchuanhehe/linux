@@ -89,8 +89,6 @@ fn read_user_struct<T: FromBytes + Sized>(arg: usize) -> Result<T> {
 
 /// Write a repr(C) struct to userspace.
 ///
-/// # Safety
-///
 /// `T` must be `repr(C)` with only primitive fields and fully initialized
 /// (typically via `core::mem::zeroed()` followed by field assignments) so
 /// that converting it to a byte slice is defined behaviour.
@@ -98,7 +96,10 @@ fn write_user_struct<T: Sized>(arg: usize, val: &T) -> Result {
     // SAFETY: T is repr(C) with only primitive fields, caller guarantees
     // the value is fully initialized.
     let bytes = unsafe {
-        core::slice::from_raw_parts(val as *const T as *const u8, core::mem::size_of::<T>())
+        core::slice::from_raw_parts(
+            core::ptr::from_ref::<T>(val).cast::<u8>(),
+            core::mem::size_of::<T>(),
+        )
     };
     let slice = UserSlice::new(UserPtr::from_addr(arg), core::mem::size_of::<T>());
     slice.writer().write_slice(bytes)?;
@@ -182,13 +183,17 @@ pub struct GenlConnInfo {
 
 /// Get connection info by handle (C FFI export).
 /// Returns 0 on success, negative errno on failure.
+///
+/// # Safety
+///
+/// `out` must be a valid, aligned pointer to a `GenlConnInfo` struct.
 #[no_mangle]
-pub extern "C" fn sparklink_genl_get_conn_info(handle: u16, out: *mut GenlConnInfo) -> i32 {
+pub unsafe extern "C" fn sparklink_genl_get_conn_info(handle: u16, out: *mut GenlConnInfo) -> i32 {
     let ss = SUBSYSTEM.lock();
     match ss.as_ref() {
         Some(shared) => match shared.conn.info(handle) {
             Ok(entry) => {
-                // SAFETY: caller guarantees out is a valid pointer.
+                // SAFETY: caller guarantees out is a valid, aligned pointer.
                 let info = unsafe { &mut *out };
                 info.handle = entry.handle;
                 info.state = entry.state as u8;
@@ -227,11 +232,16 @@ pub struct GenlPmInfo {
 }
 
 /// Get power management info (C FFI export).
+///
+/// # Safety
+///
+/// `out` must be a valid, aligned pointer to a `GenlPmInfo` struct.
 #[no_mangle]
-pub extern "C" fn sparklink_genl_get_pm_info(out: *mut GenlPmInfo) -> i32 {
+pub unsafe extern "C" fn sparklink_genl_get_pm_info(out: *mut GenlPmInfo) -> i32 {
     let ss = SUBSYSTEM.lock();
     match ss.as_ref() {
         Some(shared) => {
+            // SAFETY: caller guarantees out is a valid, aligned pointer.
             let info = unsafe { &mut *out };
             info.state = shared.power.state as u8;
             info.force_active = if shared.power.is_forced_active() { 1 } else { 0 };
@@ -269,12 +279,17 @@ pub struct GenlDliInfo {
 }
 
 /// Get DLI controller info (C FFI export).
+///
+/// # Safety
+///
+/// `out` must be a valid, aligned pointer to a `GenlDliInfo` struct.
 #[no_mangle]
-pub extern "C" fn sparklink_genl_get_dli_info(out: *mut GenlDliInfo) -> i32 {
+pub unsafe extern "C" fn sparklink_genl_get_dli_info(out: *mut GenlDliInfo) -> i32 {
     let ss = SUBSYSTEM.lock();
     match ss.as_ref() {
         Some(shared) => {
             let ci = shared.controller.info();
+            // SAFETY: caller guarantees out is a valid, aligned pointer.
             let info = unsafe { &mut *out };
             info.bus_type = ci.bus as u8;
             info.max_conn = ci.max_connections;
@@ -1529,10 +1544,15 @@ pub struct SlePhyBwCmd {
 
 // SAFETY: All PHY ioctl structs are repr(C) with only primitive fields.
 unsafe impl FromBytes for SlePhyInfo {}
+// SAFETY: repr(C), all fields are primitives.
 unsafe impl FromBytes for SlePhyMcsCmd {}
+// SAFETY: repr(C), all fields are primitives.
 unsafe impl FromBytes for SlePhyTxPowerCmd {}
+// SAFETY: repr(C), all fields are primitives.
 unsafe impl FromBytes for SlePhyMcsSelect {}
+// SAFETY: repr(C), all fields are primitives.
 unsafe impl FromBytes for SlePhyHopInfo {}
+// SAFETY: repr(C), all fields are primitives.
 unsafe impl FromBytes for SlePhyBwCmd {}
 
 // ---------------------------------------------------------------------------
@@ -1815,21 +1835,26 @@ pub(crate) fn sle_attach_device(info: &sle_transport::SleAttachInfo) -> Result<u
     let default_pdu = proto.max_pdu;
 
     // Build a SleControllerInfo for device registration.
-    let mut ctrl_info = sle_dli::SleControllerInfo::default();
-    ctrl_info.bus = bus;
-    ctrl_info.addr = info.addr;
-    ctrl_info.fw_version = info.fw_version;
-    ctrl_info.features = info.features;
-    ctrl_info.max_pdu_payload = if info.max_pdu > 0 { info.max_pdu } else { default_pdu };
-    ctrl_info.max_connections = if info.max_connections > 0 {
-        info.max_connections
-    } else {
-        8
-    };
     let proto_name = proto.name;
     let name_bytes = proto_name.as_bytes();
-    let copy_len = name_bytes.len().min(ctrl_info.name.len());
-    ctrl_info.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+    let mut name_buf = [0u8; 32];
+    let copy_len = name_bytes.len().min(name_buf.len());
+    name_buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+    let ctrl_info = sle_dli::SleControllerInfo {
+        name: name_buf,
+        bus,
+        addr: info.addr,
+        fw_version: info.fw_version,
+        features: info.features,
+        max_pdu_payload: if info.max_pdu > 0 { info.max_pdu } else { default_pdu },
+        max_connections: if info.max_connections > 0 {
+            info.max_connections
+        } else {
+            8
+        },
+        ..Default::default()
+    };
 
     // Register in the SleDev registry.
     let dev_id = ss.dev_registry.register(&ctrl_info)?;
@@ -1901,7 +1926,7 @@ fn do_start_adv(interval_ms: u32, discovery_level: u8) -> Result<i32> {
         return Err(EPERM);
     }
     let interval = if interval_ms == 0 {
-        sle_configfs::adv_interval_ms() as u32
+        u32::from(sle_configfs::adv_interval_ms())
     } else {
         interval_ms
     };
@@ -1949,7 +1974,7 @@ fn do_start_scan(window_ms: u32, interval_ms: u32, filter_level: u8) -> Result<i
         return Err(EPERM);
     }
     let window = if window_ms == 0 {
-        sle_configfs::scan_window_ms() as u32
+        u32::from(sle_configfs::scan_window_ms())
     } else {
         window_ms
     };
@@ -2060,7 +2085,7 @@ pub(crate) fn sle_switch_controller_usb(dev_id: u16, addr: [u8; 6], fw_version: 
             );
         }
         // Sync device model with real hardware info from probe.
-        let _ = ss.dev_registry.update_hw_info(dev_id, addr, fw_version);
+        ss.dev_registry.update_hw_info(dev_id, addr, fw_version);
         pr_info!(
             "sparklink: controller switched to USB (sle{})\n",
             dev_id
@@ -2102,7 +2127,7 @@ pub(crate) fn sle_switch_controller_serdev(dev_id: u16, addr: [u8; 6], fw_versio
         ss.controller = sle_dli::ControllerBackend::new_serdev(addr, dev_id);
         ss.active_dev_id = Some(dev_id);
         // Sync device model with real hardware info from probe.
-        let _ = ss.dev_registry.update_hw_info(dev_id, addr, fw_version);
+        ss.dev_registry.update_hw_info(dev_id, addr, fw_version);
         pr_info!(
             "sparklink: controller switched to serdev (sle{})\n",
             dev_id
@@ -2286,11 +2311,8 @@ impl WorkItem for EventPump {
                 }
 
                 // Process tagged USB events, routing to correct device.
-                for i in 0..tagged_count {
-                    let (dev_id, ev_opt) = core::mem::replace(
-                        &mut tagged_events[i],
-                        (None, None),
-                    );
+                for item in tagged_events.iter_mut().take(tagged_count) {
+                    let (dev_id, ev_opt) = core::mem::take(item);
                     if let Some(ev) = ev_opt {
                         let active = shared.active_dev_id;
                         if dev_id.is_none() || dev_id == active {
@@ -2705,7 +2727,7 @@ impl kernel::InPlaceModule for SparkLinkModule {
                         for dev in ss.dev_registry.iter() {
                             let name_end = dev.name.iter().position(|&b| b == 0)
                                 .unwrap_or(dev.name.len());
-                            // SAFETY: device names are always ASCII.
+                            // Device names are always ASCII.
                             let name_str = core::str::from_utf8(&dev.name[..name_end])
                                 .unwrap_or("?");
                             writeln!(f, "  sle{}: {} bus={:?} addr={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} flags=0x{:08x}",
@@ -2786,6 +2808,7 @@ impl kernel::InPlaceModule for SparkLinkModule {
                     phy: sle_phy::PhyConfig::default_config(),
                     local_role: GtRole::TNode,
                     broadcast: sle_event::BroadcastRing::new(),
+                    // SAFETY: DliTraceRing is repr(C) with all-zero as valid initial state.
                     dli_ring: unsafe { core::mem::zeroed() },
                     dli_head: 0,
                     dli_tail: 0,
@@ -2899,7 +2922,7 @@ impl MiscDevice for SparkLinkCtl {
         match cmd {
             SL_IOCTL_START_ADV => {
                 let uparams: SleAdvParams = read_user_struct(arg)?;
-                do_start_adv(uparams.interval_ms as u32, uparams.discovery_level)?;
+                do_start_adv(u32::from(uparams.interval_ms), uparams.discovery_level)?;
                 Ok(0)
             }
             SL_IOCTL_STOP_ADV => {
@@ -2909,8 +2932,8 @@ impl MiscDevice for SparkLinkCtl {
             SL_IOCTL_START_SCAN => {
                 let uparams: SleScanParams = read_user_struct(arg)?;
                 do_start_scan(
-                    uparams.window_ms as u32,
-                    uparams.interval_ms as u32,
+                    u32::from(uparams.window_ms),
+                    u32::from(uparams.interval_ms),
                     uparams.filter_discovery_level,
                 )?;
                 Ok(0)
@@ -3173,10 +3196,12 @@ impl MiscDevice for SparkLinkCtl {
                 let resp: SleInjectConnResp = read_user_struct(arg)?;
                 let resp_type = AccessResponseType::from_raw(resp.response_type)
                     .ok_or(EINVAL)?;
-                let mut params = NegotiatedParams::default();
-                params.bandwidth_mhz = resp.bandwidth_mhz;
-                params.mcs_index = resp.mcs_index;
-                params.supervision_timeout = resp.supervision_timeout;
+                let params = NegotiatedParams {
+                    bandwidth_mhz: resp.bandwidth_mhz,
+                    mcs_index: resp.mcs_index,
+                    supervision_timeout: resp.supervision_timeout,
+                    ..Default::default()
+                };
                 let (handle, peer_addr, result) = {
                     let mut ss = SUBSYSTEM.lock();
                     let s = ss.as_mut().ok_or(ENODEV)?;
@@ -3241,9 +3266,7 @@ impl MiscDevice for SparkLinkCtl {
                 let mut list: SleConnList = unsafe { core::mem::zeroed() };
                 let count = count.min(8);
                 list.count = count as u16;
-                for i in 0..count {
-                    list.handles[i] = handles[i];
-                }
+                list.handles[..count].copy_from_slice(&handles[..count]);
                 drop(ss);
                 write_user_struct(arg, &list)?;
                 Ok(0)
@@ -3450,7 +3473,7 @@ impl MiscDevice for SparkLinkCtl {
             SL_IOCTL_SSAP_ADD_PROP => {
                 let mut cmd: SsapAddProperty = read_user_struct(arg)?;
                 let uuid = sle_ssap::SsapUuid::Uuid16(cmd.uuid16);
-                let ops = sle_ssap::OpIndicator::from_raw(cmd.ops as u32);
+                let ops = sle_ssap::OpIndicator::from_raw(u32::from(cmd.ops));
                 let len = (cmd.value_len as usize).min(248);
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
@@ -3480,7 +3503,7 @@ impl MiscDevice for SparkLinkCtl {
                     info.current_interval = s.power.interval.current_interval;
                     info.supervision_timeout = s.power.interval.supervision_timeout;
                     info.latency = s.power.interval.latency;
-                    info.idle_count = s.power.stats.active_events.min(u16::MAX as u64) as u16;
+                    info.idle_count = s.power.stats.active_events.min(u64::from(u16::MAX)) as u16;
                     info.transitions = s.power.stats.transitions;
                     info.active_events = s.power.stats.active_events;
                     info.sniff_events = s.power.stats.sniff_events;
@@ -3692,7 +3715,7 @@ impl MiscDevice for SparkLinkCtl {
                     mimo_mode: s.phy.antenna.mode as u8,
                     num_tx_ant: s.phy.antenna.num_tx,
                     num_rx_ant: s.phy.antenna.num_rx,
-                    ofdm: if mcs.map_or(false, |m| m.ofdm) { 1 } else { 0 },
+                    ofdm: if mcs.is_some_and(|m| m.ofdm) { 1 } else { 0 },
                     data_rate_kbps: s.phy.effective_data_rate_kbps(),
                     hop_channel: s.phy.hopping.last_channel,
                     hop_increment: s.phy.hopping.hop_increment,

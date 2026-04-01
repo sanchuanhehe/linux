@@ -45,18 +45,13 @@ pub mod tcid {
 
 /// Transport mode for a channel (T/XS 20002-2025).
 #[repr(u8)]
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub enum TransportMode {
     /// Unreliable delivery (no retransmission).
+    #[default]
     Unreliable = 0,
     /// Reliable delivery (credit-based flow control).
     Reliable = 1,
-}
-
-impl Default for TransportMode {
-    fn default() -> Self {
-        Self::Unreliable
-    }
 }
 
 /// State of a transport channel.

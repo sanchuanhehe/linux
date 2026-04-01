@@ -80,8 +80,8 @@ impl ConnInterval {
             return Err(EINVAL);
         }
         // Supervision timeout must be > (1 + latency) * max_interval * 2
-        let min_timeout = ((1 + self.latency as u32) * self.max_interval as u32 * 2) / 8;
-        if (self.supervision_timeout as u32) < min_timeout {
+        let min_timeout = ((1 + u32::from(self.latency)) * u32::from(self.max_interval) * 2) / 8;
+        if u32::from(self.supervision_timeout) < min_timeout {
             return Err(EINVAL);
         }
         if self.supervision_timeout < 10 || self.supervision_timeout > 3200 {
@@ -92,12 +92,12 @@ impl ConnInterval {
 
     /// Get the current interval in milliseconds.
     pub fn current_ms(&self) -> u32 {
-        (self.current_interval as u32) * 125 / 100 // 1.25 ms per unit
+        u32::from(self.current_interval) * 125 / 100 // 1.25 ms per unit
     }
 
     /// Get the supervision timeout in milliseconds.
     pub fn supervision_timeout_ms(&self) -> u32 {
-        self.supervision_timeout as u32 * 10
+        u32::from(self.supervision_timeout) * 10
     }
 }
 
@@ -296,8 +296,8 @@ impl PowerInner {
             PowerState::Active => 100,
             PowerState::Sniff => {
                 // Duty cycle based on window/interval ratio
-                let duty = (self.sniff.sniff_window as u32 * 100)
-                    / self.sniff.sniff_interval.max(1) as u32;
+                let duty = (u32::from(self.sniff.sniff_window) * 100)
+                    / u32::from(self.sniff.sniff_interval.max(1));
                 duty.min(100) as u8
             }
             PowerState::Idle => 5,

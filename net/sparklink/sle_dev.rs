@@ -236,7 +236,6 @@ pub(crate) struct SleDevRegistry {
 impl SleDevRegistry {
     /// Create an empty registry.
     pub(crate) const fn new() -> Self {
-        // SAFETY: SleDev is not Copy, so we must use array init with const.
         const NONE: Option<SleDev> = None;
         Self {
             slots: [NONE; SLE_DEV_MAX],

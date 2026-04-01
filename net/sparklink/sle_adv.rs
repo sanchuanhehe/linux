@@ -303,8 +303,10 @@ impl AdvScanInner {
             return Err(EPERM);
         }
 
-        let mut result = ScanResult::default();
-        result.rssi = rssi;
+        let mut result = ScanResult {
+            rssi,
+            ..Default::default()
+        };
 
         // Copy raw advertising data
         let dlen = pdu.data_len.min(SLE_ADV_DATA_MAX);
@@ -360,10 +362,12 @@ impl AdvScanInner {
         if discovery_level < self.scan_params.filter_level {
             return Ok(());
         }
-        let mut result = ScanResult::default();
-        result.addr = *addr;
-        result.rssi = rssi;
-        result.discovery_level = discovery_level;
+        let mut result = ScanResult {
+            addr: *addr,
+            rssi,
+            discovery_level,
+            ..Default::default()
+        };
         let dlen = data.len().min(SLE_ADV_DATA_MAX);
         result.adv_data[..dlen].copy_from_slice(&data[..dlen]);
         result.adv_data_len = dlen;

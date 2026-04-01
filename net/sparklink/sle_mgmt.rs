@@ -252,3 +252,88 @@ impl CmdPendingQueue {
         self.entries.iter().filter_map(|s| s.as_ref()).find(|e| e.seq == seq)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Command request queue (outgoing command buffer)
+// ---------------------------------------------------------------------------
+
+/// Maximum parameter length per command request.
+const CMD_REQ_PARAM_MAX: usize = 240;
+
+/// Command request to be sent to the controller asynchronously.
+pub(crate) struct CmdRequest {
+    /// DLI opcode (raw u16).
+    pub(crate) opcode: u16,
+    /// Parameter data.
+    pub(crate) params: [u8; CMD_REQ_PARAM_MAX],
+    /// Valid parameter length.
+    pub(crate) param_len: u16,
+}
+
+/// Maximum depth of the command request queue.
+const CMD_REQ_QUEUE_DEPTH: usize = 16;
+
+/// Fixed-size ring buffer for outgoing command requests.
+///
+/// Commands are enqueued from the ioctl path and dequeued by the
+/// `CommandWorker` running in workqueue context.
+pub(crate) struct CmdRequestQueue {
+    entries: [Option<CmdRequest>; CMD_REQ_QUEUE_DEPTH],
+    head: usize,
+    tail: usize,
+    count: u16,
+}
+
+impl CmdRequestQueue {
+    /// Create an empty queue.
+    pub(crate) const fn new() -> Self {
+        const NONE: Option<CmdRequest> = None;
+        Self {
+            entries: [NONE; CMD_REQ_QUEUE_DEPTH],
+            head: 0,
+            tail: 0,
+            count: 0,
+        }
+    }
+
+    /// Enqueue a command request. Returns `EBUSY` if the queue is full.
+    pub(crate) fn push(&mut self, opcode: u16, params: &[u8]) -> Result {
+        if self.count as usize >= CMD_REQ_QUEUE_DEPTH {
+            return Err(EBUSY);
+        }
+        let mut req = CmdRequest {
+            opcode,
+            params: [0u8; CMD_REQ_PARAM_MAX],
+            param_len: params.len().min(CMD_REQ_PARAM_MAX) as u16,
+        };
+        let copy_len = req.param_len as usize;
+        req.params[..copy_len].copy_from_slice(&params[..copy_len]);
+        self.entries[self.tail] = Some(req);
+        self.tail = (self.tail + 1) % CMD_REQ_QUEUE_DEPTH;
+        self.count += 1;
+        Ok(())
+    }
+
+    /// Dequeue the next command request. Returns `None` if empty.
+    pub(crate) fn pop(&mut self) -> Option<CmdRequest> {
+        if self.count == 0 {
+            return None;
+        }
+        let req = self.entries[self.head].take();
+        self.head = (self.head + 1) % CMD_REQ_QUEUE_DEPTH;
+        if req.is_some() {
+            self.count -= 1;
+        }
+        req
+    }
+
+    /// Number of queued requests.
+    pub(crate) fn len(&self) -> u16 {
+        self.count
+    }
+
+    /// Whether the queue is empty.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}

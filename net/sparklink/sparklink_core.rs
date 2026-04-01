@@ -1500,12 +1500,16 @@ struct SubsystemShared {
     dli_tail: usize,
     /// Background event pump handle. Kept alive while subsystem is active.
     _event_pump: Option<Arc<EventPump>>,
+    /// Background command worker handle.
+    _cmd_worker: Option<Arc<CommandWorker>>,
     /// Per-controller device registry.
     dev_registry: sle_dev::SleDevRegistry,
     /// Index of the active device in the registry (`None` = no controller).
     active_dev_id: Option<u16>,
     /// Command pending queue for management plane.
     cmd_pending: sle_mgmt::CmdPendingQueue,
+    /// Outgoing command request queue (async dispatch).
+    cmd_queue: sle_mgmt::CmdRequestQueue,
 }
 
 impl SubsystemShared {
@@ -1618,6 +1622,85 @@ impl WorkItem for EventPump {
             this,
             msecs_to_jiffies(EVENT_PUMP_INTERVAL_MS),
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Background command worker (TX dispatch)
+// ---------------------------------------------------------------------------
+
+/// Minimum interval between command dispatch cycles (milliseconds).
+const CMD_WORKER_INTERVAL_MS: u32 = 10;
+
+/// Background worker that dequeues command requests from `cmd_queue`
+/// and sends them to the controller in workqueue context.
+///
+/// This decouples command submission (ioctl) from hardware transmission,
+/// following the Bluetooth `hci_cmd_work` pattern. Benefits:
+/// - Reduces ioctl lock hold time
+/// - Enables future flow control (credit-based throttling)
+/// - Makes real hardware latency non-blocking for userspace
+#[pin_data]
+struct CommandWorker {
+    #[pin]
+    work: DelayedWork<CommandWorker>,
+}
+
+impl_has_delayed_work! {
+    impl HasDelayedWork<Self> for CommandWorker { self.work }
+}
+
+impl CommandWorker {
+    fn new() -> Result<Arc<Self>> {
+        Arc::pin_init(pin_init!(CommandWorker {
+            work <- new_delayed_work!("sparklink_cmd_worker"),
+        }), GFP_KERNEL)
+    }
+
+    /// Schedule the command worker to run soon.
+    fn kick(self: &Arc<Self>) {
+        let _ = workqueue::system().enqueue_delayed(
+            self.clone(),
+            msecs_to_jiffies(CMD_WORKER_INTERVAL_MS),
+        );
+    }
+}
+
+impl WorkItem for CommandWorker {
+    type Pointer = Arc<CommandWorker>;
+
+    fn run(this: Arc<CommandWorker>) {
+        let mut dispatched = 0u32;
+        {
+            let mut ss = SUBSYSTEM.lock();
+            if let Some(ref mut shared) = *ss {
+                // Dispatch up to 8 commands per cycle.
+                while dispatched < 8 {
+                    match shared.cmd_queue.pop() {
+                        Some(req) => {
+                            let plen = req.param_len as usize;
+                            let _ = shared.controller.send_command_raw(
+                                req.opcode,
+                                &req.params[..plen],
+                            );
+                            dispatched += 1;
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        // Re-arm if there are more commands pending.
+        if dispatched > 0 {
+            let ss = SUBSYSTEM.lock();
+            if let Some(ref shared) = *ss {
+                if !shared.cmd_queue.is_empty() {
+                    drop(ss);
+                    this.kick();
+                }
+            }
+        }
     }
 }
 
@@ -1850,6 +1933,8 @@ impl kernel::InPlaceModule for SparkLinkModule {
                     p.start();
                 }
 
+                let cmd_worker = CommandWorker::new().ok();
+
                 // Register the controller in the device registry.
                 let ctrl_info = controller.info();
                 let mut dev_registry = sle_dev::SleDevRegistry::new();
@@ -1869,9 +1954,11 @@ impl kernel::InPlaceModule for SparkLinkModule {
                     dli_head: 0,
                     dli_tail: 0,
                     _event_pump: pump,
+                    _cmd_worker: cmd_worker,
                     dev_registry,
                     active_dev_id: dev_id,
                     cmd_pending: sle_mgmt::CmdPendingQueue::new(),
+                    cmd_queue: sle_mgmt::CmdRequestQueue::new(),
                 });
                 pr_info!("sparklink: shared subsystem initialised\n");
                 SubsystemGuard
@@ -2729,7 +2816,7 @@ impl MiscDevice for SparkLinkCtl {
                 s.controller.reset()?;
                 Ok(0)
             }
-            // --- DLI send command (management plane) ---
+            // --- DLI send command (management plane, async dispatch) ---
             SL_IOCTL_DLI_SEND_CMD => {
                 let mut cmd: SleDliCmd = read_user_struct(arg)?;
                 let param_len = (cmd.param_len as usize).min(240);
@@ -2737,22 +2824,20 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
 
-                // Submit to pending queue first.
+                // Submit to pending queue (tracking).
                 let seq = s.cmd_pending.submit(cmd.opcode)?;
-                // Send the command to the controller via raw opcode.
-                match s.controller.send_command_raw(cmd.opcode, &cmd.params[..param_len]) {
-                    Ok(()) => {
-                        cmd.seq = seq;
-                        drop(ss);
-                        write_user_struct(arg, &cmd)?;
-                        Ok(0)
-                    }
-                    Err(e) => {
-                        // Resolve immediately as failed so the slot is freed.
-                        s.cmd_pending.resolve(cmd.opcode, 0xFF, &[]);
-                        Err(e)
-                    }
+                // Enqueue to command request queue (async dispatch).
+                s.cmd_queue.push(cmd.opcode, &cmd.params[..param_len])?;
+
+                // Kick the command worker to dispatch.
+                if let Some(ref w) = s._cmd_worker {
+                    w.kick();
                 }
+
+                cmd.seq = seq;
+                drop(ss);
+                write_user_struct(arg, &cmd)?;
+                Ok(0)
             }
             // --- Management plane statistics ---
             SL_IOCTL_MGMT_STATS => {

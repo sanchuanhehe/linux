@@ -379,6 +379,16 @@ const SL_IOCTL_DEV_COUNT: u32 = _IOR::<u32>(SL_MAGIC, 0x03);
 /// Get device info by index.
 const SL_IOCTL_DEV_INFO: u32 = _IOR::<SciDevInfo>(SL_MAGIC, 0x04);
 
+/// Switch the active controller device by index (u16).
+///
+/// Saves the current active device's protocol state and restores
+/// the target device's state (swap-on-switch).  Returns ENODEV if
+/// the target device is not registered or has no saved state.
+const SL_IOCTL_DEV_SWITCH: u32 = _IOW::<u16>(SL_MAGIC, 0x05);
+
+/// List all registered device IDs (returns bitmask u16).
+const SL_IOCTL_DEV_LIST: u32 = _IOR::<u16>(SL_MAGIC, 0x06);
+
 /// Start SLE advertising (device discovery - discoverable side).
 const SL_IOCTL_START_ADV: u32 = _IOW::<SleAdvParams>(SL_MAGIC, 0x10);
 
@@ -1547,15 +1557,21 @@ pub enum SciBus {
 // ---------------------------------------------------------------------------
 // Global shared subsystem state
 // ---------------------------------------------------------------------------
-// The SparkLink subsystem uses a single shared controller and protocol state
-// that is shared across all open file descriptors.  Each fd gets its own
-// event queue for per-listener event delivery, but the radio controller,
-// connection table, advertising state, PHY config, security context, SSAP
-// services, and power management are shared.
+// The SparkLink subsystem supports multiple controllers (up to SLE_DEV_MAX).
+// Each controller has its own protocol state (connections, advertising,
+// security, SSAP, power, PHY).  At any time one controller is "active"
+// and its state is stored directly in the SubsystemShared fields for
+// zero-cost access by the 100+ call sites that reference them.
 //
-// This matches the hardware model: there is one physical radio, one set of
-// connections, one advertising state.  Multiple userspace processes opening
-// /dev/sparklink see the SAME radio and connection table.
+// When the active device switches, the current state is saved into
+// `saved_states[old_id]` and the new device's state is restored from
+// `saved_states[new_id]` (swap-on-switch pattern).  This means that
+// multiple USB controllers can coexist without destroying each other's
+// state.
+//
+// Each open fd gets its own event queue for per-listener event delivery.
+// Protocol state (controller, connections, advertising, security, SSAP,
+// power, PHY) is per-device and shared across fds via the SUBSYSTEM mutex.
 
 kernel::sync::global_lock! {
     // SAFETY: Initialized in module_init before any MiscDevice open() call.
@@ -1568,6 +1584,73 @@ static OPEN_FD_COUNT: kernel::sync::atomic::Atomic<u32> =
 
 /// DLI event ring size (events consumed from controller by EventPump).
 const DLI_RING_SIZE: usize = 32;
+
+/// Saved per-device protocol state.
+///
+/// When the active device switches, its live state (controller, conn,
+/// adv_scan, security, ssap, power, phy) is packed into this struct
+/// and stored in `SubsystemShared::saved_states[dev_id]`.  When the
+/// device becomes active again, the state is unpacked back into the
+/// live fields.
+struct PerDeviceState {
+    controller: sle_dli::ControllerBackend,
+    conn: ConnManager,
+    adv_scan: AdvScanInner,
+    security: SecurityInner,
+    ssap: SsapInner,
+    power: PowerInner,
+    phy: sle_phy::PhyConfig,
+    local_role: GtRole,
+}
+
+impl PerDeviceState {
+    /// Create fresh state for a newly activated device.
+    fn new_for_device(addr: [u8; 6], backend: sle_dli::ControllerBackend) -> Self {
+        Self {
+            controller: backend,
+            conn: ConnManager::new(addr),
+            adv_scan: AdvScanInner::new(addr, b"sparklink"),
+            security: SecurityInner::new(),
+            ssap: SsapInner::new(),
+            power: PowerInner::new(),
+            phy: sle_phy::PhyConfig::default_config(),
+            local_role: GtRole::TNode,
+        }
+    }
+
+    /// Save the live state from SubsystemShared into this container.
+    fn take_from(ss: &mut SubsystemShared) -> Self {
+        let placeholder = [0u8; 6];
+        Self {
+            controller: core::mem::replace(
+                &mut ss.controller,
+                sle_dli::ControllerBackend::new_virtual(placeholder),
+            ),
+            conn: core::mem::replace(&mut ss.conn, ConnManager::new(placeholder)),
+            adv_scan: core::mem::replace(
+                &mut ss.adv_scan,
+                AdvScanInner::new(placeholder, b""),
+            ),
+            security: core::mem::replace(&mut ss.security, SecurityInner::new()),
+            ssap: core::mem::replace(&mut ss.ssap, SsapInner::new()),
+            power: core::mem::replace(&mut ss.power, PowerInner::new()),
+            phy: core::mem::replace(&mut ss.phy, sle_phy::PhyConfig::default_config()),
+            local_role: core::mem::replace(&mut ss.local_role, GtRole::TNode),
+        }
+    }
+
+    /// Restore this container's state into the live SubsystemShared fields.
+    fn restore_into(self, ss: &mut SubsystemShared) {
+        ss.controller = self.controller;
+        ss.conn = self.conn;
+        ss.adv_scan = self.adv_scan;
+        ss.security = self.security;
+        ss.ssap = self.ssap;
+        ss.power = self.power;
+        ss.phy = self.phy;
+        ss.local_role = self.local_role;
+    }
+}
 
 /// Shared state across all open file descriptors.
 /// Protected by the SUBSYSTEM global mutex.
@@ -1604,6 +1687,11 @@ struct SubsystemShared {
     proto_registry: sle_transport::SleProtoRegistry,
     /// Device-to-transport binding table.
     dev_bindings: sle_transport::SleBindingTable,
+    /// Saved per-device states for inactive devices (heap-allocated).
+    /// Stored as (dev_id, state) pairs. When the active device switches,
+    /// its state is saved here. Typically holds at most N-1 entries for N
+    /// registered controllers.
+    saved_states: KVec<(u16, PerDeviceState)>,
 }
 
 impl SubsystemShared {
@@ -1623,6 +1711,86 @@ impl SubsystemShared {
         let ev = self.dli_ring[self.dli_head];
         self.dli_head = (self.dli_head + 1) % DLI_RING_SIZE;
         Some(ev)
+    }
+
+    /// Look up and remove a saved state by device ID.
+    fn take_saved_state(&mut self, dev_id: u16) -> Option<PerDeviceState> {
+        if let Some(pos) = self.saved_states.iter().position(|(id, _)| *id == dev_id) {
+            // Swap the found element with the last, then truncate.
+            let last = self.saved_states.len() - 1;
+            if pos != last {
+                self.saved_states.swap(pos, last);
+            }
+            self.saved_states.pop().map(|(_, state)| state)
+        } else {
+            None
+        }
+    }
+
+    /// Save a state for a device ID. Replaces any existing entry.
+    fn save_state(&mut self, dev_id: u16, state: PerDeviceState) {
+        // Remove existing entry for this dev_id, if any.
+        if let Some(pos) = self.saved_states.iter().position(|(id, _)| *id == dev_id) {
+            let last = self.saved_states.len() - 1;
+            if pos != last {
+                self.saved_states.swap(pos, last);
+            }
+            self.saved_states.pop();
+        }
+        // Best-effort push; if allocation fails the state is dropped.
+        let _ = self.saved_states.push((dev_id, state), GFP_KERNEL);
+    }
+
+    /// Discard saved state for a device (on detach).
+    fn discard_saved_state(&mut self, dev_id: u16) {
+        if let Some(pos) = self.saved_states.iter().position(|(id, _)| *id == dev_id) {
+            let last = self.saved_states.len() - 1;
+            if pos != last {
+                self.saved_states.swap(pos, last);
+            }
+            self.saved_states.pop();
+        }
+    }
+
+    /// Switch the active device.
+    ///
+    /// Saves the current active device's protocol state, then restores
+    /// (or creates) the state for `new_id`.  All live field accessors
+    /// (`self.controller`, `self.conn`, etc.) transparently refer to
+    /// the new device after this call.
+    fn switch_active_device(
+        &mut self,
+        new_id: u16,
+        new_state: Option<PerDeviceState>,
+    ) -> Result {
+        if new_id as usize >= sle_dev::SLE_DEV_MAX {
+            return Err(EINVAL);
+        }
+        // Save current live state for the old active device.
+        if let Some(old_id) = self.active_dev_id {
+            if old_id == new_id {
+                // Already active; if caller provided new_state, apply it.
+                if let Some(state) = new_state {
+                    state.restore_into(self);
+                }
+                return Ok(());
+            }
+            let saved = PerDeviceState::take_from(self);
+            self.save_state(old_id, saved);
+        }
+        // Restore saved state for the new device, or use the caller-
+        // supplied state for first activation.
+        let state = if let Some(saved) = self.take_saved_state(new_id) {
+            // Prefer saved state (preserves prior connections etc.).
+            saved
+        } else if let Some(fresh) = new_state {
+            fresh
+        } else {
+            return Err(ENODEV);
+        };
+        state.restore_into(self);
+        self.active_dev_id = Some(new_id);
+        Ok(())
     }
 }
 
@@ -1691,20 +1859,28 @@ pub(crate) fn sle_attach_device(info: &sle_transport::SleAttachInfo) -> Result<u
 /// Detach a device from the subsystem.
 ///
 /// Called from USB disconnect, serdev remove, or module unload cleanup.
-/// Removes the transport binding and unregisters the SleDev.
+/// Removes the transport binding and unregisters the SleDev.  If the
+/// device was the active one, reverts to the virtual backend.  If it
+/// was inactive, its saved state is discarded.
 pub(crate) fn sle_detach_device(dev_id: u16) {
     let mut ss = SUBSYSTEM.lock();
     if let Some(ss) = ss.as_mut() {
         // Remove the transport binding first.
         ss.dev_bindings.remove(dev_id);
 
-        // If this was the active device, clear the active pointer
-        // and revert controller to Virtual backend.
         if ss.active_dev_id == Some(dev_id) {
-            ss.active_dev_id = None;
+            // Active device detached: revert to virtual controller.
             let virt_addr = [0x5E, 0x00, 0x00, 0x00, 0x00, 0x00];
-            ss.controller = sle_dli::ControllerBackend::new_virtual(virt_addr);
+            let backend = sle_dli::ControllerBackend::new_virtual(virt_addr);
+            let virt_state = PerDeviceState::new_for_device(virt_addr, backend);
+            // Don't save the detaching device's state.
+            ss.active_dev_id = None;
+            virt_state.restore_into(ss);
+            // active_dev_id stays None (no registered virtual device).
             pr_info!("sparklink: reverted to virtual controller\n");
+        } else {
+            // Inactive device: discard its saved state.
+            ss.discard_saved_state(dev_id);
         }
 
         // Unregister the device from the registry.
@@ -1861,13 +2037,21 @@ pub extern "C" fn sparklink_do_stop_scan() -> i32 {
 /// Switch the subsystem controller backend to USB.
 ///
 /// Called from USB probe after sle_attach_device and C-side registration
-/// succeed. This replaces the current controller (typically Virtual) with
-/// a USB controller that dispatches commands through the C FFI layer.
+/// succeed. Creates per-device protocol state and switches the active
+/// device using swap-on-switch.  The previous active device's state is
+/// preserved in `saved_states` and can be restored later.
 pub(crate) fn sle_switch_controller_usb(dev_id: u16, addr: [u8; 6], fw_version: u32) {
     let mut ss = SUBSYSTEM.lock();
     if let Some(ss) = ss.as_mut() {
-        ss.controller = sle_dli::ControllerBackend::new_usb(addr, dev_id);
-        ss.active_dev_id = Some(dev_id);
+        let backend = sle_dli::ControllerBackend::new_usb(addr, dev_id);
+        let new_state = PerDeviceState::new_for_device(addr, backend);
+        if let Err(e) = ss.switch_active_device(dev_id, Some(new_state)) {
+            pr_err!(
+                "sparklink: failed to switch to USB sle{}: {:?}\n",
+                dev_id, e
+            );
+            return;
+        }
         // Sync device model with real hardware info from probe.
         let _ = ss.dev_registry.update_hw_info(dev_id, addr, fw_version);
         pr_info!(
@@ -2562,6 +2746,7 @@ impl kernel::InPlaceModule for SparkLinkModule {
                     cmd_queue: sle_mgmt::CmdRequestQueue::new(),
                     proto_registry,
                     dev_bindings: sle_transport::SleBindingTable::new(),
+                    saved_states: KVec::new(),
                 });
                 pr_info!("sparklink: shared subsystem initialised\n");
                 SubsystemGuard
@@ -2727,6 +2912,26 @@ impl MiscDevice for SparkLinkCtl {
             }
             SL_IOCTL_DEV_UNREGISTER => {
                 dev_info!(me.dev, "sparklink: DEV_UNREGISTER via ioctl (use module unload for real unregistration)\n");
+                Ok(0)
+            }
+            SL_IOCTL_DEV_SWITCH => {
+                let target_id: u16 = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                // Verify the target device exists in the registry.
+                if s.dev_registry.get(target_id).is_none() {
+                    return Err(ENODEV);
+                }
+                s.switch_active_device(target_id, None)?;
+                pr_info!("sparklink: switched active device to sle{}\n", target_id);
+                Ok(0)
+            }
+            SL_IOCTL_DEV_LIST => {
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let mask = s.dev_registry.allocated_mask();
+                drop(ss);
+                write_user_struct(arg, &mask)?;
                 Ok(0)
             }
             SL_IOCTL_INJECT_ADV => {

@@ -42,6 +42,8 @@
 #define SL_IOCTL_DEV_UNREGISTER  _IOW(SL_MAGIC, 0x02, uint16_t)
 #define SL_IOCTL_DEV_COUNT       _IOR(SL_MAGIC, 0x03, uint32_t)
 #define SL_IOCTL_DEV_INFO        _IOR(SL_MAGIC, 0x04, struct sci_dev_info)
+#define SL_IOCTL_DEV_SWITCH      _IOW(SL_MAGIC, 0x05, uint16_t)
+#define SL_IOCTL_DEV_LIST        _IOR(SL_MAGIC, 0x06, uint16_t)
 
 #define SL_IOCTL_START_ADV       _IOW(SL_MAGIC, 0x10, struct sle_adv_params)
 #define SL_IOCTL_STOP_ADV        _IO(SL_MAGIC, 0x11)
@@ -2888,6 +2890,128 @@ static void test_ioctl_throughput(int fd)
 	}
 }
 
+/* ------------------------------------------------------------------ */
+/* Multi-controller runtime model                                     */
+/* ------------------------------------------------------------------ */
+
+static void test_multi_controller(int fd)
+{
+	test_header("multi-controller: DEV_LIST and DEV_SWITCH");
+
+	/*
+	 * The virtual controller is registered at init.
+	 * DEV_LIST returns a bitmask of allocated device IDs.
+	 */
+	uint16_t mask = 0;
+	int ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
+	if (ret < 0) {
+		printf("  FAIL: DEV_LIST ioctl: %s\n", strerror(errno));
+		return;
+	}
+	/* At least one device (the virtual controller) should be registered. */
+	int count = __builtin_popcount(mask);
+	if (count < 1) {
+		printf("  FAIL: DEV_LIST returned 0 devices\n");
+		return;
+	}
+	printf("  OK:   DEV_LIST: mask=0x%04x (%d devices)\n", mask, count);
+
+	/*
+	 * DEV_SWITCH to a non-existent device should fail with ENODEV.
+	 */
+	uint16_t bad_id = 15;
+	ret = ioctl(fd, SL_IOCTL_DEV_SWITCH, &bad_id);
+	if (ret == 0) {
+		printf("  FAIL: DEV_SWITCH to non-existent dev15 succeeded\n");
+	} else if (errno == ENODEV || errno == EINVAL) {
+		printf("  OK:   DEV_SWITCH to dev15 rejected (errno=%d)\n", errno);
+	} else {
+		printf("  FAIL: DEV_SWITCH to dev15: unexpected errno=%d\n", errno);
+	}
+
+	/*
+	 * DEV_SWITCH back to the current (only) device should succeed.
+	 * Find the lowest allocated bit as the current device.
+	 */
+	int first_id = __builtin_ctz(mask);
+	uint16_t cur_id = (uint16_t)first_id;
+	ret = ioctl(fd, SL_IOCTL_DEV_SWITCH, &cur_id);
+	if (ret < 0) {
+		printf("  FAIL: DEV_SWITCH to current device (sle%d): %s\n",
+		       first_id, strerror(errno));
+	} else {
+		printf("  OK:   DEV_SWITCH to current device sle%d\n", first_id);
+	}
+
+	/*
+	 * Verify device info still valid after switch-to-self.
+	 */
+	ret = ioctl(fd, SL_IOCTL_DEV_COUNT, NULL);
+	if (ret == count) {
+		printf("  OK:   DEV_COUNT=%d after switch (consistent)\n", ret);
+	} else {
+		printf("  FAIL: DEV_COUNT changed after switch: %d -> %d\n",
+		       count, ret);
+	}
+
+	/*
+	 * Multi-device tests: if more than one controller is attached,
+	 * exercise switching between them.
+	 */
+	if (count >= 2) {
+		printf("  OK:   Multi-device detected (%d controllers)\n", count);
+
+		/* Find two distinct device IDs from the mask */
+		int id_a = __builtin_ctz(mask);
+		int id_b = __builtin_ctz(mask & ~(1u << id_a));
+
+		/* Switch to device B */
+		uint16_t target = (uint16_t)id_b;
+		ret = ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+		if (ret < 0) {
+			printf("  FAIL: DEV_SWITCH to sle%d: %s\n",
+			       id_b, strerror(errno));
+		} else {
+			printf("  OK:   DEV_SWITCH to sle%d succeeded\n", id_b);
+		}
+
+		/* Verify DEV_LIST unchanged after switch */
+		uint16_t new_mask = 0;
+		ret = ioctl(fd, SL_IOCTL_DEV_LIST, &new_mask);
+		if (ret < 0) {
+			printf("  FAIL: DEV_LIST after switch: %s\n",
+			       strerror(errno));
+		} else if (new_mask == mask) {
+			printf("  OK:   DEV_LIST consistent after switch (0x%04x)\n",
+			       new_mask);
+		} else {
+			printf("  FAIL: DEV_LIST changed: 0x%04x -> 0x%04x\n",
+			       mask, new_mask);
+		}
+
+		/* Switch back to device A */
+		target = (uint16_t)id_a;
+		ret = ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+		if (ret < 0) {
+			printf("  FAIL: DEV_SWITCH back to sle%d: %s\n",
+			       id_a, strerror(errno));
+		} else {
+			printf("  OK:   DEV_SWITCH back to sle%d succeeded\n", id_a);
+		}
+
+		/* Verify DEV_COUNT still consistent */
+		ret = ioctl(fd, SL_IOCTL_DEV_COUNT, NULL);
+		if (ret == count) {
+			printf("  OK:   DEV_COUNT=%d after round-trip switch\n", ret);
+		} else {
+			printf("  FAIL: DEV_COUNT after round-trip: %d -> %d\n",
+			       count, ret);
+		}
+	} else {
+		printf("  OK:   Single controller — multi-device switch test skipped\n");
+	}
+}
+
 static void test_genetlink(void)
 {
 	test_header("Generic Netlink: sparklink family");
@@ -2974,6 +3098,18 @@ int main(void)
 	}
 	printf("Opened %s (fd=%d)\n", DEVICE, fd);
 
+	/*
+	 * If USB controllers were attached during boot, the active
+	 * controller may be USB-backed.  Switch to sle0 (virtual) so
+	 * that all standard tests run against the predictable virtual
+	 * backend; multi_controller tests exercise switching later.
+	 */
+	{
+		uint16_t dev0 = 0;
+		if (ioctl(fd, SL_IOCTL_DEV_SWITCH, &dev0) == 0)
+			printf("Switched to sle0 (virtual controller)\n");
+	}
+
 	test_dev_count(fd);
 	test_dev_info(fd);
 	test_dev_register(fd);
@@ -3007,6 +3143,7 @@ int main(void)
 	test_ioctl_throughput(fd);
 	test_configfs();
 	test_configfs_ioctl_integration(fd);
+	test_multi_controller(fd);
 	test_genetlink();
 
 	printf("\n=== All tests completed ===\n");

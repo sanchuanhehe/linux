@@ -140,6 +140,9 @@ typedef struct SleDliConn {
     bool     active;
     uint16_t handle;
     uint8_t  peer_addr[6];
+    /* Link to the remote device's connection slot for data relay */
+    struct USBSleDliState *remote_dev;
+    int      remote_slot;
 } SleDliConn;
 
 struct USBSleDliState {
@@ -182,7 +185,161 @@ struct USBSleDliState {
     /* Properties */
     char     *cmd_path;  /* "dual", "bulk-compat", "control-only" */
     char     *fw_mode;   /* "accept", "missing", "fail" */
+
+    /* Inter-device air medium link */
+    QTAILQ_ENTRY(USBSleDliState) air_link;
 };
+
+/* Forward declarations for functions used by air medium logic */
+static void sle_dli_disconnected(USBSleDliState *s, uint16_t handle,
+                                 uint8_t reason);
+static void sle_dli_broadcast_report(USBSleDliState *s,
+                                     const SleDliPeer *peer);
+static void sle_dli_queue_data(USBSleDliState *s,
+                               const uint8_t *buf, int len);
+static void sle_dli_conn_complete(USBSleDliState *s, uint8_t status,
+                                  uint16_t handle, const uint8_t *peer_addr);
+
+/* --------------------------------------------------------------------
+ * Global air medium: shared registry of all usb-sle-dli instances
+ * -------------------------------------------------------------------- */
+
+static QTAILQ_HEAD(, USBSleDliState) sle_air_devices =
+    QTAILQ_HEAD_INITIALIZER(sle_air_devices);
+
+/* Find a peer device on the air medium by MAC address */
+static USBSleDliState *sle_air_find_by_addr(const uint8_t *addr)
+{
+    USBSleDliState *dev;
+    QTAILQ_FOREACH(dev, &sle_air_devices, air_link) {
+        if (memcmp(dev->mac_addr, addr, 6) == 0) {
+            return dev;
+        }
+    }
+    return NULL;
+}
+
+/* Register a device on the air medium */
+static void sle_air_register(USBSleDliState *s)
+{
+    QTAILQ_INSERT_TAIL(&sle_air_devices, s, air_link);
+}
+
+/* Unregister a device from the air medium */
+static void sle_air_unregister(USBSleDliState *s)
+{
+    QTAILQ_REMOVE(&sle_air_devices, s, air_link);
+}
+
+/* Notify all scanning devices about a broadcasting device */
+static void sle_air_broadcast_notify(USBSleDliState *broadcaster)
+{
+    USBSleDliState *dev;
+    SleDliPeer fake_peer;
+
+    memset(&fake_peer, 0, sizeof(fake_peer));
+    fake_peer.active = true;
+    memcpy(fake_peer.addr, broadcaster->mac_addr, 6);
+    fake_peer.rssi = -30;  /* close proximity simulated */
+    fake_peer.discovery_level = 2;
+    /* Copy device name from serial string */
+    const char *name = "SLE-Device";
+    fake_peer.name_len = strlen(name);
+    memcpy(fake_peer.name, name, fake_peer.name_len);
+
+    QTAILQ_FOREACH(dev, &sle_air_devices, air_link) {
+        if (dev == broadcaster) {
+            continue;
+        }
+        if (dev->scanning) {
+            sle_dli_broadcast_report(dev, &fake_peer);
+        }
+    }
+}
+
+/* Create a bidirectional connection between two devices */
+static bool sle_air_connect(USBSleDliState *initiator,
+                            const uint8_t *peer_addr,
+                            int initiator_slot)
+{
+    USBSleDliState *acceptor = sle_air_find_by_addr(peer_addr);
+    if (!acceptor || acceptor == initiator) {
+        return false;
+    }
+
+    /* Find a free slot on the acceptor side */
+    int acceptor_slot = -1;
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        if (!acceptor->connections[i].active) {
+            acceptor_slot = i;
+            break;
+        }
+    }
+    if (acceptor_slot < 0) {
+        return false;
+    }
+
+    /* Set up the acceptor's connection */
+    acceptor->connections[acceptor_slot].active = true;
+    acceptor->connections[acceptor_slot].handle = acceptor->next_handle++;
+    memcpy(acceptor->connections[acceptor_slot].peer_addr,
+           initiator->mac_addr, 6);
+    acceptor->connections[acceptor_slot].remote_dev = initiator;
+    acceptor->connections[acceptor_slot].remote_slot = initiator_slot;
+
+    /* Link the initiator back to the acceptor */
+    initiator->connections[initiator_slot].remote_dev = acceptor;
+    initiator->connections[initiator_slot].remote_slot = acceptor_slot;
+
+    /* Generate ConnEstablished event on the acceptor */
+    sle_dli_conn_complete(acceptor, 0x00,
+                          acceptor->connections[acceptor_slot].handle,
+                          initiator->mac_addr);
+
+    return true;
+}
+
+/* Relay data from one connected device to its peer */
+static void sle_air_relay_data(USBSleDliState *sender,
+                               int conn_slot,
+                               const uint8_t *data, int len)
+{
+    SleDliConn *conn = &sender->connections[conn_slot];
+    if (!conn->active || !conn->remote_dev) {
+        return;
+    }
+
+    USBSleDliState *receiver = conn->remote_dev;
+    /* Queue the data as an async data packet on the receiver */
+    sle_dli_queue_data(receiver, data, len);
+}
+
+/* Disconnect and notify the remote side */
+static void sle_air_disconnect(USBSleDliState *local, int slot,
+                               uint8_t reason)
+{
+    SleDliConn *conn = &local->connections[slot];
+    if (!conn->remote_dev) {
+        return;
+    }
+
+    USBSleDliState *remote = conn->remote_dev;
+    int remote_slot = conn->remote_slot;
+
+    /* Clean up this side's link */
+    conn->remote_dev = NULL;
+    conn->remote_slot = -1;
+
+    /* Disconnect the remote side */
+    if (remote_slot >= 0 && remote_slot < MAX_CONNECTIONS &&
+        remote->connections[remote_slot].active) {
+        uint16_t remote_handle = remote->connections[remote_slot].handle;
+        remote->connections[remote_slot].active = false;
+        remote->connections[remote_slot].remote_dev = NULL;
+        remote->connections[remote_slot].remote_slot = -1;
+        sle_dli_disconnected(remote, remote_handle, reason);
+    }
+}
 
 /* --------------------------------------------------------------------
  * USB descriptors
@@ -569,8 +726,8 @@ static void sle_dli_process_command(USBSleDliState *s,
     case DLI_OP_ENABLE_BROADCAST:
         s->broadcasting = true;
         sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
-        /* If scanning, generate broadcast reports for known peers */
-        /* (reports are generated when scanning is enabled) */
+        /* Notify all scanning devices on the air medium */
+        sle_air_broadcast_notify(s);
         break;
 
     case DLI_OP_DISABLE_BROADCAST:
@@ -581,10 +738,29 @@ static void sle_dli_process_command(USBSleDliState *s,
     case DLI_OP_ENABLE_SCAN:
         s->scanning = true;
         sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
-        /* Generate broadcast reports for all active peers */
+        /* Generate broadcast reports for built-in static peers */
         for (int i = 0; i < MAX_PEERS; i++) {
             if (s->peers[i].active) {
                 sle_dli_broadcast_report(s, &s->peers[i]);
+            }
+        }
+        /* Also discover broadcasting devices on the air medium */
+        {
+            USBSleDliState *air_dev;
+            QTAILQ_FOREACH(air_dev, &sle_air_devices, air_link) {
+                if (air_dev == s || !air_dev->broadcasting) {
+                    continue;
+                }
+                SleDliPeer air_peer;
+                memset(&air_peer, 0, sizeof(air_peer));
+                air_peer.active = true;
+                memcpy(air_peer.addr, air_dev->mac_addr, 6);
+                air_peer.rssi = -30;
+                air_peer.discovery_level = 2;
+                const char *name = "SLE-Air";
+                air_peer.name_len = strlen(name);
+                memcpy(air_peer.name, name, air_peer.name_len);
+                sle_dli_broadcast_report(s, &air_peer);
             }
         }
         break;
@@ -613,11 +789,17 @@ static void sle_dli_process_command(USBSleDliState *s,
             break;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
-        /* Create connection */
+        /* Create connection on this side */
         s->connections[slot].active = true;
         s->connections[slot].handle = s->next_handle++;
         memcpy(s->connections[slot].peer_addr, &params[1], 6);
-        /* Generate ConnEstablished event */
+        s->connections[slot].remote_dev = NULL;
+        s->connections[slot].remote_slot = -1;
+
+        /* Try to create a bidirectional link via the air medium */
+        sle_air_connect(s, &params[1], slot);
+
+        /* Generate ConnEstablished event on this side */
         sle_dli_conn_complete(s, 0x00,
                               s->connections[slot].handle,
                               s->connections[slot].peer_addr);
@@ -636,7 +818,11 @@ static void sle_dli_process_command(USBSleDliState *s,
         for (int i = 0; i < MAX_CONNECTIONS; i++) {
             if (s->connections[i].active &&
                 s->connections[i].handle == handle) {
+                /* Notify remote device via air medium */
+                sle_air_disconnect(s, i, reason);
                 s->connections[i].active = false;
+                s->connections[i].remote_dev = NULL;
+                s->connections[i].remote_slot = -1;
                 found = true;
                 break;
             }
@@ -700,6 +886,25 @@ static void sle_dli_handle_bulk_out_command(USBSleDliState *s,
         return;
     }
     if (data[0] != DLI_PKT_COMMAND) {
+        /* Check for async data — relay to connected peer */
+        if (data[0] == DLI_PKT_ASYNC_DATA && len >= 5) {
+            /*
+             * Async data format:
+             *   [0]    = 0xA3 (DLI_PKT_ASYNC_DATA)
+             *   [1..2] = handle (LE16)
+             *   [3..4] = payload length (LE16)
+             *   [5..N] = payload
+             */
+            uint16_t handle = data[1] | ((uint16_t)data[2] << 8);
+            for (int i = 0; i < MAX_CONNECTIONS; i++) {
+                if (s->connections[i].active &&
+                    s->connections[i].handle == handle) {
+                    sle_air_relay_data(s, i, data, len);
+                    break;
+                }
+            }
+            return;
+        }
         /* Check for firmware data chunk */
         if (data[0] == DLI_PKT_MCAST_DATA && s->fw_downloading) {
             /* FW chunk: [0]=0xA5 [1..4]=offset [5..6]=chunk_len [7..N]=data */
@@ -723,6 +928,8 @@ static void sle_dli_handle_bulk_out_command(USBSleDliState *s,
  * USBDevice callbacks
  * -------------------------------------------------------------------- */
 
+static uint8_t sle_dli_instance_counter;
+
 static void usb_sle_dli_realize(USBDevice *dev, Error **errp)
 {
     USBSleDliState *s = USB_SLE_DLI(dev);
@@ -730,17 +937,17 @@ static void usb_sle_dli_realize(USBDevice *dev, Error **errp)
     usb_desc_create_serial(dev);
     usb_desc_init(dev);
 
-    /* Default controller state */
+    /* Default controller state — each instance gets a unique MAC */
     if (s->mac_addr[0] == 0 && s->mac_addr[1] == 0 &&
         s->mac_addr[2] == 0 && s->mac_addr[3] == 0 &&
         s->mac_addr[4] == 0 && s->mac_addr[5] == 0) {
-        /* Default MAC: DE:AD:BE:EF:00:01 */
+        uint8_t id = ++sle_dli_instance_counter;
         s->mac_addr[0] = 0xDE;
         s->mac_addr[1] = 0xAD;
         s->mac_addr[2] = 0xBE;
         s->mac_addr[3] = 0xEF;
         s->mac_addr[4] = 0x00;
-        s->mac_addr[5] = 0x01;
+        s->mac_addr[5] = id;
     }
     if (s->fw_version == 0) {
         s->fw_version = 0x01020300; /* 1.2.3.0 */
@@ -762,17 +969,39 @@ static void usb_sle_dli_realize(USBDevice *dev, Error **errp)
     memcpy(s->peers[0].name, "SLE-Peer-1", 10);
     s->peers[0].name_len = 10;
     s->peers[0].discovery_level = 2;
+
+    /* Initialize connection remote links */
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        s->connections[i].remote_dev = NULL;
+        s->connections[i].remote_slot = -1;
+    }
+
+    /* Register on the virtual air medium */
+    sle_air_register(s);
 }
 
 static void usb_sle_dli_handle_reset(USBDevice *dev)
 {
     USBSleDliState *s = USB_SLE_DLI(dev);
 
+    /* Unregister from air medium before resetting state */
+    sle_air_unregister(s);
+
     s->evt_head = s->evt_tail = s->evt_count = 0;
     s->data_head = s->data_tail = s->data_count = 0;
     s->broadcasting = false;
     s->scanning = false;
     s->suspended = false;
+
+    /* Clear connection remote links */
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        s->connections[i].active = false;
+        s->connections[i].remote_dev = NULL;
+        s->connections[i].remote_slot = -1;
+    }
+
+    /* Re-register on air medium */
+    sle_air_register(s);
 }
 
 static void usb_sle_dli_handle_control(USBDevice *dev, USBPacket *p,

@@ -17,6 +17,7 @@
 #   ./run_qemu_test.sh --verbose  # Show full QEMU console output
 #   QEMU_BIN=/path/to/custom/qemu-system-x86_64 ./run_qemu_test.sh
 #   SLE_DLI_DEVICE=1 ./run_qemu_test.sh  # Enable usb-sle-dli device
+#   SLE_DLI_DEVICE=2 ./run_qemu_test.sh  # Enable 2 usb-sle-dli devices (multi-device)
 
 set -euo pipefail
 
@@ -152,6 +153,21 @@ fi
 echo "Device /dev/sparklink found"
 echo ""
 
+# If USB SLE DLI devices are expected, wait for them to enumerate
+# Check if any USB SLE DLI devices appear in /sys
+RETRY=0
+MAX_USB_RETRY=50
+while [ $RETRY -lt $MAX_USB_RETRY ]; do
+    USB_COUNT=$(find /sys/bus/usb/devices/ -name "idProduct" -exec cat {} \; 2>/dev/null | grep -c "5678" || true)
+    BOUND_COUNT=$(find /sys/bus/usb/drivers/sparklink_usb/ -mindepth 1 -maxdepth 1 -type l 2>/dev/null | wc -l || echo 0)
+    if [ "$USB_COUNT" -gt 0 ] && [ "$BOUND_COUNT" -ge "$USB_COUNT" ]; then
+        echo "USB SLE DLI devices: $USB_COUNT found, $BOUND_COUNT bound"
+        break
+    fi
+    sleep 0.1
+    RETRY=$((RETRY + 1))
+done
+
 # Run the test suite
 /bin/sparklink_test 2>&1
 TEST_EXIT=$?
@@ -195,14 +211,26 @@ fi
 # Detect custom QEMU with usb-sle-dli support
 SLE_USB_OPTS=""
 CUSTOM_QEMU_DIR="$SCRIPT_DIR/qemu-sle-dli/bin/bin"
-if [[ "$SLE_DLI_DEVICE" == "1" ]]; then
+if [[ "$SLE_DLI_DEVICE" != "0" ]]; then
+    # Determine number of SLE DLI devices (1 if just "1", otherwise the value)
+    SLE_DEV_COUNT=1
+    if [[ "$SLE_DLI_DEVICE" =~ ^[0-9]+$ ]] && (( SLE_DLI_DEVICE > 1 )); then
+        SLE_DEV_COUNT="$SLE_DLI_DEVICE"
+    fi
+
     # Use custom QEMU if built, otherwise warn
     if [[ -x "$CUSTOM_QEMU_DIR/qemu-system-x86_64" ]]; then
         QEMU_BIN="$CUSTOM_QEMU_DIR/qemu-system-x86_64"
-        SLE_USB_OPTS="-device qemu-xhci,id=xhci -device usb-sle-dli,bus=xhci.0"
-        info "Using custom QEMU with usb-sle-dli device"
+        SLE_USB_OPTS="-device qemu-xhci,id=xhci"
+        for (( i=0; i<SLE_DEV_COUNT; i++ )); do
+            SLE_USB_OPTS+=" -device usb-sle-dli,bus=xhci.0"
+        done
+        info "Using custom QEMU with $SLE_DEV_COUNT usb-sle-dli device(s)"
     elif "$QEMU_BIN" -device help 2>&1 | grep -q usb-sle-dli; then
-        SLE_USB_OPTS="-device qemu-xhci,id=xhci -device usb-sle-dli,bus=xhci.0"
+        SLE_USB_OPTS="-device qemu-xhci,id=xhci"
+        for (( i=0; i<SLE_DEV_COUNT; i++ )); do
+            SLE_USB_OPTS+=" -device usb-sle-dli,bus=xhci.0"
+        done
         info "System QEMU supports usb-sle-dli"
     else
         warn "usb-sle-dli device not available; running without virtual controller"

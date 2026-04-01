@@ -988,6 +988,8 @@ kernel::usb_device_table!(
     MODULE_SLE_USB_TABLE,
     <SleUsbDriver as usb::Driver>::IdInfo,
     [
+        // QEMU usb-sle-dli virtual controller (VID:PID 0x1234:0x5678)
+        (usb::DeviceId::from_id(0x1234, 0x5678), ()),
         // Match by interface class/subclass/protocol:
         //   Wireless Controller (0xE0) / RF Controller (0x01) / SparkLink DLI (0x05)
         (

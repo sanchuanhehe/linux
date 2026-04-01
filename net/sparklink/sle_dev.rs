@@ -77,13 +77,13 @@ const SLE_DEV_NAME_LEN: usize = 16;
 /// multi-controller awareness.
 pub(crate) struct SleDev {
     /// Unique device index (0-based), allocated from `SleDevRegistry`.
-    id: u16,
+    pub(crate) id: u16,
     /// Device name, e.g. `"sle0"`, NUL-terminated.
-    name: [u8; SLE_DEV_NAME_LEN],
+    pub(crate) name: [u8; SLE_DEV_NAME_LEN],
     /// Transport bus type.
-    bus: SleBus,
+    pub(crate) bus: SleBus,
     /// 6-byte SLE MAC address.
-    addr: [u8; 6],
+    pub(crate) addr: [u8; 6],
     /// Lifecycle and operational state flags (see `SLE_DEV_*` constants).
     flags: AtomicU32,
     /// Firmware version (packed major.minor.patch).

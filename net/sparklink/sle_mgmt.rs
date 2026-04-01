@@ -143,7 +143,7 @@ pub(crate) struct CmdPendingQueue {
     /// Next sequence number.
     next_seq: u32,
     /// Count of pending (unresolved) entries.
-    pending_count: u16,
+    pub(crate) pending_count: u16,
     /// Cumulative count of commands submitted.
     pub(crate) total_submitted: u64,
     /// Cumulative count of commands resolved (complete or timeout).

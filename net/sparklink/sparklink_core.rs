@@ -504,6 +504,9 @@ const SL_IOCTL_DLI_SEND_CMD: u32 = _IOWR::<SleDliCmd>(SL_MAGIC, 0x84);
 /// Get management plane pending queue statistics.
 const SL_IOCTL_MGMT_STATS: u32 = _IOR::<SleMgmtStats>(SL_MAGIC, 0x85);
 
+/// Get unified subsystem statistics (admin observability).
+const SL_IOCTL_SUBSYS_STATS: u32 = _IOR::<SleSubsysStats>(SL_MAGIC, 0x86);
+
 // --- PHY layer ioctls ---
 
 /// Get PHY layer configuration.
@@ -1216,6 +1219,42 @@ pub struct SleMgmtStats {
 // SAFETY: SleMgmtStats is repr(C) with only primitive fields.
 unsafe impl FromBytes for SleMgmtStats {}
 
+/// Unified subsystem statistics for observability.
+///
+/// Returned by the SUBSYS_STATS ioctl (0x86). Aggregates key counters
+/// from the management plane, connection manager, power manager,
+/// device registry, and transport framework into a single read.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleSubsysStats {
+    /// Number of registered devices in the SleDev registry.
+    pub dev_count: u16,
+    /// Number of registered transport protocols.
+    pub proto_count: u8,
+    /// Number of active device-transport bindings.
+    pub binding_count: u8,
+    /// Active connections.
+    pub active_connections: u16,
+    /// Management plane pending commands.
+    pub mgmt_pending: u16,
+    /// Total connections created (lifetime).
+    pub total_conn_created: u32,
+    /// Total connections completed (lifetime).
+    pub total_conn_completed: u32,
+    /// Total management commands submitted (lifetime).
+    pub total_mgmt_submitted: u32,
+    /// Total management command timeouts.
+    pub total_mgmt_timeouts: u32,
+    /// Power state (0=Active, 1=Sniff, 2=Idle, 3=Suspended).
+    pub power_state: u8,
+    _pad: [u8; 3],
+    /// Power state transitions.
+    pub power_transitions: u32,
+}
+
+// SAFETY: SleSubsysStats is repr(C) with only primitive fields.
+unsafe impl FromBytes for SleSubsysStats {}
+
 fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
     let mut out = SleDliEvent::default();
     match ev {
@@ -1909,6 +1948,21 @@ struct SparkLinkModule {
     ioctl_count: File<Atomic<usize>>,
     #[pin]
     _dli_info: File<CString>,
+    // debugfs subdirectories for observability layer
+    _mgmt_dir: Dir,
+    #[pin]
+    _mgmt_stats: File<Atomic<u32>>,
+    _transport_dir: Dir,
+    #[pin]
+    _transport_info: File<Atomic<u32>>,
+    _power_dir: Dir,
+    #[pin]
+    _power_stats: File<Atomic<u32>>,
+    _conn_dir: Dir,
+    #[pin]
+    _conn_stats: File<Atomic<u32>>,
+    #[pin]
+    _device_list: File<Atomic<u32>>,
     _genl: genl_bridge::GenlGuard,
     #[pin]
     _configfs: configfs::Subsystem<sle_configfs::SparkLinkConfig>,
@@ -1930,6 +1984,10 @@ impl kernel::InPlaceModule for SparkLinkModule {
         };
 
         let debugfs = Dir::new(c"sparklink");
+        let mgmt_dir = debugfs.subdir(c"mgmt");
+        let transport_dir = debugfs.subdir(c"transport");
+        let power_dir = debugfs.subdir(c"power");
+        let conn_dir = debugfs.subdir(c"connections");
 
         try_pin_init!(Self {
             _miscdev <- MiscDeviceRegistration::register(options),
@@ -1976,6 +2034,98 @@ impl kernel::InPlaceModule for SparkLinkModule {
                     ))?,
                 )
             },
+            // --- Observability layer: debugfs subdirectories ---
+            _mgmt_stats <- mgmt_dir.read_callback_file(
+                c"stats",
+                Atomic::<u32>::new(0),
+                &|_dummy: &Atomic<u32>, f: &mut core::fmt::Formatter<'_>| {
+                    let ss = SUBSYSTEM.lock();
+                    if let Some(ref ss) = *ss {
+                        let q = &ss.cmd_pending;
+                        writeln!(f, "pending: {}", q.pending_count)?;
+                        writeln!(f, "submitted: {}", q.total_submitted)?;
+                        writeln!(f, "resolved: {}", q.total_resolved)?;
+                        writeln!(f, "timeouts: {}", q.total_timeouts)?;
+                        writeln!(f, "cmd_queue_depth: {}", ss.cmd_queue.len())?;
+                    }
+                    Ok(())
+                },
+            ),
+            _mgmt_dir: mgmt_dir,
+            _transport_info <- transport_dir.read_callback_file(
+                c"info",
+                Atomic::<u32>::new(0),
+                &|_dummy: &Atomic<u32>, f: &mut core::fmt::Formatter<'_>| {
+                    let ss = SUBSYSTEM.lock();
+                    if let Some(ref ss) = *ss {
+                        writeln!(f, "protocols_registered: {}", ss.proto_registry.count())?;
+                        writeln!(f, "devices_bound: {}", ss.dev_bindings.count())?;
+                        for proto in ss.proto_registry.iter() {
+                            writeln!(f, "  proto: {} (bus={:?}, max_pdu={})",
+                                proto.name, proto.bus, proto.max_pdu)?;
+                        }
+                    }
+                    Ok(())
+                },
+            ),
+            _transport_dir: transport_dir,
+            _power_stats <- power_dir.read_callback_file(
+                c"stats",
+                Atomic::<u32>::new(0),
+                &|_dummy: &Atomic<u32>, f: &mut core::fmt::Formatter<'_>| {
+                    let ss = SUBSYSTEM.lock();
+                    if let Some(ref ss) = *ss {
+                        let p = &ss.power;
+                        writeln!(f, "state: {:?}", p.state)?;
+                        writeln!(f, "forced_active: {}", p.is_forced_active())?;
+                        writeln!(f, "active_events: {}", p.stats.active_events)?;
+                        writeln!(f, "sniff_events: {}", p.stats.sniff_events)?;
+                        writeln!(f, "idle_events: {}", p.stats.idle_events)?;
+                        writeln!(f, "transitions: {}", p.stats.transitions)?;
+                        writeln!(f, "force_active_count: {}", p.stats.force_active_count)?;
+                        writeln!(f, "supervision_warnings: {}", p.stats.supervision_warnings)?;
+                    }
+                    Ok(())
+                },
+            ),
+            _power_dir: power_dir,
+            _conn_stats <- conn_dir.read_callback_file(
+                c"stats",
+                Atomic::<u32>::new(0),
+                &|_dummy: &Atomic<u32>, f: &mut core::fmt::Formatter<'_>| {
+                    let ss = SUBSYSTEM.lock();
+                    if let Some(ref ss) = *ss {
+                        writeln!(f, "active: {}", ss.conn.active_count())?;
+                        writeln!(f, "total_created: {}", ss.conn.total_created)?;
+                        writeln!(f, "total_completed: {}", ss.conn.total_completed)?;
+                    }
+                    Ok(())
+                },
+            ),
+            _conn_dir: conn_dir,
+            _device_list <- debugfs.read_callback_file(
+                c"devices",
+                Atomic::<u32>::new(0),
+                &|_dummy: &Atomic<u32>, f: &mut core::fmt::Formatter<'_>| {
+                    let ss = SUBSYSTEM.lock();
+                    if let Some(ref ss) = *ss {
+                        writeln!(f, "registered: {}", ss.dev_registry.count())?;
+                        for dev in ss.dev_registry.iter() {
+                            let name_end = dev.name.iter().position(|&b| b == 0)
+                                .unwrap_or(dev.name.len());
+                            // SAFETY: device names are always ASCII.
+                            let name_str = core::str::from_utf8(&dev.name[..name_end])
+                                .unwrap_or("?");
+                            writeln!(f, "  sle{}: {} bus={:?} addr={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} flags=0x{:08x}",
+                                dev.id, name_str, dev.bus,
+                                dev.addr[0], dev.addr[1], dev.addr[2],
+                                dev.addr[3], dev.addr[4], dev.addr[5],
+                                dev.flags())?;
+                        }
+                    }
+                    Ok(())
+                },
+            ),
             _debugfs: debugfs,
             _genl: genl_bridge::GenlGuard::new()?,
             _configfs <- {
@@ -2945,6 +3095,27 @@ impl MiscDevice for SparkLinkCtl {
                     total_submitted: s.cmd_pending.total_submitted as u32,
                     total_resolved: s.cmd_pending.total_resolved as u32,
                     total_timeouts: s.cmd_pending.total_timeouts as u32,
+                };
+                drop(ss);
+                write_user_struct(arg, &stats)?;
+                Ok(0)
+            }
+            SL_IOCTL_SUBSYS_STATS => {
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let stats = SleSubsysStats {
+                    dev_count: s.dev_registry.count() as u16,
+                    proto_count: s.proto_registry.count(),
+                    binding_count: s.dev_bindings.count(),
+                    active_connections: s.conn.active_count() as u16,
+                    mgmt_pending: s.cmd_pending.pending_count,
+                    total_conn_created: s.conn.total_created as u32,
+                    total_conn_completed: s.conn.total_completed as u32,
+                    total_mgmt_submitted: s.cmd_pending.total_submitted as u32,
+                    total_mgmt_timeouts: s.cmd_pending.total_timeouts as u32,
+                    power_state: s.power.state as u8,
+                    _pad: [0; 3],
+                    power_transitions: s.power.stats.transitions,
                 };
                 drop(ss);
                 write_user_struct(arg, &stats)?;

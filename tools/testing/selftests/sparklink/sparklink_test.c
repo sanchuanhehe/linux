@@ -3012,6 +3012,246 @@ static void test_multi_controller(int fd)
 	}
 }
 
+/*
+ * End-to-end data path verification across controllers.
+ *
+ * Validates that per-device state (connections, data queues) is
+ * correctly saved and restored when switching between controllers.
+ * Uses sle0 (virtual) to avoid USB DMA issues under QEMU, and
+ * exercises the swap-on-switch mechanism with a second controller.
+ *
+ * Requires 2+ controllers.  Test flow:
+ *   1. On sle0: create connection, inject data, verify receive.
+ *   2. DEV_SWITCH to sle_x: verify sle_x has empty conn state.
+ *   3. On sle_x: create independent connection, send data.
+ *   4. DEV_SWITCH back to sle0: verify original connection and
+ *      data are preserved (not clobbered by sle_x activity).
+ *   5. Disconnect and clean up both sides.
+ */
+static void test_e2e_data_path(int fd)
+{
+	test_header("End-to-end data path (cross-controller state isolation)");
+
+	uint16_t mask = 0;
+	int ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
+	if (ret < 0) {
+		printf("  FAIL: DEV_LIST: %s\n", strerror(errno));
+		return;
+	}
+	int dev_count = __builtin_popcount(mask);
+	if (dev_count < 2) {
+		printf("  OK:   Skipped (need 2+ controllers, have %d)\n", dev_count);
+		return;
+	}
+
+	/* Find another controller besides sle0 */
+	int id_other = -1;
+	for (int i = 1; i < 16; i++) {
+		if (mask & (1u << i)) { id_other = i; break; }
+	}
+	if (id_other < 0) {
+		printf("  FAIL: cannot find second controller in mask 0x%04x\n", mask);
+		return;
+	}
+	printf("  OK:   Using sle0 and sle%d for state isolation test\n", id_other);
+
+	uint16_t target;
+	int ok_count = 0;
+
+	/*
+	 * Step 1: On sle0 — create a connection and exchange data.
+	 */
+	target = 0;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+
+	struct sle_connect_params cp0;
+	memset(&cp0, 0, sizeof(cp0));
+	cp0.peer_addr[0] = 0xE0;
+	cp0.peer_addr[5] = 0x01;
+	cp0.gt_role = 0;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp0);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT on sle0: ret=%d %s\n",
+		       ret, ret < 0 ? strerror(errno) : "zero handle");
+		goto cleanup;
+	}
+	uint16_t h0 = (uint16_t)ret;
+	printf("  OK:   sle0 CONNECT handle=%u\n", h0);
+	ok_count++;
+
+	/* Accept connection so we can send/receive data */
+	struct sle_inject_conn_resp resp0;
+	memset(&resp0, 0, sizeof(resp0));
+	resp0.handle = h0;
+	resp0.response_type = 0;
+	resp0.bandwidth_mhz = 2;
+	resp0.mcs_index = 4;
+	resp0.supervision_timeout = 200;
+	ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp0);
+
+	/* Send data */
+	struct sle_conn_data sd0;
+	memset(&sd0, 0, sizeof(sd0));
+	sd0.handle = h0;
+	const char *msg0 = "sle0-payload-e2e";
+	sd0.length = strlen(msg0);
+	memcpy(sd0.data, msg0, sd0.length);
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd0);
+	if (ret < 0) {
+		printf("  FAIL: CONN_SEND sle0: %s\n", strerror(errno));
+	} else {
+		printf("  OK:   sle0 sent %d bytes\n", sd0.length);
+		ok_count++;
+	}
+
+	/* Inject data and read it back */
+	struct sle_conn_data inj0;
+	memset(&inj0, 0, sizeof(inj0));
+	inj0.handle = h0;
+	const char *reply0 = "reply-for-sle0";
+	inj0.length = strlen(reply0);
+	memcpy(inj0.data, reply0, inj0.length);
+	ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj0);
+
+	struct sle_conn_data recv0;
+	memset(&recv0, 0, sizeof(recv0));
+	recv0.handle = h0;
+	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &recv0);
+	if (ret == 0 && recv0.length == strlen(reply0) &&
+	    memcmp(recv0.data, reply0, recv0.length) == 0) {
+		printf("  OK:   sle0 received: \"%.*s\"\n",
+		       recv0.length, recv0.data);
+		ok_count++;
+	} else {
+		printf("  FAIL: sle0 receive mismatch: ret=%d len=%u\n",
+		       ret, recv0.length);
+	}
+
+	/* Verify connection count */
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret != 1) {
+		printf("  WARN: sle0 CONN_COUNT=%d before switch (expected 1)\n", ret);
+	}
+
+	/*
+	 * Step 2: DEV_SWITCH to sle_x — verify isolated state.
+	 */
+	target = (uint16_t)id_other;
+	ret = ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	if (ret < 0) {
+		printf("  FAIL: DEV_SWITCH to sle%d: %s\n", id_other, strerror(errno));
+		goto cleanup;
+	}
+	printf("  OK:   switched to sle%d\n", id_other);
+	ok_count++;
+
+	/* sle_x should have zero connections (fresh state) */
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 0) {
+		printf("  OK:   sle%d CONN_COUNT=0 (isolated from sle0)\n", id_other);
+		ok_count++;
+	} else {
+		printf("  FAIL: sle%d CONN_COUNT=%d (expected 0 — state leaked!)\n",
+		       id_other, ret);
+	}
+
+	/*
+	 * Step 3: On sle_x — create independent connection.
+	 */
+	struct sle_connect_params cpx;
+	memset(&cpx, 0, sizeof(cpx));
+	cpx.peer_addr[0] = 0xF0;
+	cpx.peer_addr[5] = 0x02;
+	cpx.gt_role = 1;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cpx);
+	uint16_t hx = 0;
+	if (ret > 0) {
+		hx = (uint16_t)ret;
+		printf("  OK:   sle%d CONNECT handle=%u\n", id_other, hx);
+		ok_count++;
+
+		/* Accept and send data on sle_x */
+		struct sle_inject_conn_resp respx;
+		memset(&respx, 0, sizeof(respx));
+		respx.handle = hx;
+		respx.response_type = 0;
+		ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &respx);
+
+		struct sle_conn_data sdx;
+		memset(&sdx, 0, sizeof(sdx));
+		sdx.handle = hx;
+		const char *msgx = "sle_x-independent";
+		sdx.length = strlen(msgx);
+		memcpy(sdx.data, msgx, sdx.length);
+		ioctl(fd, SL_IOCTL_CONN_SEND, &sdx);
+	} else {
+		printf("  WARN: sle%d CONNECT failed (%s) — continuing\n",
+		       id_other, strerror(errno));
+	}
+
+	/*
+	 * Step 4: DEV_SWITCH back to sle0 — verify state preserved.
+	 */
+	target = 0;
+	ret = ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	if (ret < 0) {
+		printf("  FAIL: DEV_SWITCH back to sle0: %s\n", strerror(errno));
+		goto cleanup;
+	}
+
+	/* sle0 should still have exactly 1 connection with the same handle */
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 1) {
+		printf("  OK:   sle0 CONN_COUNT=1 after round-trip (state preserved)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: sle0 CONN_COUNT=%d after round-trip (expected 1)\n", ret);
+	}
+
+	/* Verify connection info is intact */
+	struct sle_conn_info info0;
+	memset(&info0, 0, sizeof(info0));
+	info0.handle = h0;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info0);
+	if (ret == 0 && info0.handle == h0 &&
+	    info0.peer_addr[0] == 0xE0 && info0.peer_addr[5] == 0x01) {
+		printf("  OK:   sle0 connection info preserved (handle=%u peer=e0:...:01)\n", h0);
+		ok_count++;
+	} else {
+		printf("  FAIL: sle0 connection info corrupted (ret=%d handle=%u)\n",
+		       ret, info0.handle);
+	}
+
+	/* Verify tx_bytes > 0 (our earlier send was preserved) */
+	if (info0.tx_bytes > 0) {
+		printf("  OK:   sle0 tx_bytes=%lu (data survived switch)\n",
+		       (unsigned long)info0.tx_bytes);
+		ok_count++;
+	} else {
+		printf("  FAIL: sle0 tx_bytes=0 (send state lost during switch)\n");
+	}
+
+	/*
+	 * Step 5: Disconnect both sides.
+	 */
+	ioctl(fd, SL_IOCTL_DISCONNECT, &h0);
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 0)
+		printf("  OK:   sle0 disconnected (CONN_COUNT=0)\n");
+
+	if (hx > 0) {
+		target = (uint16_t)id_other;
+		ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+		ioctl(fd, SL_IOCTL_DISCONNECT, &hx);
+	}
+
+	printf("  OK:   E2E state isolation: %d/9 steps passed\n", ok_count);
+
+cleanup:
+	target = 0;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+}
+
 static void test_genetlink(void)
 {
 	test_header("Generic Netlink: sparklink family");
@@ -3144,6 +3384,7 @@ int main(void)
 	test_configfs();
 	test_configfs_ioctl_integration(fd);
 	test_multi_controller(fd);
+	test_e2e_data_path(fd);
 	test_genetlink();
 
 	printf("\n=== All tests completed ===\n");

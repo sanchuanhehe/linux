@@ -352,11 +352,11 @@ pub const SLE_USB_PROTOCOL: u8 = 0x05;
 // ---------------------------------------------------------------------------
 
 /// Interrupt IN endpoint for DLI events (T/XS 10003-2025 Table 3).
-pub const EP_EVENT_IN: u8 = 0x91;
+pub const EP_EVENT_IN: u8 = 0x81;
 /// Bulk IN endpoint for async data reception (T/XS 10003-2025 Table 3).
-pub const EP_DATA_IN: u8 = 0x92;
+pub const EP_DATA_IN: u8 = 0x82;
 /// Bulk OUT endpoint for async data and commands (T/XS 10003-2025 Table 3).
-pub const EP_CMD_DATA_OUT: u8 = 0x12;
+pub const EP_CMD_DATA_OUT: u8 = 0x02;
 
 /// Interrupt endpoint max packet size.
 pub const EP_EVENT_MAX_PKT: usize = 16;

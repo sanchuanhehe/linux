@@ -31,6 +31,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use super::sle_dli::{
     ControllerEventRing, DliPacketType, SleBus, SleController, SleControllerInfo,
     SleEvent, SleFeature, SleOpcode, SleStatus,
+    SLE_TRANSPORT_UNRELIABLE, SLE_TRANSPORT_RELIABLE, SLE_TRANSPORT_FRAGMENTED,
+    SLE_MEAS_RSSI, SLE_MEAS_PATH_LOSS,
+    SLE_SEC_AES_CCM, SLE_SEC_ECDH_P256, SLE_SEC_SC,
 };
 use super::sle_transport::{SleAttachInfo, SleProtoId};
 
@@ -874,6 +877,13 @@ impl SleController for UsbController {
             | (SleFeature::Crc32 as u64);
         info.max_pdu_payload = 255;
         info.max_connections = 8;
+        info.max_mtu = 512;
+        info.max_mps = 255;
+        info.transport_modes = SLE_TRANSPORT_UNRELIABLE
+            | SLE_TRANSPORT_RELIABLE
+            | SLE_TRANSPORT_FRAGMENTED;
+        info.measurement_cap = SLE_MEAS_RSSI | SLE_MEAS_PATH_LOSS;
+        info.security_cap = SLE_SEC_AES_CCM | SLE_SEC_ECDH_P256 | SLE_SEC_SC;
         info
     }
 

@@ -167,6 +167,11 @@ enum {
 	SPARKLINK_ATTR_DLI_FW_VER,	/* u32: firmware version */
 	SPARKLINK_ATTR_DLI_FEATURES,	/* u64: feature bitmask */
 	SPARKLINK_ATTR_DLI_MAX_CONN,	/* u8: max connections */
+	SPARKLINK_ATTR_DLI_MAX_MTU,	/* u16: max MTU */
+	SPARKLINK_ATTR_DLI_MAX_MPS,	/* u16: max MPS */
+	SPARKLINK_ATTR_DLI_TRANSPORT_MODES,	/* u8: transport mode bitmask */
+	SPARKLINK_ATTR_DLI_MEASUREMENT_CAP,	/* u8: measurement capability bitmask */
+	SPARKLINK_ATTR_DLI_SECURITY_CAP,	/* u16: security capability bitmask */
 
 	__SPARKLINK_ATTR_MAX,
 };

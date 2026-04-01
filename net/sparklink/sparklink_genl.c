@@ -51,9 +51,14 @@ extern int sparklink_genl_get_pm_info(struct genl_pm_info *out);
 struct genl_dli_info {
 	__u8  bus_type;
 	__u8  max_conn;
-	__u8  _pad[2];
+	__u8  transport_modes;
+	__u8  measurement_cap;
 	__u32 fw_version;
 	__u64 features;
+	__u16 max_mtu;
+	__u16 max_mps;
+	__u16 security_cap;
+	__u8  _pad[2];
 };
 extern int sparklink_genl_get_dli_info(struct genl_dli_info *out);
 
@@ -444,7 +449,15 @@ static int sparklink_genl_do_get_dli_info(struct sk_buff *skb,
 	    nla_put_u8(msg, SPARKLINK_ATTR_DLI_MAX_CONN, dli.max_conn) ||
 	    nla_put_u32(msg, SPARKLINK_ATTR_DLI_FW_VER, dli.fw_version) ||
 	    nla_put_u64_64bit(msg, SPARKLINK_ATTR_DLI_FEATURES,
-			      dli.features, 0))
+			      dli.features, 0) ||
+	    nla_put_u16(msg, SPARKLINK_ATTR_DLI_MAX_MTU, dli.max_mtu) ||
+	    nla_put_u16(msg, SPARKLINK_ATTR_DLI_MAX_MPS, dli.max_mps) ||
+	    nla_put_u8(msg, SPARKLINK_ATTR_DLI_TRANSPORT_MODES,
+		       dli.transport_modes) ||
+	    nla_put_u8(msg, SPARKLINK_ATTR_DLI_MEASUREMENT_CAP,
+		       dli.measurement_cap) ||
+	    nla_put_u16(msg, SPARKLINK_ATTR_DLI_SECURITY_CAP,
+		        dli.security_cap))
 		goto nla_put_failure;
 
 	genlmsg_end(msg, hdr);

@@ -367,8 +367,13 @@ struct sle_dli_info {
 	uint64_t features;
 	uint8_t  max_connections;
 	uint8_t  max_adv_sets;
+	uint8_t  transport_modes;
+	uint8_t  measurement_cap;
+	uint16_t max_mtu;
+	uint16_t max_mps;
+	uint16_t security_cap;
 	uint8_t  name[32];
-	uint8_t  _reserved[14];
+	uint8_t  _reserved[6];
 } __attribute__((packed));
 
 /* DLI event from controller */
@@ -1779,6 +1784,23 @@ static void test_dli_info(int fd)
 		printf("  OK:   max_connections=%u\n", dli.max_connections);
 	else
 		printf("  FAIL: max_connections=0\n");
+
+	/* Capability model fields (P1.9) */
+	printf("  Max MTU:      %u\n", dli.max_mtu);
+	printf("  Max MPS:      %u\n", dli.max_mps);
+	printf("  Transport:    0x%02x\n", dli.transport_modes);
+	printf("  Measurement:  0x%02x\n", dli.measurement_cap);
+	printf("  Security:     0x%04x\n", dli.security_cap);
+
+	if (dli.max_mtu > 0)
+		printf("  OK:   max_mtu=%u\n", dli.max_mtu);
+	else
+		printf("  FAIL: max_mtu=0\n");
+
+	if (dli.transport_modes != 0)
+		printf("  OK:   transport_modes=0x%02x\n", dli.transport_modes);
+	else
+		printf("  WARN: transport_modes=0\n");
 }
 
 static void test_usb_discovery(int fd)

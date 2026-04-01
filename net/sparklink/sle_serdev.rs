@@ -42,6 +42,8 @@ use kernel::prelude::*;
 use super::sle_dli::{
     ControllerEventRing, SleBus, SleController, SleControllerInfo,
     SleEvent, SleFeature, SleOpcode,
+    SLE_TRANSPORT_UNRELIABLE, SLE_TRANSPORT_RELIABLE,
+    SLE_MEAS_RSSI, SLE_SEC_AES_CCM, SLE_SEC_ECDH_P256,
 };
 use super::sle_transport::{SleAttachInfo, SleProtoId};
 use super::sle_uart::{UartFrame, UartParser, MAX_PAYLOAD_LEN};
@@ -276,6 +278,11 @@ impl SleController for SerdevController {
             | (SleFeature::DataLenUpdate as u64);
         info.max_pdu_payload = MAX_PAYLOAD_LEN as u16;
         info.max_connections = 4;
+        info.max_mtu = 512;
+        info.max_mps = MAX_PAYLOAD_LEN as u16;
+        info.transport_modes = SLE_TRANSPORT_UNRELIABLE | SLE_TRANSPORT_RELIABLE;
+        info.measurement_cap = SLE_MEAS_RSSI;
+        info.security_cap = SLE_SEC_AES_CCM | SLE_SEC_ECDH_P256;
         info
     }
 

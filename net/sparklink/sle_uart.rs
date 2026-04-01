@@ -47,6 +47,8 @@ use core::cell::RefCell;
 use super::sle_dli::{
     DliPacketType, SleBus, SleController, SleControllerInfo, SleEvent,
     SleFeature, SleOpcode, SleStatus,
+    SLE_TRANSPORT_UNRELIABLE, SLE_TRANSPORT_RELIABLE,
+    SLE_MEAS_RSSI, SLE_SEC_AES_CCM, SLE_SEC_ECDH_P256,
 };
 
 // =========================================================================
@@ -457,6 +459,11 @@ impl SleController for UartController {
             | (SleFeature::DataLenUpdate as u64);
         info.max_pdu_payload = MAX_PAYLOAD_LEN as u16;
         info.max_connections = 4;
+        info.max_mtu = 512;
+        info.max_mps = MAX_PAYLOAD_LEN as u16;
+        info.transport_modes = SLE_TRANSPORT_UNRELIABLE | SLE_TRANSPORT_RELIABLE;
+        info.measurement_cap = SLE_MEAS_RSSI;
+        info.security_cap = SLE_SEC_AES_CCM | SLE_SEC_ECDH_P256;
         info
     }
 

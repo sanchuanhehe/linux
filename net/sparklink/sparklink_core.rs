@@ -236,12 +236,21 @@ pub struct GenlDliInfo {
     pub bus_type: u8,
     /// Max concurrent connections.
     pub max_conn: u8,
-    /// Padding.
-    _pad: [u8; 2],
+    /// Supported transport modes (bitmask).
+    pub transport_modes: u8,
+    /// Measurement capabilities (bitmask).
+    pub measurement_cap: u8,
     /// Firmware version.
     pub fw_version: u32,
     /// Feature bitmask.
     pub features: u64,
+    /// Maximum MTU.
+    pub max_mtu: u16,
+    /// Maximum MPS.
+    pub max_mps: u16,
+    /// Security capabilities (bitmask).
+    pub security_cap: u16,
+    _pad: [u8; 2],
 }
 
 /// Get DLI controller info (C FFI export).
@@ -254,9 +263,14 @@ pub extern "C" fn sparklink_genl_get_dli_info(out: *mut GenlDliInfo) -> i32 {
             let info = unsafe { &mut *out };
             info.bus_type = ci.bus as u8;
             info.max_conn = ci.max_connections;
-            info._pad = [0u8; 2];
+            info.transport_modes = ci.transport_modes;
+            info.measurement_cap = ci.measurement_cap;
             info.fw_version = ci.fw_version;
             info.features = ci.features;
+            info.max_mtu = ci.max_mtu;
+            info.max_mps = ci.max_mps;
+            info.security_cap = ci.security_cap;
+            info._pad = [0u8; 2];
             0
         }
         None => -(bindings::ENODEV as i32),
@@ -1142,9 +1156,19 @@ pub struct SleDliInfo {
     pub max_connections: u8,
     /// Maximum advertising sets.
     pub max_adv_sets: u8,
+    /// Supported transport modes (bitmask).
+    pub transport_modes: u8,
+    /// Measurement capabilities (bitmask).
+    pub measurement_cap: u8,
+    /// Maximum MTU the controller supports.
+    pub max_mtu: u16,
+    /// Maximum payload segment size per single TX.
+    pub max_mps: u16,
+    /// Security capabilities (bitmask).
+    pub security_cap: u16,
     /// Controller name (null-terminated).
     pub name: [u8; 32],
-    _reserved: [u8; 14],
+    _reserved: [u8; 6],
 }
 
 /// DLI event returned to userspace via DLI_POLL_EVENT ioctl.
@@ -2178,9 +2202,12 @@ impl kernel::InPlaceModule for SparkLinkModule {
                 debugfs.read_only_file(
                     c"dli_controller",
                     CString::try_from_fmt(fmt!(
-                        "bus: {:?}\nfirmware: {}.{}.{}\nfeatures: 0x{:016x}\nmax_connections: {}",
+                        "bus: {:?}\nfirmware: {}.{}.{}\nfeatures: 0x{:016x}\nmax_connections: {}\nmax_mtu: {}\nmax_mps: {}\ntransport_modes: 0x{:02x}\nmeasurement_cap: 0x{:02x}\nsecurity_cap: 0x{:04x}",
                         cinfo.bus, major, minor, patch,
-                        cinfo.features, cinfo.max_connections
+                        cinfo.features, cinfo.max_connections,
+                        cinfo.max_mtu, cinfo.max_mps,
+                        cinfo.transport_modes, cinfo.measurement_cap,
+                        cinfo.security_cap
                     ))?,
                 )
             },
@@ -3174,8 +3201,13 @@ impl MiscDevice for SparkLinkCtl {
                     features: cinfo.features,
                     max_connections: cinfo.max_connections,
                     max_adv_sets: 1,
+                    transport_modes: cinfo.transport_modes,
+                    measurement_cap: cinfo.measurement_cap,
+                    max_mtu: cinfo.max_mtu,
+                    max_mps: cinfo.max_mps,
+                    security_cap: cinfo.security_cap,
                     name,
-                    _reserved: [0u8; 14],
+                    _reserved: [0u8; 6],
                 };
                 drop(ss);
                 write_user_struct(arg, &info)?;

@@ -49,6 +49,7 @@ use core::cell::RefCell;
 use super::sle_dli::{
     DliPacketType, SleBus, SleController, SleControllerInfo, SleEvent,
     SleFeature, SleOpcode, SleStatus,
+    SLE_TRANSPORT_UNRELIABLE, SLE_MEAS_RSSI, SLE_SEC_AES_CCM,
 };
 
 // =========================================================================
@@ -386,6 +387,11 @@ impl SleController for SpiController {
             | (SleFeature::Crc32 as u64);
         info.max_pdu_payload = 255;
         info.max_connections = 2;
+        info.max_mtu = 247;
+        info.max_mps = 247;
+        info.transport_modes = SLE_TRANSPORT_UNRELIABLE;
+        info.measurement_cap = SLE_MEAS_RSSI;
+        info.security_cap = SLE_SEC_AES_CCM;
         info
     }
 

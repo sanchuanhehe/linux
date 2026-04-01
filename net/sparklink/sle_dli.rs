@@ -240,7 +240,35 @@ pub struct SleControllerInfo {
     pub max_pdu_payload: u16,
     /// Maximum number of concurrent connections (0 = unlimited).
     pub max_connections: u8,
+    /// Maximum MTU (SSAP message size) the controller supports.
+    pub max_mtu: u16,
+    /// Maximum payload segment size per single TX.
+    pub max_mps: u16,
+    /// Supported transport modes (bitmask, see `SLE_TRANSPORT_*`).
+    pub transport_modes: u8,
+    /// Measurement capabilities (bitmask, see `SLE_MEAS_*`).
+    pub measurement_cap: u8,
+    /// Security capabilities (bitmask, see `SLE_SEC_*`).
+    pub security_cap: u16,
 }
+
+// Transport mode bitmask constants.
+pub const SLE_TRANSPORT_UNRELIABLE: u8 = 1 << 0;
+pub const SLE_TRANSPORT_RELIABLE: u8 = 1 << 1;
+pub const SLE_TRANSPORT_FRAGMENTED: u8 = 1 << 2;
+
+// Measurement capability bitmask constants.
+pub const SLE_MEAS_RSSI: u8 = 1 << 0;
+pub const SLE_MEAS_PATH_LOSS: u8 = 1 << 1;
+pub const SLE_MEAS_POWER_MONITOR: u8 = 1 << 2;
+pub const SLE_MEAS_CHANNEL_MAP: u8 = 1 << 3;
+
+// Security capability bitmask constants.
+pub const SLE_SEC_AES_CCM: u16 = 1 << 0;
+pub const SLE_SEC_SM4: u16 = 1 << 1;
+pub const SLE_SEC_OOB_AUTH: u16 = 1 << 2;
+pub const SLE_SEC_ECDH_P256: u16 = 1 << 3;
+pub const SLE_SEC_SC: u16 = 1 << 4;
 
 impl Default for SleControllerInfo {
     fn default() -> Self {
@@ -252,6 +280,11 @@ impl Default for SleControllerInfo {
             features: 0,
             max_pdu_payload: 255,
             max_connections: 1,
+            max_mtu: 247,
+            max_mps: 247,
+            transport_modes: SLE_TRANSPORT_UNRELIABLE,
+            measurement_cap: 0,
+            security_cap: 0,
         }
     }
 }
@@ -913,6 +946,11 @@ impl SleController for VirtualController {
             | (SleFeature::Crc32 as u64);
         info.max_pdu_payload = 255;
         info.max_connections = 8;
+        info.max_mtu = 512;
+        info.max_mps = 247;
+        info.transport_modes = SLE_TRANSPORT_UNRELIABLE | SLE_TRANSPORT_RELIABLE;
+        info.measurement_cap = SLE_MEAS_RSSI;
+        info.security_cap = SLE_SEC_AES_CCM | SLE_SEC_ECDH_P256;
         info
     }
 

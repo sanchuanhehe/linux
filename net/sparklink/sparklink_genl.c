@@ -62,6 +62,12 @@ struct genl_dli_info {
 };
 extern int sparklink_genl_get_dli_info(struct genl_dli_info *out);
 
+extern int sparklink_do_start_adv(u32 interval_ms, u8 discovery_level);
+extern int sparklink_do_stop_adv(void);
+extern int sparklink_do_start_scan(u32 window_ms, u32 interval_ms,
+				   u8 filter_level);
+extern int sparklink_do_stop_scan(void);
+
 /* Forward declarations (also used externally from Rust via FFI) */
 int sparklink_genl_register(void);
 void sparklink_genl_unregister(void);
@@ -95,6 +101,9 @@ static const struct nla_policy sparklink_genl_policy[SPARKLINK_ATTR_MAX + 1] = {
 	[SPARKLINK_ATTR_HANDLE]		= { .type = NLA_U16 },
 	[SPARKLINK_ATTR_ADDR]		= NLA_POLICY_EXACT_LEN(6),
 	[SPARKLINK_ATTR_PEER_ADDR]	= NLA_POLICY_EXACT_LEN(6),
+	[SPARKLINK_ATTR_DISCOVERY_LEVEL]= { .type = NLA_U8 },
+	[SPARKLINK_ATTR_INTERVAL_MS]	= { .type = NLA_U16 },
+	[SPARKLINK_ATTR_WINDOW_MS]	= { .type = NLA_U16 },
 };
 
 /* -----------------------------------------------------------------------
@@ -115,6 +124,14 @@ static int sparklink_genl_do_get_pm_info(struct sk_buff *skb,
 					 struct genl_info *info);
 static int sparklink_genl_do_get_dli_info(struct sk_buff *skb,
 					  struct genl_info *info);
+static int sparklink_genl_do_start_adv(struct sk_buff *skb,
+				       struct genl_info *info);
+static int sparklink_genl_do_stop_adv(struct sk_buff *skb,
+				      struct genl_info *info);
+static int sparklink_genl_do_start_scan(struct sk_buff *skb,
+					struct genl_info *info);
+static int sparklink_genl_do_stop_scan(struct sk_buff *skb,
+				       struct genl_info *info);
 
 static const struct genl_small_ops sparklink_genl_ops[] = {
 	{
@@ -145,6 +162,26 @@ static const struct genl_small_ops sparklink_genl_ops[] = {
 	{
 		.cmd	= SPARKLINK_CMD_GET_DLI_INFO,
 		.doit	= sparklink_genl_do_get_dli_info,
+	},
+	{
+		.cmd	= SPARKLINK_CMD_START_ADV,
+		.doit	= sparklink_genl_do_start_adv,
+		.flags	= GENL_ADMIN_PERM,
+	},
+	{
+		.cmd	= SPARKLINK_CMD_STOP_ADV,
+		.doit	= sparklink_genl_do_stop_adv,
+		.flags	= GENL_ADMIN_PERM,
+	},
+	{
+		.cmd	= SPARKLINK_CMD_START_SCAN,
+		.doit	= sparklink_genl_do_start_scan,
+		.flags	= GENL_ADMIN_PERM,
+	},
+	{
+		.cmd	= SPARKLINK_CMD_STOP_SCAN,
+		.doit	= sparklink_genl_do_stop_scan,
+		.flags	= GENL_ADMIN_PERM,
 	},
 };
 
@@ -467,6 +504,65 @@ nla_put_failure:
 	genlmsg_cancel(msg, hdr);
 	nlmsg_free(msg);
 	return -EMSGSIZE;
+}
+
+/* -----------------------------------------------------------------------
+ * START_ADV handler (requires CAP_NET_ADMIN)
+ * -----------------------------------------------------------------------
+ */
+static int sparklink_genl_do_start_adv(struct sk_buff *skb,
+				       struct genl_info *info)
+{
+	u32 interval = 0;
+	u8 level = 0;
+
+	if (info->attrs[SPARKLINK_ATTR_INTERVAL_MS])
+		interval = nla_get_u16(info->attrs[SPARKLINK_ATTR_INTERVAL_MS]);
+	if (info->attrs[SPARKLINK_ATTR_DISCOVERY_LEVEL])
+		level = nla_get_u8(info->attrs[SPARKLINK_ATTR_DISCOVERY_LEVEL]);
+
+	return sparklink_do_start_adv(interval, level);
+}
+
+/* -----------------------------------------------------------------------
+ * STOP_ADV handler (requires CAP_NET_ADMIN)
+ * -----------------------------------------------------------------------
+ */
+static int sparklink_genl_do_stop_adv(struct sk_buff *skb,
+				      struct genl_info *info)
+{
+	return sparklink_do_stop_adv();
+}
+
+/* -----------------------------------------------------------------------
+ * START_SCAN handler (requires CAP_NET_ADMIN)
+ * -----------------------------------------------------------------------
+ */
+static int sparklink_genl_do_start_scan(struct sk_buff *skb,
+					struct genl_info *info)
+{
+	u32 window = 0;
+	u32 interval = 0;
+	u8 filter = 0;
+
+	if (info->attrs[SPARKLINK_ATTR_WINDOW_MS])
+		window = nla_get_u16(info->attrs[SPARKLINK_ATTR_WINDOW_MS]);
+	if (info->attrs[SPARKLINK_ATTR_INTERVAL_MS])
+		interval = nla_get_u16(info->attrs[SPARKLINK_ATTR_INTERVAL_MS]);
+	if (info->attrs[SPARKLINK_ATTR_DISCOVERY_LEVEL])
+		filter = nla_get_u8(info->attrs[SPARKLINK_ATTR_DISCOVERY_LEVEL]);
+
+	return sparklink_do_start_scan(window, interval, filter);
+}
+
+/* -----------------------------------------------------------------------
+ * STOP_SCAN handler (requires CAP_NET_ADMIN)
+ * -----------------------------------------------------------------------
+ */
+static int sparklink_genl_do_stop_scan(struct sk_buff *skb,
+				       struct genl_info *info)
+{
+	return sparklink_do_stop_scan();
 }
 
 /* -----------------------------------------------------------------------

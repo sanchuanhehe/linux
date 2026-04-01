@@ -1691,6 +1691,150 @@ pub(crate) fn sle_detach_device(dev_id: u16) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Unified control plane operations (shared by ioctl + genetlink)
+// ---------------------------------------------------------------------------
+
+/// Start advertising / broadcast with the given interval.
+fn do_start_adv(interval_ms: u32, discovery_level: u8) -> Result<i32> {
+    let mode = sle_configfs::power_mode();
+    if mode >= 2 {
+        return Err(EPERM);
+    }
+    let interval = if interval_ms == 0 {
+        sle_configfs::adv_interval_ms() as u32
+    } else {
+        interval_ms
+    };
+    let params = AdvParams {
+        discovery_level,
+        interval_slots: interval * 8,
+        broadcast_type: sle_pdu::BroadcastType::AccessibleScannable,
+        tx_power: 0,
+    };
+    let mut ss = SUBSYSTEM.lock();
+    let s = ss.as_mut().ok_or(ENODEV)?;
+    if s.local_role != GtRole::GNode {
+        return Err(EPERM);
+    }
+    s.adv_scan.start_advertising(params)?;
+    let _ = s.adv_scan.build_adv_pdu();
+    match s.controller.enable_broadcast(true) {
+        Ok(()) => {
+            drain_controller_events(s);
+        }
+        Err(e) => {
+            s.adv_scan.abort_advertising();
+            return Err(e);
+        }
+    }
+    Ok(0)
+}
+
+/// Stop advertising / broadcast.
+fn do_stop_adv() -> Result<i32> {
+    let mut ss = SUBSYSTEM.lock();
+    let s = ss.as_mut().ok_or(ENODEV)?;
+    s.adv_scan.stop_advertising()?;
+    if let Some(dev) = s.active_dev_id.and_then(|id| s.dev_registry.get(id)) {
+        dev.clear_flag(sle_dev::SLE_DEV_ADVERTISING);
+    }
+    let _ = s.controller.enable_broadcast(false);
+    Ok(0)
+}
+
+/// Start scanning with the given window and interval.
+fn do_start_scan(window_ms: u32, interval_ms: u32, filter_level: u8) -> Result<i32> {
+    let mode = sle_configfs::power_mode();
+    if mode >= 2 {
+        return Err(EPERM);
+    }
+    let window = if window_ms == 0 {
+        sle_configfs::scan_window_ms() as u32
+    } else {
+        window_ms
+    };
+    let interval = if interval_ms == 0 {
+        window * 2
+    } else {
+        interval_ms
+    };
+    let params = ScanParams {
+        window_slots: window * 8,
+        interval_slots: interval * 8,
+        filter_level,
+        active: false,
+    };
+    let mut ss = SUBSYSTEM.lock();
+    let s = ss.as_mut().ok_or(ENODEV)?;
+    if s.local_role != GtRole::TNode {
+        return Err(EPERM);
+    }
+    s.adv_scan.start_scanning(params)?;
+    match s.controller.enable_scan(true) {
+        Ok(()) => {
+            drain_controller_events(s);
+        }
+        Err(e) => {
+            s.adv_scan.abort_scanning();
+            return Err(e);
+        }
+    }
+    Ok(0)
+}
+
+/// Stop scanning.
+fn do_stop_scan() -> Result<i32> {
+    let mut ss = SUBSYSTEM.lock();
+    let s = ss.as_mut().ok_or(ENODEV)?;
+    s.adv_scan.stop_scanning()?;
+    if let Some(dev) = s.active_dev_id.and_then(|id| s.dev_registry.get(id)) {
+        dev.clear_flag(sle_dev::SLE_DEV_SCANNING);
+    }
+    let _ = s.controller.enable_scan(false);
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// C FFI exports for genetlink action commands
+// ---------------------------------------------------------------------------
+
+/// Start advertising (C FFI). Returns 0 on success, negative errno on failure.
+#[no_mangle]
+pub extern "C" fn sparklink_do_start_adv(interval_ms: u32, discovery_level: u8) -> i32 {
+    match do_start_adv(interval_ms, discovery_level) {
+        Ok(v) => v,
+        Err(e) => e.to_errno(),
+    }
+}
+
+/// Stop advertising (C FFI). Returns 0 on success, negative errno on failure.
+#[no_mangle]
+pub extern "C" fn sparklink_do_stop_adv() -> i32 {
+    match do_stop_adv() {
+        Ok(v) => v,
+        Err(e) => e.to_errno(),
+    }
+}
+
+/// Start scanning (C FFI). Returns 0 on success, negative errno on failure.
+#[no_mangle]
+pub extern "C" fn sparklink_do_start_scan(window_ms: u32, interval_ms: u32, filter_level: u8) -> i32 {
+    match do_start_scan(window_ms, interval_ms, filter_level) {
+        Ok(v) => v,
+        Err(e) => e.to_errno(),
+    }
+}
+
+/// Stop scanning (C FFI). Returns 0 on success, negative errno on failure.
+#[no_mangle]
+pub extern "C" fn sparklink_do_stop_scan() -> i32 {
+    match do_stop_scan() {
+        Ok(v) => v,
+        Err(e) => e.to_errno(),
+    }
+}
+
 /// Switch the subsystem controller backend to USB.
 ///
 /// Called from USB probe after sle_attach_device and C-side registration
@@ -2495,107 +2639,25 @@ impl MiscDevice for SparkLinkCtl {
 
         match cmd {
             SL_IOCTL_START_ADV => {
-                Self::check_power_active()?;
                 let uparams: SleAdvParams = read_user_struct(arg)?;
-                let interval = if uparams.interval_ms == 0 {
-                    sle_configfs::adv_interval_ms()
-                } else {
-                    uparams.interval_ms
-                };
-                let params = AdvParams {
-                    discovery_level: uparams.discovery_level,
-                    interval_slots: (interval as u32) * 8,
-                    broadcast_type: sle_pdu::BroadcastType::AccessibleScannable,
-                    tx_power: 0,
-                };
-                {
-                    let mut ss = SUBSYSTEM.lock();
-                    let s = ss.as_mut().ok_or(ENODEV)?;
-                    if s.local_role != GtRole::GNode {
-                        dev_warn!(me.dev, "sparklink: advertising requires GNode role\n");
-                        return Err(EPERM);
-                    }
-                    s.adv_scan.start_advertising(params)?;
-                    if let Some(pdu) = s.adv_scan.build_adv_pdu() {
-                        dev_info!(
-                            me.dev,
-                            "sparklink: ADV PDU built, {} bytes data, CRC=0x{:03x}\n",
-                            pdu.data_len,
-                            pdu.crc
-                        );
-                    }
-                    // Send enable to controller; state stays AdvPending.
-                    // EventPump will confirm or abort when CommandComplete
-                    // arrives from the controller (DLI async model).
-                    match s.controller.enable_broadcast(true) {
-                        Ok(()) => {
-                            // Drain synchronous responses (VirtualController).
-                            drain_controller_events(s);
-                        }
-                        Err(e) => {
-                            s.adv_scan.abort_advertising();
-                            return Err(e);
-                        }
-                    }
-                }
+                do_start_adv(uparams.interval_ms as u32, uparams.discovery_level)?;
                 Ok(0)
             }
             SL_IOCTL_STOP_ADV => {
-                let mut ss = SUBSYSTEM.lock();
-                let s = ss.as_mut().ok_or(ENODEV)?;
-                s.adv_scan.stop_advertising()?;
-                if let Some(dev) = s.active_dev_id.and_then(|id| s.dev_registry.get(id)) {
-                    dev.clear_flag(sle_dev::SLE_DEV_ADVERTISING);
-                }
-                let _ = s.controller.enable_broadcast(false);
+                do_stop_adv()?;
                 Ok(0)
             }
             SL_IOCTL_START_SCAN => {
-                Self::check_power_active()?;
                 let uparams: SleScanParams = read_user_struct(arg)?;
-                let window = if uparams.window_ms == 0 {
-                    sle_configfs::scan_window_ms()
-                } else {
-                    uparams.window_ms
-                };
-                let interval = if uparams.interval_ms == 0 {
-                    window * 2 // default: interval = 2x window
-                } else {
-                    uparams.interval_ms
-                };
-                let params = ScanParams {
-                    window_slots: (window as u32) * 8,
-                    interval_slots: (interval as u32) * 8,
-                    filter_level: uparams.filter_discovery_level,
-                    active: false,
-                };
-                let mut ss = SUBSYSTEM.lock();
-                let s = ss.as_mut().ok_or(ENODEV)?;
-                if s.local_role != GtRole::TNode {
-                    dev_warn!(me.dev, "sparklink: scanning requires TNode role\n");
-                    return Err(EPERM);
-                }
-                s.adv_scan.start_scanning(params)?;
-                match s.controller.enable_scan(true) {
-                    Ok(()) => {
-                        // Drain synchronous responses (VirtualController).
-                        drain_controller_events(s);
-                    }
-                    Err(e) => {
-                        s.adv_scan.abort_scanning();
-                        return Err(e);
-                    }
-                }
+                do_start_scan(
+                    uparams.window_ms as u32,
+                    uparams.interval_ms as u32,
+                    uparams.filter_discovery_level,
+                )?;
                 Ok(0)
             }
             SL_IOCTL_STOP_SCAN => {
-                let mut ss = SUBSYSTEM.lock();
-                let s = ss.as_mut().ok_or(ENODEV)?;
-                s.adv_scan.stop_scanning()?;
-                if let Some(dev) = s.active_dev_id.and_then(|id| s.dev_registry.get(id)) {
-                    dev.clear_flag(sle_dev::SLE_DEV_SCANNING);
-                }
-                let _ = s.controller.enable_scan(false);
+                do_stop_scan()?;
                 Ok(0)
             }
             SL_IOCTL_DEV_COUNT => {

@@ -1346,6 +1346,20 @@ fn sle_dli_event_to_broadcast(ev: &sle_dli::SleEvent) -> sle_event::SleWireEvent
 // Module definition
 // ---------------------------------------------------------------------------
 
+/// Guard that tears down the shared subsystem when the module is unloaded.
+struct SubsystemGuard;
+
+impl Drop for SubsystemGuard {
+    fn drop(&mut self) {
+        let mut ss = SUBSYSTEM.lock();
+        if let Some(ref shared) = *ss {
+            shared.controller.close();
+        }
+        *ss = None;
+        pr_info!("sparklink: shared subsystem destroyed (module unload)\n");
+    }
+}
+
 module! {
     type: SparkLinkModule,
     name: "sparklink",
@@ -1381,6 +1395,8 @@ struct SparkLinkModule {
     _configfs: configfs::Subsystem<sle_configfs::SparkLinkConfig>,
     #[pin]
     _usb: sle_usb::UsbRegistration,
+    /// Dropped LAST — after _miscdev closes all fds.
+    _subsystem_guard: SubsystemGuard,
 }
 
 impl kernel::InPlaceModule for SparkLinkModule {
@@ -1464,40 +1480,12 @@ impl kernel::InPlaceModule for SparkLinkModule {
                 )
             },
             _usb <- sle_usb::UsbRegistration::new(c"sparklink_usb", _module),
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Misc device implementation: /dev/sparklink control interface
-// ---------------------------------------------------------------------------
-// Each open fd gets its own event queue for per-listener event delivery.
-// All protocol state (controller, connections, advertising, security, SSAP,
-// power, PHY) is shared across fds via the SUBSYSTEM global mutex.
-
-#[pin_data(PinnedDrop)]
-struct SparkLinkCtl {
-    #[pin]
-    events: Mutex<EventQueue>,
-    #[pin]
-    event_poll: PollCondVar,
-    dev: ARef<Device>,
-    /// Broadcast ring cursor: sequence number of the last event this fd has seen.
-    last_seq: core::sync::atomic::AtomicU64,
-}
-
-#[vtable]
-impl MiscDevice for SparkLinkCtl {
-    type Ptr = Pin<KBox<Self>>;
-
-    fn open(_file: &FsFile, misc: &MiscDeviceRegistration<Self>) -> Result<Pin<KBox<Self>>> {
-        let dev = ARef::from(misc.device());
-        dev_info!(dev, "sparklink: control interface opened\n");
-
-        // Lazily initialise the shared subsystem on first open.
-        {
-            let mut ss = SUBSYSTEM.lock();
-            if ss.is_none() {
+            _subsystem_guard: {
+                // Initialise the shared subsystem at module load time.
+                // This decouples the subsystem lifecycle from fd lifetime:
+                // the controller, event pump, and protocol state persist
+                // even when no fd is open.
+                let mut ss = SUBSYSTEM.lock();
                 let addr = [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01];
                 let controller = match sle_configfs::controller_type() {
                     1 => sle_dli::ControllerBackend::new_uart(
@@ -1529,6 +1517,44 @@ impl MiscDevice for SparkLinkCtl {
                     _event_pump: pump,
                 });
                 pr_info!("sparklink: shared subsystem initialised\n");
+                SubsystemGuard
+            },
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Misc device implementation: /dev/sparklink control interface
+// ---------------------------------------------------------------------------
+// Each open fd gets its own event queue for per-listener event delivery.
+// All protocol state (controller, connections, advertising, security, SSAP,
+// power, PHY) is shared across fds via the SUBSYSTEM global mutex.
+
+#[pin_data(PinnedDrop)]
+struct SparkLinkCtl {
+    #[pin]
+    events: Mutex<EventQueue>,
+    #[pin]
+    event_poll: PollCondVar,
+    dev: ARef<Device>,
+    /// Broadcast ring cursor: sequence number of the last event this fd has seen.
+    last_seq: core::sync::atomic::AtomicU64,
+}
+
+#[vtable]
+impl MiscDevice for SparkLinkCtl {
+    type Ptr = Pin<KBox<Self>>;
+
+    fn open(_file: &FsFile, misc: &MiscDeviceRegistration<Self>) -> Result<Pin<KBox<Self>>> {
+        let dev = ARef::from(misc.device());
+        dev_info!(dev, "sparklink: control interface opened\n");
+
+        // Subsystem is initialised at module load; just verify it exists.
+        {
+            let ss = SUBSYSTEM.lock();
+            if ss.is_none() {
+                dev_err!(dev, "sparklink: subsystem not initialised\n");
+                return Err(ENODEV);
             }
         }
         OPEN_FD_COUNT.fetch_add(1u32, Relaxed);
@@ -2423,16 +2449,7 @@ impl SparkLinkCtl {
 #[pinned_drop]
 impl PinnedDrop for SparkLinkCtl {
     fn drop(self: Pin<&mut Self>) {
-        let prev = OPEN_FD_COUNT.fetch_add(u32::MAX, Relaxed); // wrapping decrement
-        if prev <= 1 {
-            // Last fd closed — tear down shared subsystem.
-            let mut ss = SUBSYSTEM.lock();
-            if let Some(ref shared) = *ss {
-                shared.controller.close();
-            }
-            *ss = None;
-            pr_info!("sparklink: shared subsystem destroyed (last fd closed)\n");
-        }
+        OPEN_FD_COUNT.fetch_add(u32::MAX, Relaxed); // wrapping decrement
         dev_info!(self.dev, "sparklink: control interface closed\n");
     }
 }

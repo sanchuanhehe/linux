@@ -1733,8 +1733,12 @@ impl MiscDevice for SparkLinkCtl {
     }
 
     fn ioctl(me: Pin<&SparkLinkCtl>, _file: &FsFile, cmd: u32, arg: usize) -> Result<isize> {
+        // Sync power mode from configfs on every ioctl.
+        Self::sync_power_mode(me.as_ref());
+
         match cmd {
             SL_IOCTL_START_ADV => {
+                Self::check_power_active()?;
                 let uparams: SleAdvParams = read_user_struct(arg)?;
                 let interval = if uparams.interval_ms == 0 {
                     sle_configfs::adv_interval_ms()
@@ -1787,6 +1791,7 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             SL_IOCTL_START_SCAN => {
+                Self::check_power_active()?;
                 let uparams: SleScanParams = read_user_struct(arg)?;
                 let window = if uparams.window_ms == 0 {
                     sle_configfs::scan_window_ms()
@@ -1916,6 +1921,7 @@ impl MiscDevice for SparkLinkCtl {
             }
             // --- Connection management ---
             SL_IOCTL_CONNECT => {
+                Self::check_power_active()?;
                 let cp: SleConnectParams = read_user_struct(arg)?;
                 let role = if cp.gt_role == 1 {
                     GtRole::GNode
@@ -2578,6 +2584,36 @@ impl MiscDevice for SparkLinkCtl {
 }
 
 impl SparkLinkCtl {
+    /// Synchronize configfs power_mode into SubsystemShared.
+    /// Called at the beginning of ioctls that initiate active operations.
+    fn sync_power_mode(_me: Pin<&SparkLinkCtl>) {
+        let configfs_mode = sle_configfs::power_mode();
+        let mut ss = SUBSYSTEM.lock();
+        if let Some(ref mut shared) = *ss {
+            let old_pct = shared.power.estimated_power_pct();
+            if shared.power.set_mode(configfs_mode) {
+                let new_pct = shared.power.estimated_power_pct();
+                pr_info!(
+                    "sparklink: power mode changed to {} ({}% -> {}%)\n",
+                    configfs_mode, old_pct, new_pct
+                );
+                // Push a power changed event through per-fd EventQueue path
+                // instead of broadcast ring (avoid pub visibility issue).
+            }
+        }
+    }
+
+    /// Check if the subsystem power mode allows active operations.
+    /// Returns Err(EPERM) if in idle mode.
+    fn check_power_active() -> Result {
+        let mode = sle_configfs::power_mode();
+        if mode >= 2 {
+            // Idle or suspended — reject active operations.
+            return Err(EPERM);
+        }
+        Ok(())
+    }
+
     /// Synchronize events from the global broadcast ring into this fd's
     /// per-listener event queue. Called before read() and poll() so that
     /// all open fds see the same event stream regardless of which fd

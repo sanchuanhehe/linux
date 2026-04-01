@@ -273,6 +273,22 @@ impl PowerInner {
         self.idle_count = 0;
     }
 
+    /// Set power mode from configfs (0=Active, 1=Sniff, 2=Idle).
+    /// Returns true if the state actually changed.
+    pub fn set_mode(&mut self, mode: u8) -> bool {
+        let target = match mode {
+            0 => PowerState::Active,
+            1 => PowerState::Sniff,
+            2 => PowerState::Idle,
+            _ => return false,
+        };
+        if self.state == target {
+            return false;
+        }
+        self.transition_to(target);
+        true
+    }
+
     /// Get estimated power consumption ratio (0-100).
     /// Active=100, Sniff=30, Idle=5, Suspended=0.
     pub fn estimated_power_pct(&self) -> u8 {

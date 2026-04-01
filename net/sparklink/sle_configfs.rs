@@ -48,6 +48,12 @@ pub(crate) fn scan_window_ms() -> u16 {
     SCAN_WINDOW_MS.load(Ordering::Relaxed)
 }
 
+/// Get the configured power mode.
+/// 0 = active, 1 = sniff, 2 = idle.
+pub(crate) fn power_mode() -> u8 {
+    POWER_MODE.load(Ordering::Relaxed)
+}
+
 #[pin_data]
 pub(crate) struct SparkLinkConfig {
     #[pin]

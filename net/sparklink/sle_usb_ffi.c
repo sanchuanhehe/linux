@@ -263,6 +263,7 @@ void sle_usb_kill_ctx(struct sle_urb_ctx *ctx)
  * @len:       payload length
  * @timeout_ms: timeout in milliseconds
  *
+ * Uses a kmalloc'd bounce buffer to avoid DMA from stack memory.
  * Returns actual bytes transferred on success, negative errno on failure.
  */
 int sle_usb_sync_bulk_out(struct usb_device *udev, u8 ep,
@@ -271,9 +272,16 @@ int sle_usb_sync_bulk_out(struct usb_device *udev, u8 ep,
 	int actual_len = 0;
 	int ret;
 	unsigned int pipe = usb_sndbulkpipe(udev, ep);
+	u8 *bounce;
 
-	ret = usb_bulk_msg(udev, pipe, (void *)data, len,
+	bounce = kmalloc(len, GFP_KERNEL);
+	if (!bounce)
+		return -ENOMEM;
+	memcpy(bounce, data, len);
+
+	ret = usb_bulk_msg(udev, pipe, bounce, len,
 			   &actual_len, timeout_ms);
+	kfree(bounce);
 	return ret ? ret : actual_len;
 }
 
@@ -285,6 +293,7 @@ int sle_usb_sync_bulk_out(struct usb_device *udev, u8 ep,
  * @size:  buffer capacity
  * @timeout_ms: timeout in milliseconds
  *
+ * Uses a kmalloc'd bounce buffer to avoid DMA from stack memory.
  * Returns actual bytes received on success, negative errno on failure.
  */
 int sle_usb_sync_bulk_in(struct usb_device *udev, u8 ep,
@@ -293,9 +302,17 @@ int sle_usb_sync_bulk_in(struct usb_device *udev, u8 ep,
 	int actual_len = 0;
 	int ret;
 	unsigned int pipe = usb_rcvbulkpipe(udev, ep);
+	u8 *bounce;
 
-	ret = usb_bulk_msg(udev, pipe, buf, size,
+	bounce = kmalloc(size, GFP_KERNEL);
+	if (!bounce)
+		return -ENOMEM;
+
+	ret = usb_bulk_msg(udev, pipe, bounce, size,
 			   &actual_len, timeout_ms);
+	if (!ret)
+		memcpy(buf, bounce, actual_len);
+	kfree(bounce);
 	return ret ? ret : actual_len;
 }
 
@@ -488,10 +505,11 @@ void sle_usb_dev_unregister(int dev_id)
 int sle_usb_dev_send_cmd(int dev_id, u16 opcode, const u8 *params, int plen)
 {
 	struct sle_usb_dev *d;
-	u8 pkt[SLE_CMD_BUF_SIZE];
+	u8 *pkt;
 	int total;
 	int actual_len;
 	unsigned int pipe;
+	int ret;
 
 	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
 		return -EINVAL;
@@ -503,6 +521,11 @@ int sle_usb_dev_send_cmd(int dev_id, u16 opcode, const u8 *params, int plen)
 	if (plen > 255)
 		plen = 255;
 
+	total = 4 + plen;
+	pkt = kmalloc(total, GFP_KERNEL);
+	if (!pkt)
+		return -ENOMEM;
+
 	/* Build DLI command packet */
 	pkt[0] = DLI_PKT_COMMAND;
 	pkt[1] = (u8)(opcode & 0xFF);
@@ -510,11 +533,12 @@ int sle_usb_dev_send_cmd(int dev_id, u16 opcode, const u8 *params, int plen)
 	pkt[3] = (u8)plen;
 	if (plen > 0 && params)
 		memcpy(&pkt[4], params, plen);
-	total = 4 + plen;
 
 	pipe = usb_sndbulkpipe(d->udev, d->ep_bulk_out);
-	return usb_bulk_msg(d->udev, pipe, pkt, total,
-			    &actual_len, SLE_CMD_TIMEOUT_MS);
+	ret = usb_bulk_msg(d->udev, pipe, pkt, total,
+			   &actual_len, SLE_CMD_TIMEOUT_MS);
+	kfree(pkt);
+	return ret;
 }
 
 /**
@@ -529,12 +553,13 @@ int sle_usb_dev_send_cmd(int dev_id, u16 opcode, const u8 *params, int plen)
 int sle_usb_dev_send_data(int dev_id, u16 handle, const u8 *data, int len)
 {
 	struct sle_usb_dev *d;
-	u8 pkt[SLE_DATA_BUF_SIZE];
+	u8 *pkt;
 	int total;
 	int actual_len;
 	unsigned int pipe;
 	u16 link_id_seg;
 	u16 data_len_field;
+	int ret;
 
 	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
 		return -EINVAL;
@@ -545,6 +570,11 @@ int sle_usb_dev_send_data(int dev_id, u16 handle, const u8 *data, int len)
 
 	if (len > 511)
 		len = 511;
+
+	total = 5 + len;
+	pkt = kmalloc(total, GFP_KERNEL);
+	if (!pkt)
+		return -ENOMEM;
 
 	/* Build DLI async unicast data packet */
 	link_id_seg = ((handle & 0x0FFF) << 4);
@@ -557,11 +587,12 @@ int sle_usb_dev_send_data(int dev_id, u16 handle, const u8 *data, int len)
 	pkt[4] = (u8)(data_len_field >> 8);
 	if (len > 0 && data)
 		memcpy(&pkt[5], data, len);
-	total = 5 + len;
 
 	pipe = usb_sndbulkpipe(d->udev, d->ep_bulk_out);
-	return usb_bulk_msg(d->udev, pipe, pkt, total,
-			    &actual_len, SLE_CMD_TIMEOUT_MS);
+	ret = usb_bulk_msg(d->udev, pipe, pkt, total,
+			   &actual_len, SLE_CMD_TIMEOUT_MS);
+	kfree(pkt);
+	return ret;
 }
 
 /**
@@ -642,10 +673,15 @@ void sle_usb_dev_stop_evt(int dev_id)
 static int sle_usb_send_cmd_sync(struct sle_usb_dev *d, u16 opcode,
 				 u8 *resp, int resp_size, int *resp_len)
 {
-	u8 cmd[4];
+	u8 *cmd;
+	u8 *rbuf;
 	int actual_len;
 	unsigned int pipe_out, pipe_in;
 	int ret;
+
+	cmd = kmalloc(4, GFP_KERNEL);
+	if (!cmd)
+		return -ENOMEM;
 
 	cmd[0] = DLI_PKT_COMMAND;
 	cmd[1] = (u8)(opcode & 0xFF);
@@ -655,13 +691,21 @@ static int sle_usb_send_cmd_sync(struct sle_usb_dev *d, u16 opcode,
 	pipe_out = usb_sndbulkpipe(d->udev, d->ep_bulk_out);
 	ret = usb_bulk_msg(d->udev, pipe_out, cmd, 4,
 			   &actual_len, SLE_INIT_TIMEOUT_MS);
+	kfree(cmd);
 	if (ret)
 		return ret;
 
-	/* Read response from bulk IN */
+	/* Read response from bulk IN using heap buffer */
+	rbuf = kmalloc(resp_size, GFP_KERNEL);
+	if (!rbuf)
+		return -ENOMEM;
+
 	pipe_in = usb_rcvbulkpipe(d->udev, d->ep_bulk_in);
-	ret = usb_bulk_msg(d->udev, pipe_in, resp, resp_size,
+	ret = usb_bulk_msg(d->udev, pipe_in, rbuf, resp_size,
 			   resp_len, SLE_INIT_TIMEOUT_MS);
+	if (!ret && *resp_len > 0)
+		memcpy(resp, rbuf, *resp_len);
+	kfree(rbuf);
 	return ret;
 }
 

@@ -65,7 +65,7 @@ use kernel::{
 };
 
 use sle_adv::{AdvParams, AdvScanInner, ScanParams};
-use sle_conn::{AccessResponseType, ConnManager, GtRole, NegotiatedParams, CONN_DATA_MAX};
+use sle_conn::{AccessResponseType, ConnManager, ConnState, GtRole, NegotiatedParams, CONN_DATA_MAX};
 use sle_security::SecurityInner;
 use sle_ssap::SsapInner;
 use sle_power::PowerInner;
@@ -2052,6 +2052,13 @@ pub(crate) fn sle_switch_controller_usb(dev_id: u16, addr: [u8; 6], fw_version: 
             );
             return;
         }
+        // Open the controller (starts event URB listener).
+        if let Err(e) = ss.controller.open() {
+            pr_warn!(
+                "sparklink: controller open failed for sle{}: {:?}\n",
+                dev_id, e
+            );
+        }
         // Sync device model with real hardware info from probe.
         let _ = ss.dev_registry.update_hw_info(dev_id, addr, fw_version);
         pr_info!(
@@ -3001,6 +3008,9 @@ impl MiscDevice for SparkLinkCtl {
                     match s.controller.create_connection(&cp.peer_addr) {
                         Ok(()) => {
                             drain_controller_events(s);
+                            // If ConnComplete event hasn't arrived yet,
+                            // force-confirm since the USB command succeeded.
+                            s.conn.confirm_connecting_by_addr(&cp.peer_addr);
                         }
                         Err(e) => {
                             s.conn.abort_connecting(handle);
@@ -3030,6 +3040,12 @@ impl MiscDevice for SparkLinkCtl {
                     match s.controller.disconnect(handle) {
                         Ok(()) => {
                             drain_controller_events(s);
+                            // If event hasn't arrived yet, force-confirm.
+                            // The USB command succeeded so the controller
+                            // already tore down the link.
+                            if s.conn.info(handle).map(|e| e.state == ConnState::DisconnectPending).unwrap_or(false) {
+                                s.conn.confirm_disconnecting(handle);
+                            }
                         }
                         Err(_) => {
                             s.conn.abort_disconnecting(handle);

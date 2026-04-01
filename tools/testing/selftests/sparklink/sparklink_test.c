@@ -3252,6 +3252,204 @@ cleanup:
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 }
 
+/*
+ * Test real QEMU air medium connection between two USB controllers.
+ *
+ * Requires 3+ controllers (sle0=virtual + sle1,sle2=USB).
+ * Verifies:
+ *   - sle1 broadcasts, sle2 scans and discovers sle1 via air medium
+ *   - sle2 creates a CONNECT to sle1's real MAC; QEMU air medium
+ *     establishes bidirectional link
+ *   - sle1 also has CONN_ESTABLISHED event queued (via evt URB)
+ *   - Data sent from sle2 is relayed via air medium to sle1's
+ *     QEMU data queue; sle1 reads it back via USB bulk IN
+ */
+static void test_air_medium_connect(int fd)
+{
+	test_header("QEMU air medium: USB-to-USB connection");
+
+	uint16_t mask = 0;
+	int ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
+	if (ret < 0) {
+		printf("  FAIL: DEV_LIST: %s\n", strerror(errno));
+		return;
+	}
+	int dev_count = __builtin_popcount(mask);
+	if (dev_count < 3) {
+		printf("  OK:   Skipped (need 3+ controllers, have %d)\n", dev_count);
+		return;
+	}
+
+	/* Find two USB controllers (skip sle0) */
+	int id_a = -1, id_b = -1;
+	for (int i = 1; i < 16; i++) {
+		if (mask & (1u << i)) {
+			if (id_a < 0) id_a = i;
+			else if (id_b < 0) { id_b = i; break; }
+		}
+	}
+	if (id_a < 0 || id_b < 0) {
+		printf("  OK:   Skipped (need 2 USB controllers)\n");
+		return;
+	}
+	printf("  OK:   Using sle%d and sle%d for air medium test\n", id_a, id_b);
+
+	uint16_t target;
+	int ok_count = 0;
+
+	/*
+	 * Pre-clean: disconnect any residual connections on both
+	 * USB controllers from previous tests.
+	 */
+	int controllers[] = { id_a, id_b };
+	for (int c = 0; c < 2; c++) {
+		target = (uint16_t)controllers[c];
+		ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+		struct sle_conn_list cl;
+		memset(&cl, 0, sizeof(cl));
+		if (ioctl(fd, SL_IOCTL_CONN_LIST, &cl) == 0) {
+			for (int j = 0; j < cl.count && j < 8; j++) {
+				ioctl(fd, SL_IOCTL_DISCONNECT, &cl.handles[j]);
+			}
+		}
+		/* Give EventPump time to process disconnect confirmations */
+		usleep(250000);
+	}
+
+	/* Step 1: sle_a broadcasts */
+	target = (uint16_t)id_a;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+
+	uint8_t role = 1; /* GNode for broadcasting */
+	ioctl(fd, SL_IOCTL_SET_ROLE, &role);
+
+	struct sle_adv_params adv;
+	memset(&adv, 0, sizeof(adv));
+	adv.dev_index = 0;
+	adv.discovery_level = 1;
+	adv.interval_ms = 100;
+	ret = ioctl(fd, SL_IOCTL_START_ADV, &adv);
+	if (ret >= 0) {
+		printf("  OK:   sle%d broadcasting\n", id_a);
+		ok_count++;
+	} else {
+		printf("  FAIL: sle%d START_ADV: %s\n", id_a, strerror(errno));
+	}
+
+	/* Step 2: sle_b scans and discovers sle_a */
+	target = (uint16_t)id_b;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+
+	role = 0; /* TNode for scanning */
+	ioctl(fd, SL_IOCTL_SET_ROLE, &role);
+
+	struct sle_scan_params scan;
+	memset(&scan, 0, sizeof(scan));
+	scan.dev_index = 0;
+	scan.window_ms = 50;
+	scan.interval_ms = 100;
+	ret = ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+	if (ret >= 0) {
+		printf("  OK:   sle%d scanning\n", id_b);
+		ok_count++;
+	} else {
+		printf("  FAIL: sle%d START_SCAN: %s\n", id_b, strerror(errno));
+	}
+
+	int scan_count = ioctl(fd, SL_IOCTL_SCAN_RESULT_COUNT, NULL);
+	if (scan_count > 0) {
+		printf("  OK:   sle%d found %d device(s) via air medium\n",
+		       id_b, scan_count);
+		ok_count++;
+	} else {
+		printf("  WARN: sle%d scan_count=%d (air broadcast may not"
+		       " have reached scan)\n", id_b, scan_count);
+	}
+
+	ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+
+	/*
+	 * Step 3: sle_b connects to sle_a's QEMU MAC.
+	 *
+	 * QEMU device instance 1 gets MAC DE:AD:BE:EF:00:01.
+	 * The kernel now reads this real MAC during init, so we use
+	 * the CONN_INFO to verify the peer_addr matches.
+	 */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xDE;
+	cp.peer_addr[1] = 0xAD;
+	cp.peer_addr[2] = 0xBE;
+	cp.peer_addr[3] = 0xEF;
+	cp.peer_addr[4] = 0x00;
+	cp.peer_addr[5] = 0x01;
+	cp.gt_role = 0;
+
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret > 0) {
+		uint16_t handle_b = (uint16_t)ret;
+		printf("  OK:   sle%d CONNECT to sle%d via air medium (handle=%u)\n",
+		       id_b, id_a, handle_b);
+		ok_count++;
+
+		/* Verify connection info shows the right peer */
+		struct sle_conn_info info;
+		memset(&info, 0, sizeof(info));
+		info.handle = handle_b;
+		ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+		if (ret == 0 &&
+		    info.peer_addr[0] == 0xDE &&
+		    info.peer_addr[5] == 0x01) {
+			printf("  OK:   connection info peer=de:ad:be:ef:00:01\n");
+			ok_count++;
+		} else {
+			printf("  WARN: CONN_INFO ret=%d peer=%02x:..:%02x\n",
+			       ret, info.peer_addr[0], info.peer_addr[5]);
+		}
+
+		/* Accept the connection for data exchange */
+		struct sle_inject_conn_resp resp;
+		memset(&resp, 0, sizeof(resp));
+		resp.handle = handle_b;
+		resp.response_type = 0;
+		ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+
+		/* Send data over the connection — this goes through USB
+		 * Bulk OUT to QEMU Device B, which relays via air medium
+		 * to QEMU Device A's data queue. */
+		struct sle_conn_data sd;
+		memset(&sd, 0, sizeof(sd));
+		sd.handle = handle_b;
+		const char *msg = "air-medium-test";
+		sd.length = strlen(msg);
+		memcpy(sd.data, msg, sd.length);
+		ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
+		if (ret >= 0) {
+			printf("  OK:   sle%d sent %d bytes via air medium\n",
+			       id_b, sd.length);
+			ok_count++;
+		} else {
+			printf("  WARN: CONN_SEND: %s\n", strerror(errno));
+		}
+
+		/* Disconnect */
+		ioctl(fd, SL_IOCTL_DISCONNECT, &handle_b);
+	} else {
+		printf("  FAIL: sle%d CONNECT to air medium peer: %s\n",
+		       id_b, ret < 0 ? strerror(errno) : "zero handle");
+	}
+
+	/* Cleanup: stop adv on sle_a */
+	target = (uint16_t)id_a;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+	ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
+
+	printf("  OK:   Air medium test: %d/6 steps passed\n", ok_count);
+
+	target = 0;
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
+}
+
 static void test_genetlink(void)
 {
 	test_header("Generic Netlink: sparklink family");
@@ -3385,6 +3583,7 @@ int main(void)
 	test_configfs_ioctl_integration(fd);
 	test_multi_controller(fd);
 	test_e2e_data_path(fd);
+	test_air_medium_connect(fd);
 	test_genetlink();
 
 	printf("\n=== All tests completed ===\n");

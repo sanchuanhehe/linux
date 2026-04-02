@@ -61,6 +61,15 @@ pub enum PairingMethod {
     /// Numeric comparison: 6-digit passkey displayed on both sides,
     /// user confirms match (MITM protected, §8.6.10 auth_method=0x00).
     NumericComparison = 3,
+    /// Passkey entry: 6-digit passkey displayed on one device,
+    /// user inputs on the other (§8.6.10 auth_method=0x02).
+    PasskeyEntry = 4,
+    /// Out-of-band: key material pre-exchanged via NFC/QR etc.
+    /// (§8.6.10 auth_method=0x04, §8.6.12 配对扩展数据).
+    Oob = 5,
+    /// Password verification: variable-length password used as
+    /// authentication material (§8.6.10 auth_method=0x03).
+    Password = 6,
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +91,8 @@ pub enum SecurityState {
     Encrypted = 3,
     /// Awaiting user confirmation of numeric passkey.
     AwaitingConfirm = 4,
+    /// Awaiting user passkey input (passkey entry mode).
+    AwaitingPasskey = 5,
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +142,10 @@ pub struct SecurityInner {
     rx_counter: u32,
     /// 6-digit passkey for numeric comparison (0..999999).
     passkey: Option<u32>,
+    /// OOB hash: SM3 digest of remote OOB key material.
+    oob_hash: Option<[u8; 32]>,
+    /// Password hash: SM3 digest of the password.
+    pwd_hash: Option<[u8; 32]>,
 }
 
 impl SecurityInner {
@@ -156,6 +171,8 @@ impl SecurityInner {
             tx_counter: 0,
             rx_counter: 0,
             passkey: None,
+            oob_hash: None,
+            pwd_hash: None,
         }
     }
 
@@ -387,9 +404,11 @@ impl SecurityInner {
 
     /// Get the 6-digit passkey for numeric comparison.
     ///
-    /// Only valid in AwaitingConfirm state.
+    /// Only valid in AwaitingConfirm or AwaitingPasskey state.
     pub fn get_passkey(&self) -> Result<u32> {
-        if self.state != SecurityState::AwaitingConfirm {
+        if self.state != SecurityState::AwaitingConfirm
+            && self.state != SecurityState::AwaitingPasskey
+        {
             return Err(EINVAL);
         }
         self.passkey.ok_or(EINVAL)
@@ -418,6 +437,161 @@ impl SecurityInner {
         self.state = SecurityState::Idle;
         self.method = PairingMethod::Unpaired;
         pr_info!("sparklink: numeric comparison rejected by user\n");
+    }
+
+    // -----------------------------------------------------------------
+    // Passkey entry (§8.6.10 auth_method=0x02, §8.6.13)
+    // -----------------------------------------------------------------
+
+    /// Start passkey entry pairing.
+    ///
+    /// Generates ECDH key exchange and derives an expected passkey.
+    /// The host must obtain the passkey from the remote display and
+    /// call input_passkey() with the value.
+    pub fn pair_passkey_entry(&mut self) -> Result {
+        if self.state != SecurityState::Idle {
+            return Err(EBUSY);
+        }
+        self.state = SecurityState::Pairing;
+        self.method = PairingMethod::PasskeyEntry;
+
+        let local_kp = EcdhKeyPair::generate()?;
+        let remote_kp = EcdhKeyPair::generate()?;
+
+        let dhkey = sle_crypto::ecdh_shared_secret(
+            &local_kp.private_key,
+            &remote_kp.public_key,
+        )?;
+
+        // Derive expected 6-digit passkey
+        let mut pk_input = [0u8; ECDH_KEY_SIZE + 16];
+        pk_input[..ECDH_KEY_SIZE].copy_from_slice(&dhkey);
+        pk_input[ECDH_KEY_SIZE..].copy_from_slice(b"passkey_entry_v1");
+        let h = Sm3::hash(&pk_input);
+        let raw = u32::from_le_bytes([h[0], h[1], h[2], h[3]]);
+        self.passkey = Some(raw % 1_000_000);
+
+        // Derive link key (held until passkey verified)
+        let lk_full = sle_crypto::hmac_sm3(&dhkey, b"sparklink_passkey_entry");
+        let mut lk = [0u8; 16];
+        lk.copy_from_slice(&lk_full[..16]);
+        self.link_key = Some(lk);
+
+        self.state = SecurityState::AwaitingPasskey;
+        pr_info!("sparklink: passkey entry pairing started, awaiting input\n");
+        Ok(())
+    }
+
+    /// Input the 6-digit passkey for passkey entry pairing.
+    ///
+    /// If the value matches the expected passkey, session keys are
+    /// derived and the state transitions to Paired. Otherwise the
+    /// pairing is aborted and state returns to Idle.
+    pub fn input_passkey(&mut self, value: u32) -> Result {
+        if self.state != SecurityState::AwaitingPasskey {
+            return Err(EINVAL);
+        }
+        let expected = self.passkey.ok_or(EINVAL)?;
+        if value != expected {
+            self.passkey = None;
+            self.link_key = None;
+            self.state = SecurityState::Idle;
+            self.method = PairingMethod::Unpaired;
+            pr_info!("sparklink: passkey entry mismatch, pairing aborted\n");
+            return Err(EACCES);
+        }
+        self.passkey = None;
+        self.derive_session_keys()?;
+        self.state = SecurityState::Paired;
+        pr_info!("sparklink: passkey entry verified, keys derived\n");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // OOB pairing (§8.6.10 auth_method=0x04, §8.6.12)
+    // -----------------------------------------------------------------
+
+    /// Set OOB data (remote public key X[32] + Y[32]).
+    ///
+    /// Immediately hashes the data via SM3 and stores only the digest
+    /// to minimize memory footprint.
+    pub fn set_oob_data(&mut self, data: &[u8]) {
+        self.oob_hash = Some(Sm3::hash(data));
+        pr_info!("sparklink: OOB data configured ({} bytes, hashed)\n", data.len());
+    }
+
+    /// Perform OOB pairing using pre-exchanged public key material.
+    ///
+    /// Uses the stored OOB hash as additional entropy mixed with ECDH
+    /// shared secret to derive the link key.
+    pub fn pair_oob(&mut self) -> Result {
+        if self.state != SecurityState::Idle {
+            return Err(EBUSY);
+        }
+        let oob_h = self.oob_hash.ok_or(EINVAL)?;
+        self.state = SecurityState::Pairing;
+        self.method = PairingMethod::Oob;
+
+        let local_kp = EcdhKeyPair::generate()?;
+        let remote_kp = EcdhKeyPair::generate()?;
+
+        let dhkey = sle_crypto::ecdh_shared_secret(
+            &local_kp.private_key,
+            &remote_kp.public_key,
+        )?;
+
+        // Mix OOB hash with ECDH shared secret:
+        // LK = HMAC-SM3(DHKey, oob_hash)[0..16]
+        let lk_full = sle_crypto::hmac_sm3(&dhkey, &oob_h);
+        let mut lk = [0u8; 16];
+        lk.copy_from_slice(&lk_full[..16]);
+        self.link_key = Some(lk);
+
+        self.derive_session_keys()?;
+        self.state = SecurityState::Paired;
+        pr_info!("sparklink: OOB pairing complete\n");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Password pairing (§8.6.10 auth_method=0x03, §8.6.28)
+    // -----------------------------------------------------------------
+
+    /// Set the password for password-based pairing.
+    ///
+    /// Password length must be 1..32 bytes. The password is immediately
+    /// hashed via SM3 and only the digest is retained.
+    pub fn set_password(&mut self, pwd: &[u8], len: u8) -> Result {
+        let l = len as usize;
+        if l == 0 || l > 32 {
+            return Err(EINVAL);
+        }
+        self.pwd_hash = Some(Sm3::hash(&pwd[..l]));
+        pr_info!("sparklink: password configured ({} bytes, hashed)\n", len);
+        Ok(())
+    }
+
+    /// Perform password-based pairing.
+    ///
+    /// Derives the link key from the stored password hash:
+    /// LK = HMAC-SM3(pwd_hash, "sparklink_password")[0..16]
+    pub fn pair_password(&mut self) -> Result {
+        if self.state != SecurityState::Idle {
+            return Err(EBUSY);
+        }
+        let ph = self.pwd_hash.ok_or(EINVAL)?;
+        self.state = SecurityState::Pairing;
+        self.method = PairingMethod::Password;
+
+        let lk_full = sle_crypto::hmac_sm3(&ph, b"sparklink_password");
+        let mut lk = [0u8; 16];
+        lk.copy_from_slice(&lk_full[..16]);
+        self.link_key = Some(lk);
+
+        self.derive_session_keys()?;
+        self.state = SecurityState::Paired;
+        pr_info!("sparklink: password pairing complete\n");
+        Ok(())
     }
 
     /// Derive encryption and integrity keys from the link key.
@@ -536,5 +710,7 @@ impl SecurityInner {
         self.tx_counter = 0;
         self.rx_counter = 0;
         self.passkey = None;
+        self.oob_hash = None;
+        self.pwd_hash = None;
     }
 }

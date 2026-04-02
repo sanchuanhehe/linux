@@ -551,6 +551,15 @@ const SL_IOCTL_SEC_CONFIRM_PASSKEY: u32 = _IO(SL_MAGIC, 0x4B);
 /// Reject numeric comparison passkey — returns to Idle.
 const SL_IOCTL_SEC_REJECT_PASSKEY: u32 = _IO(SL_MAGIC, 0x4C);
 
+/// Set OOB data (remote public key X+Y, 64 bytes) for OOB pairing.
+const SL_IOCTL_SEC_SET_OOB: u32 = _IOW::<SleOobData>(SL_MAGIC, 0x4D);
+
+/// Input 6-digit passkey for passkey entry pairing.
+const SL_IOCTL_SEC_INPUT_PASSKEY: u32 = _IOW::<SlePasskeyInput>(SL_MAGIC, 0x4E);
+
+/// Set password (1..32 bytes) for password-based pairing.
+const SL_IOCTL_SEC_SET_PASSWORD: u32 = _IOW::<SlePasswordParams>(SL_MAGIC, 0x4F);
+
 // --- SSAP service layer ioctls ---
 
 /// Register the built-in device info service.
@@ -1403,13 +1412,49 @@ unsafe impl FromBytes for SlePskParams {}
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct SlePairParams {
-    /// Pairing method: 1=JustWorks, 2=PSK.
+    /// Pairing method: 1=JustWorks, 2=PSK, 3=NC, 4=PasskeyEntry, 5=OOB, 6=Password.
     pub method: u8,
     _reserved: [u8; 3],
 }
 
 // SAFETY: SlePairParams is repr(C) with only primitive fields.
 unsafe impl FromBytes for SlePairParams {}
+
+/// OOB data: remote public key X[32] + Y[32] exchanged out-of-band.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleOobData {
+    /// 64 bytes of OOB key material (X[32] || Y[32]).
+    pub data: [u8; 64],
+}
+
+// SAFETY: SleOobData is repr(C) with only primitive fields.
+unsafe impl FromBytes for SleOobData {}
+
+/// Password parameters for password-based pairing.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlePasswordParams {
+    /// Password length (1..32).
+    pub len: u8,
+    _reserved: [u8; 3],
+    /// Password data (up to 32 bytes).
+    pub data: [u8; 32],
+}
+
+// SAFETY: SlePasswordParams is repr(C) with only primitive fields.
+unsafe impl FromBytes for SlePasswordParams {}
+
+/// Passkey input for passkey entry pairing.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlePasskeyInput {
+    /// 6-digit passkey value (0..999999).
+    pub passkey: u32,
+}
+
+// SAFETY: SlePasskeyInput is repr(C) with only primitive fields.
+unsafe impl FromBytes for SlePasskeyInput {}
 
 /// Security status returned to userspace.
 ///
@@ -3494,6 +3539,17 @@ struct SparkLinkCtl {
     last_seq: core::sync::atomic::AtomicU64,
 }
 
+/// Handle SEC_SET_OOB ioctl in a separate stack frame to avoid
+/// bloating the main ioctl function's stack usage.
+#[inline(never)]
+fn ioctl_set_oob(arg: usize) -> Result {
+    let params: SleOobData = read_user_struct(arg)?;
+    let mut ss = SUBSYSTEM.lock();
+    let s = ss.as_mut().ok_or(ENODEV)?;
+    s.security.set_oob_data(&params.data);
+    Ok(())
+}
+
 #[vtable]
 impl MiscDevice for SparkLinkCtl {
     type Ptr = Pin<KBox<Self>>;
@@ -4249,6 +4305,9 @@ impl MiscDevice for SparkLinkCtl {
                     1 => s.security.pair_just_works()?,
                     2 => s.security.pair_psk()?,
                     3 => s.security.pair_numeric_comparison()?,
+                    4 => s.security.pair_passkey_entry()?,
+                    5 => s.security.pair_oob()?,
+                    6 => s.security.pair_password()?,
                     _ => return Err(EINVAL),
                 }
                 let _ = s.controller.request_pair(params.method);
@@ -4350,6 +4409,24 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.security.reject_passkey();
+                Ok(0)
+            }
+            SL_IOCTL_SEC_SET_OOB => {
+                ioctl_set_oob(arg)?;
+                Ok(0)
+            }
+            SL_IOCTL_SEC_INPUT_PASSKEY => {
+                let params: SlePasskeyInput = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.security.input_passkey(params.passkey)?;
+                Ok(0)
+            }
+            SL_IOCTL_SEC_SET_PASSWORD => {
+                let params: SlePasswordParams = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.security.set_password(&params.data, params.len)?;
                 Ok(0)
             }
             // --- SSAP service layer ---

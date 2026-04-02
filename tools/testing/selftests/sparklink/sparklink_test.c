@@ -98,6 +98,9 @@
 #define SL_IOCTL_SEC_GET_PASSKEY _IOR(SL_MAGIC, 0x4A, uint32_t)
 #define SL_IOCTL_SEC_CONFIRM_PASSKEY _IO(SL_MAGIC, 0x4B)
 #define SL_IOCTL_SEC_REJECT_PASSKEY  _IO(SL_MAGIC, 0x4C)
+#define SL_IOCTL_SEC_SET_OOB     _IOW(SL_MAGIC, 0x4D, struct sle_oob_data)
+#define SL_IOCTL_SEC_INPUT_PASSKEY _IOW(SL_MAGIC, 0x4E, struct sle_passkey_input)
+#define SL_IOCTL_SEC_SET_PASSWORD _IOW(SL_MAGIC, 0x4F, struct sle_password_params)
 
 /* SSAP service layer */
 #define SL_IOCTL_SSAP_REGISTER_SVC _IO(SL_MAGIC, 0x50)
@@ -437,6 +440,20 @@ struct sle_sec_info {
 	uint8_t enc_enabled;
 	uint8_t enc_key_fingerprint[4];
 	uint8_t _reserved[8];
+} __attribute__((packed));
+
+struct sle_oob_data {
+	uint8_t data[64];
+} __attribute__((packed));
+
+struct sle_passkey_input {
+	uint32_t passkey;
+} __attribute__((packed));
+
+struct sle_password_params {
+	uint8_t  len;
+	uint8_t  _reserved[3];
+	uint8_t  data[32];
 } __attribute__((packed));
 
 struct sle_hash_test {
@@ -1739,6 +1756,325 @@ static void test_security_numeric_comparison(int fd)
 	ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
 
 	printf("  Numeric comparison: %d OK, %d FAIL\n", ok_count, fail_count);
+}
+
+/* ------------------------------------------------------------------ *
+ * test_security_oob_pin_password                                     *
+ *                                                                    *
+ * Tests three additional pairing methods per T/XS 10003-2025:        *
+ * - Passkey entry (auth_method=0x02, §8.6.13)                       *
+ * - OOB pairing (auth_method=0x04, §8.6.12)                         *
+ * - Password pairing (auth_method=0x03, §8.6.28)                    *
+ * ------------------------------------------------------------------ */
+static void test_security_oob_pin_password(int fd)
+{
+	test_header("Security: OOB / Passkey entry / Password pairing");
+
+	int ok_count = 0, fail_count = 0;
+	int ret;
+	struct sle_sec_info sec;
+	struct sle_pair_params pair;
+
+	/* === Passkey Entry (method=4, auth_method=0x02) === */
+
+	/* 1. Reset and start passkey entry pairing */
+	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 4;
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	if (ret == 0) {
+		printf("  OK:   pair method=4 (PasskeyEntry)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: pair method=4: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 2. State should be AwaitingPasskey (5) */
+	memset(&sec, 0, sizeof(sec));
+	ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+	if (sec.state == 5 && sec.method == 4) {
+		printf("  OK:   state=AwaitingPasskey(5), method=4\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: state=%u method=%u (expected 5/4)\n",
+		       sec.state, sec.method);
+		fail_count++;
+	}
+
+	/* 3. Get the expected passkey via get_passkey */
+	uint32_t expected_pk = 0xFFFFFFFF;
+	ret = ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &expected_pk);
+	if (ret == 0 && expected_pk < 1000000) {
+		printf("  OK:   expected passkey=%06u\n", expected_pk);
+		ok_count++;
+	} else {
+		printf("  FAIL: get_passkey ret=%d val=%u\n", ret, expected_pk);
+		fail_count++;
+	}
+
+	/* 4. Input wrong passkey — should fail with EACCES */
+	struct sle_passkey_input pk_in;
+	memset(&pk_in, 0, sizeof(pk_in));
+	pk_in.passkey = (expected_pk + 1) % 1000000;
+	ret = ioctl(fd, SL_IOCTL_SEC_INPUT_PASSKEY, &pk_in);
+	if (ret < 0 && errno == EACCES) {
+		printf("  OK:   wrong passkey rejected (EACCES)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: wrong passkey: ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 5. After mismatch, state should be Idle (0) */
+	memset(&sec, 0, sizeof(sec));
+	ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+	if (sec.state == 0 && sec.method == 0) {
+		printf("  OK:   after mismatch: Idle(0), Unpaired(0)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: after mismatch: state=%u method=%u\n",
+		       sec.state, sec.method);
+		fail_count++;
+	}
+
+	/* 6. Redo passkey entry, input correct passkey */
+	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 4;
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	/* Get the new expected passkey */
+	ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &expected_pk);
+	pk_in.passkey = expected_pk;
+	ret = ioctl(fd, SL_IOCTL_SEC_INPUT_PASSKEY, &pk_in);
+	if (ret == 0) {
+		printf("  OK:   correct passkey accepted\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: correct passkey: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 7. State should be Paired (2), method=4 */
+	memset(&sec, 0, sizeof(sec));
+	ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+	if (sec.state == 2 && sec.method == 4) {
+		printf("  OK:   state=Paired(2), method=4\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: state=%u method=%u (expected 2/4)\n",
+		       sec.state, sec.method);
+		fail_count++;
+	}
+
+	/* 8. Encrypt and SM4 roundtrip */
+	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+	if (ret == 0) {
+		struct sle_conn_data cd;
+		memset(&cd, 0, sizeof(cd));
+		const char *msg = "passkey roundtrip";
+		cd.length = strlen(msg);
+		memcpy(cd.data, msg, cd.length);
+		uint8_t orig[255];
+		memcpy(orig, cd.data, cd.length);
+
+		ioctl(fd, SL_IOCTL_SEC_SM4_ENC_TEST, &cd);
+		int changed = memcmp(cd.data, orig, cd.length) != 0;
+		ioctl(fd, SL_IOCTL_SEC_SM4_DEC_TEST, &cd);
+		if (changed && memcmp(cd.data, orig, cd.length) == 0) {
+			printf("  OK:   SM4 roundtrip after passkey entry\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: SM4 roundtrip after passkey entry\n");
+			fail_count++;
+		}
+	} else {
+		printf("  FAIL: encrypt_on after passkey entry: %s\n",
+		       strerror(errno));
+		fail_count++;
+	}
+
+	/* === OOB Pairing (method=5, auth_method=0x04) === */
+
+	/* 9. Reset and try OOB pair without setting OOB data — fail */
+	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 5;
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   OOB pair without data rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: OOB pair without data: ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 10. Set OOB data and pair */
+	struct sle_oob_data oob;
+	memset(&oob, 0, sizeof(oob));
+	/* Simulate OOB data: fill with deterministic pattern */
+	for (int i = 0; i < 64; i++)
+		oob.data[i] = (uint8_t)(i ^ 0xA5);
+	ret = ioctl(fd, SL_IOCTL_SEC_SET_OOB, &oob);
+	if (ret == 0) {
+		printf("  OK:   OOB data set\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: set OOB data: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 11. OOB pair — should succeed */
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 5;
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	if (ret == 0) {
+		printf("  OK:   OOB pairing succeeded\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: OOB pair: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 12. State should be Paired (2), method=5 */
+	memset(&sec, 0, sizeof(sec));
+	ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+	if (sec.state == 2 && sec.method == 5) {
+		printf("  OK:   state=Paired(2), method=5 (OOB)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: state=%u method=%u (expected 2/5)\n",
+		       sec.state, sec.method);
+		fail_count++;
+	}
+
+	/* 13. Encrypt and SM4 roundtrip after OOB */
+	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+	if (ret == 0) {
+		struct sle_conn_data cd;
+		memset(&cd, 0, sizeof(cd));
+		const char *msg = "oob roundtrip";
+		cd.length = strlen(msg);
+		memcpy(cd.data, msg, cd.length);
+		uint8_t orig[255];
+		memcpy(orig, cd.data, cd.length);
+
+		ioctl(fd, SL_IOCTL_SEC_SM4_ENC_TEST, &cd);
+		int changed = memcmp(cd.data, orig, cd.length) != 0;
+		ioctl(fd, SL_IOCTL_SEC_SM4_DEC_TEST, &cd);
+		if (changed && memcmp(cd.data, orig, cd.length) == 0) {
+			printf("  OK:   SM4 roundtrip after OOB pairing\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: SM4 roundtrip after OOB\n");
+			fail_count++;
+		}
+	} else {
+		printf("  FAIL: encrypt_on after OOB: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* === Password Pairing (method=6, auth_method=0x03) === */
+
+	/* 14. Reset and try password pair without setting password — fail */
+	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 6;
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   password pair without password rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: password pair without password: ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 15. Set password with invalid length 0 — fail */
+	struct sle_password_params pwd;
+	memset(&pwd, 0, sizeof(pwd));
+	pwd.len = 0;
+	ret = ioctl(fd, SL_IOCTL_SEC_SET_PASSWORD, &pwd);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   password len=0 rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: password len=0: ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 16. Set password and pair */
+	memset(&pwd, 0, sizeof(pwd));
+	pwd.len = 8;
+	memcpy(pwd.data, "test1234", 8);
+	ret = ioctl(fd, SL_IOCTL_SEC_SET_PASSWORD, &pwd);
+	if (ret == 0) {
+		printf("  OK:   password set (8 bytes)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: set password: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 17. Password pair — should succeed */
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 6;
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	if (ret == 0) {
+		printf("  OK:   password pairing succeeded\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: password pair: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 18. State should be Paired (2), method=6 */
+	memset(&sec, 0, sizeof(sec));
+	ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+	if (sec.state == 2 && sec.method == 6) {
+		printf("  OK:   state=Paired(2), method=6 (Password)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: state=%u method=%u (expected 2/6)\n",
+		       sec.state, sec.method);
+		fail_count++;
+	}
+
+	/* 19. Encrypt and SM4 roundtrip after password */
+	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+	if (ret == 0) {
+		struct sle_conn_data cd;
+		memset(&cd, 0, sizeof(cd));
+		const char *msg = "password roundtrip";
+		cd.length = strlen(msg);
+		memcpy(cd.data, msg, cd.length);
+		uint8_t orig[255];
+		memcpy(orig, cd.data, cd.length);
+
+		ioctl(fd, SL_IOCTL_SEC_SM4_ENC_TEST, &cd);
+		int changed = memcmp(cd.data, orig, cd.length) != 0;
+		ioctl(fd, SL_IOCTL_SEC_SM4_DEC_TEST, &cd);
+		if (changed && memcmp(cd.data, orig, cd.length) == 0) {
+			printf("  OK:   SM4 roundtrip after password pairing\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: SM4 roundtrip after password\n");
+			fail_count++;
+		}
+	} else {
+		printf("  FAIL: encrypt_on after password: %s\n",
+		       strerror(errno));
+		fail_count++;
+	}
+
+	/* Restore to Encrypted state for subsequent tests */
+	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 1;
+	ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+
+	printf("  OOB/Passkey/Password: %d OK, %d FAIL\n", ok_count,
+	       fail_count);
 }
 
 static void test_ssap_service(int fd)
@@ -8593,6 +8929,7 @@ int main(void)
 	test_security_pairing(fd);
 	test_security_ecdh(fd);
 	test_security_numeric_comparison(fd);
+	test_security_oob_pin_password(fd);
 	test_ssap_service(fd);
 	test_ssap_dynamic_registration(fd);
 	test_power_management(fd);

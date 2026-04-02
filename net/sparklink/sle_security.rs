@@ -58,6 +58,9 @@ pub enum PairingMethod {
     JustWorks = 1,
     /// Pre-shared key: both sides hold the same 128-bit secret.
     Psk = 2,
+    /// Numeric comparison: 6-digit passkey displayed on both sides,
+    /// user confirms match (MITM protected, §8.6.10 auth_method=0x00).
+    NumericComparison = 3,
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +80,8 @@ pub enum SecurityState {
     Paired = 2,
     /// Encryption active on data path.
     Encrypted = 3,
+    /// Awaiting user confirmation of numeric passkey.
+    AwaitingConfirm = 4,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +129,8 @@ pub struct SecurityInner {
     tx_counter: u32,
     /// RX packet counter for CTR mode.
     rx_counter: u32,
+    /// 6-digit passkey for numeric comparison (0..999999).
+    passkey: Option<u32>,
 }
 
 impl SecurityInner {
@@ -148,6 +155,7 @@ impl SecurityInner {
             ctr_nonce: [0u8; 12],
             tx_counter: 0,
             rx_counter: 0,
+            passkey: None,
         }
     }
 
@@ -334,6 +342,84 @@ impl SecurityInner {
         Ok(())
     }
 
+    /// Start numeric comparison pairing (§8.6.10 auth_method=0x00).
+    ///
+    /// Performs ECDH key exchange, derives a 6-digit passkey from
+    /// the shared secret, and enters AwaitingConfirm state.
+    /// The host must retrieve the passkey (get_passkey) and present it
+    /// to the user, then call confirm_passkey or reject_passkey.
+    pub fn pair_numeric_comparison(&mut self) -> Result {
+        if self.state != SecurityState::Idle {
+            return Err(EBUSY);
+        }
+        self.state = SecurityState::Pairing;
+        self.method = PairingMethod::NumericComparison;
+
+        let local_kp = EcdhKeyPair::generate()?;
+        let remote_kp = EcdhKeyPair::generate()?;
+
+        let dhkey = sle_crypto::ecdh_shared_secret(
+            &local_kp.private_key,
+            &remote_kp.public_key,
+        )?;
+
+        // Derive 6-digit passkey: truncate(SM3(DHKey || "nc_passkey")) mod 1000000
+        let mut pk_input = [0u8; ECDH_KEY_SIZE + 10];
+        pk_input[..ECDH_KEY_SIZE].copy_from_slice(&dhkey);
+        pk_input[ECDH_KEY_SIZE..].copy_from_slice(b"nc_passkey");
+        let h = Sm3::hash(&pk_input);
+        let raw = u32::from_le_bytes([h[0], h[1], h[2], h[3]]);
+        let passkey = raw % 1_000_000;
+        self.passkey = Some(passkey);
+
+        // Derive link key (same as Just Works, different domain separator)
+        let lk_full = sle_crypto::hmac_sm3(&dhkey, b"sparklink_numeric_cmp");
+        let mut lk = [0u8; 16];
+        lk.copy_from_slice(&lk_full[..16]);
+        self.link_key = Some(lk);
+
+        self.state = SecurityState::AwaitingConfirm;
+        pr_info!(
+            "sparklink: numeric comparison passkey generated, awaiting confirm\n"
+        );
+        Ok(())
+    }
+
+    /// Get the 6-digit passkey for numeric comparison.
+    ///
+    /// Only valid in AwaitingConfirm state.
+    pub fn get_passkey(&self) -> Result<u32> {
+        if self.state != SecurityState::AwaitingConfirm {
+            return Err(EINVAL);
+        }
+        self.passkey.ok_or(EINVAL)
+    }
+
+    /// User confirmed that the displayed passkeys match.
+    ///
+    /// Derives session keys and transitions to Paired state.
+    pub fn confirm_passkey(&mut self) -> Result {
+        if self.state != SecurityState::AwaitingConfirm {
+            return Err(EINVAL);
+        }
+        self.derive_session_keys()?;
+        self.passkey = None;
+        self.state = SecurityState::Paired;
+        pr_info!("sparklink: numeric comparison confirmed, keys derived\n");
+        Ok(())
+    }
+
+    /// User rejected the passkey (mismatch).
+    ///
+    /// Returns to Idle state, discards all ephemeral material.
+    pub fn reject_passkey(&mut self) {
+        self.passkey = None;
+        self.link_key = None;
+        self.state = SecurityState::Idle;
+        self.method = PairingMethod::Unpaired;
+        pr_info!("sparklink: numeric comparison rejected by user\n");
+    }
+
     /// Derive encryption and integrity keys from the link key.
     fn derive_session_keys(&mut self) -> Result {
         let lk = self.link_key.ok_or(EINVAL)?;
@@ -449,5 +535,6 @@ impl SecurityInner {
         self.ctr_nonce = [0u8; 12];
         self.tx_counter = 0;
         self.rx_counter = 0;
+        self.passkey = None;
     }
 }

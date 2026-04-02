@@ -95,6 +95,9 @@
 #define SL_IOCTL_SEC_SM4_BLOCK_TEST _IOWR(SL_MAGIC, 0x47, struct sle_sm4_block_test)
 #define SL_IOCTL_SEC_HMAC_TEST   _IOWR(SL_MAGIC, 0x48, struct sle_hmac_test)
 #define SL_IOCTL_SEC_RESET       _IO(SL_MAGIC, 0x49)
+#define SL_IOCTL_SEC_GET_PASSKEY _IOR(SL_MAGIC, 0x4A, uint32_t)
+#define SL_IOCTL_SEC_CONFIRM_PASSKEY _IO(SL_MAGIC, 0x4B)
+#define SL_IOCTL_SEC_REJECT_PASSKEY  _IO(SL_MAGIC, 0x4C)
 
 /* SSAP service layer */
 #define SL_IOCTL_SSAP_REGISTER_SVC _IO(SL_MAGIC, 0x50)
@@ -1568,6 +1571,174 @@ static void test_security_ecdh(int fd)
 		else
 			printf("  FAIL: ECDH roundtrip mismatch\n");
 	}
+}
+
+/* ------------------------------------------------------------------ *
+ * test_security_numeric_comparison                                   *
+ *                                                                    *
+ * Tests numeric comparison pairing flow per T/XS 10003-2025 §8.6.10 *
+ * auth_method=0x00: ECDH + 6-digit passkey confirmation.            *
+ * ------------------------------------------------------------------ */
+static void test_security_numeric_comparison(int fd)
+{
+	test_header("Security: Numeric comparison pairing");
+
+	int ok_count = 0, fail_count = 0;
+	int ret;
+
+	/* Reset from prior pairing state */
+	ret = ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+	check("SEC_RESET", ret);
+
+	/* 1. Get passkey before pairing — should fail */
+	uint32_t passkey = 0;
+	ret = ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &passkey);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   get_passkey before pair rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EINVAL, got ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 2. Start numeric comparison pairing (method=3) */
+	struct sle_pair_params pair;
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 3;
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	if (ret == 0) {
+		printf("  OK:   pair method=3 (NumericComparison)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: pair method=3: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 3. Check state = AwaitingConfirm (4) */
+	struct sle_sec_info sec;
+	memset(&sec, 0, sizeof(sec));
+	ret = ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+	if (ret == 0 && sec.state == 4 && sec.method == 3) {
+		printf("  OK:   state=AwaitingConfirm(4), method=3\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: state=%u method=%u (expected 4/3)\n",
+		       sec.state, sec.method);
+		fail_count++;
+	}
+
+	/* 4. Retrieve passkey — should be 0..999999 */
+	passkey = 0xFFFFFFFF;
+	ret = ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &passkey);
+	if (ret == 0 && passkey < 1000000) {
+		printf("  OK:   passkey=%06u\n", passkey);
+		ok_count++;
+	} else {
+		printf("  FAIL: get_passkey ret=%d passkey=%u\n", ret, passkey);
+		fail_count++;
+	}
+
+	/* 5. Passkey is stable (same value on second read) */
+	uint32_t passkey2 = 0;
+	ret = ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &passkey2);
+	if (ret == 0 && passkey2 == passkey) {
+		printf("  OK:   passkey stable on re-read\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: passkey changed: %u -> %u\n", passkey, passkey2);
+		fail_count++;
+	}
+
+	/* 6. Confirm passkey — should transition to Paired */
+	ret = ioctl(fd, SL_IOCTL_SEC_CONFIRM_PASSKEY, NULL);
+	if (ret == 0) {
+		printf("  OK:   confirm_passkey\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: confirm_passkey: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 7. State should be Paired (2) */
+	memset(&sec, 0, sizeof(sec));
+	ret = ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+	if (ret == 0 && sec.state == 2 && sec.method == 3) {
+		printf("  OK:   state=Paired(2), method=3\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: state=%u method=%u (expected 2/3)\n",
+		       sec.state, sec.method);
+		fail_count++;
+	}
+
+	/* 8. Enable encryption — should work */
+	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+	if (ret == 0) {
+		printf("  OK:   encryption enabled after NC pairing\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: encrypt_on: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 9. SM4 encrypt/decrypt roundtrip */
+	struct sle_conn_data enc_data;
+	memset(&enc_data, 0, sizeof(enc_data));
+	const char *text = "NC roundtrip test";
+	enc_data.length = strlen(text);
+	memcpy(enc_data.data, text, enc_data.length);
+	uint8_t orig[255];
+	memcpy(orig, enc_data.data, enc_data.length);
+
+	ret = ioctl(fd, SL_IOCTL_SEC_SM4_ENC_TEST, &enc_data);
+	int enc_ok = (ret == 0 && memcmp(enc_data.data, orig, enc_data.length) != 0);
+	if (enc_ok) {
+		ret = ioctl(fd, SL_IOCTL_SEC_SM4_DEC_TEST, &enc_data);
+		if (ret == 0 && memcmp(enc_data.data, orig, enc_data.length) == 0) {
+			printf("  OK:   SM4 roundtrip after NC pairing\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: SM4 decrypt mismatch after NC\n");
+			fail_count++;
+		}
+	} else {
+		printf("  FAIL: SM4 encrypt after NC: ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* --- Reject flow --- */
+
+	/* 10. Reset and test reject path */
+	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 3;
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	if (ret != 0) {
+		printf("  FAIL: pair for reject test: %s\n", strerror(errno));
+		fail_count++;
+	} else {
+		/* 11. Reject passkey */
+		ret = ioctl(fd, SL_IOCTL_SEC_REJECT_PASSKEY, NULL);
+		memset(&sec, 0, sizeof(sec));
+		ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+		if (sec.state == 0 && sec.method == 0) {
+			printf("  OK:   reject returns to Idle(0), Unpaired(0)\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: after reject: state=%u method=%u\n",
+			       sec.state, sec.method);
+			fail_count++;
+		}
+	}
+
+	/* Restore to Encrypted state for subsequent tests */
+	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 1;
+	ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+
+	printf("  Numeric comparison: %d OK, %d FAIL\n", ok_count, fail_count);
 }
 
 static void test_ssap_service(int fd)
@@ -8421,6 +8592,7 @@ int main(void)
 	test_hmac_sm3(fd);
 	test_security_pairing(fd);
 	test_security_ecdh(fd);
+	test_security_numeric_comparison(fd);
 	test_ssap_service(fd);
 	test_ssap_dynamic_registration(fd);
 	test_power_management(fd);

@@ -542,6 +542,15 @@ const SL_IOCTL_SEC_HMAC_TEST: u32 = _IOWR::<SleHmacTest>(SL_MAGIC, 0x48);
 /// Reset security state to Idle (e.g. on disconnect or re-pairing).
 const SL_IOCTL_SEC_RESET: u32 = _IO(SL_MAGIC, 0x49);
 
+/// Get 6-digit passkey for numeric comparison pairing.
+const SL_IOCTL_SEC_GET_PASSKEY: u32 = _IOR::<u32>(SL_MAGIC, 0x4A);
+
+/// Confirm numeric comparison passkey match — completes pairing.
+const SL_IOCTL_SEC_CONFIRM_PASSKEY: u32 = _IO(SL_MAGIC, 0x4B);
+
+/// Reject numeric comparison passkey — returns to Idle.
+const SL_IOCTL_SEC_REJECT_PASSKEY: u32 = _IO(SL_MAGIC, 0x4C);
+
 // --- SSAP service layer ioctls ---
 
 /// Register the built-in device info service.
@@ -4239,6 +4248,7 @@ impl MiscDevice for SparkLinkCtl {
                 match params.method {
                     1 => s.security.pair_just_works()?,
                     2 => s.security.pair_psk()?,
+                    3 => s.security.pair_numeric_comparison()?,
                     _ => return Err(EINVAL),
                 }
                 let _ = s.controller.request_pair(params.method);
@@ -4320,6 +4330,26 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.security.reset();
+                Ok(0)
+            }
+            SL_IOCTL_SEC_GET_PASSKEY => {
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let passkey = s.security.get_passkey()?;
+                drop(ss);
+                write_user_struct(arg, &passkey)?;
+                Ok(0)
+            }
+            SL_IOCTL_SEC_CONFIRM_PASSKEY => {
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.security.confirm_passkey()?;
+                Ok(0)
+            }
+            SL_IOCTL_SEC_REJECT_PASSKEY => {
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.security.reject_passkey();
                 Ok(0)
             }
             // --- SSAP service layer ---

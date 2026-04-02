@@ -135,6 +135,7 @@ cat > "$WORKDIR/initramfs/init" << 'INIT_EOF'
 mount -t proc none /proc
 mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || mdev -s
+mount -t debugfs none /sys/kernel/debug 2>/dev/null
 
 echo "========================================"
 echo "SparkLink QEMU Integration Test"

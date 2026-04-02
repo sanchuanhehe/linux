@@ -5881,6 +5881,225 @@ static void test_conn_info_fields(int fd)
 }
 
 /* ------------------------------------------------------------------ *
+ * test_channel_tcid_standard — SLE channel model assertions          *
+ *                                                                    *
+ * Validates that the minimal TCID / channel model exposed through    *
+ * sle_conn_info conforms to SLE standard semantics:                  *
+ *   - data_mode=0 (Unreliable) for SLE-DUDTC (0x1F)                 *
+ *   - svc_mtu > 0 for SLE-SMTC (0x0A)                               *
+ *   - initial credits = 16 for both SMTC and DUDTC channels         *
+ *   - data_mtu == data_mps post-negotiation                         *
+ * ------------------------------------------------------------------ */
+static void test_channel_tcid_standard(int fd)
+{
+	test_header("Channel/TCID standard conformance");
+
+	set_role(fd, 0); /* TNode */
+
+	struct sle_connect_params cp;
+
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xCC;
+	cp.peer_addr[5] = 0xDD;
+	cp.gt_role = 0;
+	cp.bandwidth = 1;
+	cp.mcs_index = 0;
+	cp.timeout_10ms = 100;
+
+	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT returned %d\n", ret);
+		return;
+	}
+	uint16_t h = (uint16_t)ret;
+
+	struct sle_inject_conn_resp rsp;
+
+	memset(&rsp, 0, sizeof(rsp));
+	rsp.handle = h;
+	rsp.response_type = 0; /* accepted */
+	rsp.bandwidth_mhz = 1;
+	rsp.mcs_index = 0;
+	rsp.supervision_timeout = 100;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &rsp);
+	if (ret != 0) {
+		printf("  FAIL: INJECT_CONN_RESP: %s\n", strerror(errno));
+		ioctl(fd, SL_IOCTL_DISCONNECT, &h);
+		return;
+	}
+
+	struct sle_conn_info info;
+
+	memset(&info, 0, sizeof(info));
+	info.handle = h;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret != 0) {
+		printf("  FAIL: CONN_INFO: %s\n", strerror(errno));
+		ioctl(fd, SL_IOCTL_DISCONNECT, &h);
+		return;
+	}
+
+	/* SLE-DUDTC (0x1F): default data channel uses Unreliable mode */
+	if (info.data_mode == 0)
+		printf("  OK:   data_mode=0 (Unreliable, SLE-DUDTC)\n");
+	else
+		printf("  FAIL: data_mode=%u, expected 0 (Unreliable)\n",
+		       info.data_mode);
+
+	/* data_mtu must be non-zero and equal to data_mps after negotiate */
+	if (info.data_mtu > 0 && info.data_mtu == info.data_mps)
+		printf("  OK:   data_mtu=%u == data_mps=%u\n",
+		       info.data_mtu, info.data_mps);
+	else
+		printf("  FAIL: data_mtu=%u data_mps=%u (expected equal, >0)\n",
+		       info.data_mtu, info.data_mps);
+
+	/* SLE-SMTC (0x0A): service management channel MTU must be >0 */
+	if (info.svc_mtu > 0)
+		printf("  OK:   svc_mtu=%u (SLE-SMTC active)\n", info.svc_mtu);
+	else
+		printf("  FAIL: svc_mtu=0 (SLE-SMTC channel inactive)\n");
+
+	/* SMTC initial credits = 16 */
+	if (info.smtc_tx_credits == 16 && info.smtc_rx_credits == 16)
+		printf("  OK:   SMTC credits: tx=%u rx=%u\n",
+		       info.smtc_tx_credits, info.smtc_rx_credits);
+	else
+		printf("  FAIL: SMTC credits: tx=%u rx=%u (expected 16/16)\n",
+		       info.smtc_tx_credits, info.smtc_rx_credits);
+
+	/* DUDTC: Unreliable mode does not use credit flow control */
+	if (info.data_mode == 0) {
+		if (info.dudtc_tx_credits == 0 && info.dudtc_rx_credits == 0)
+			printf("  OK:   DUDTC credits: tx=0 rx=0 (Unreliable)\n");
+		else
+			printf("  WARN: DUDTC credits: tx=%u rx=%u (Unreliable expects 0)\n",
+			       info.dudtc_tx_credits, info.dudtc_rx_credits);
+	} else {
+		if (info.dudtc_tx_credits == 16 && info.dudtc_rx_credits == 16)
+			printf("  OK:   DUDTC credits: tx=%u rx=%u\n",
+			       info.dudtc_tx_credits, info.dudtc_rx_credits);
+		else
+			printf("  FAIL: DUDTC credits: tx=%u rx=%u (expected 16/16)\n",
+			       info.dudtc_tx_credits, info.dudtc_rx_credits);
+	}
+
+	/* svc_mtu range: must not exceed controller max_mtu */
+	if (info.svc_mtu > 0 && info.svc_mtu <= 512)
+		printf("  OK:   svc_mtu=%u in valid range\n", info.svc_mtu);
+	else
+		printf("  FAIL: svc_mtu=%u out of range\n", info.svc_mtu);
+
+	/* ssap_mtu should be set to default when no SSAP exchange occurred */
+	printf("  INFO: ssap_info_exchanged=%u ssap_mtu=%u\n",
+	       info.ssap_info_exchanged, info.ssap_mtu);
+
+	uint16_t dh = h;
+
+	ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
+}
+
+/* ------------------------------------------------------------------ *
+ * test_dli_info_consistency — cross-check ioctl vs debugfs           *
+ *                                                                    *
+ * Validates that DLI controller information exposed through ioctl    *
+ * and debugfs is consistent.                                         *
+ * ------------------------------------------------------------------ */
+static void test_dli_info_consistency(int fd)
+{
+	test_header("DLI info cross-check (ioctl vs debugfs)");
+
+	/* Read DLI info via ioctl */
+	struct sle_dli_info dli;
+
+	memset(&dli, 0, sizeof(dli));
+	int ret = ioctl(fd, SL_IOCTL_DLI_INFO, &dli);
+
+	if (ret != 0) {
+		printf("  FAIL: DLI_INFO ioctl: %s\n", strerror(errno));
+		return;
+	}
+
+	/* Read DLI info via debugfs */
+	int dbg_fd = open("/sys/kernel/debug/sparklink/dli_controller",
+			  O_RDONLY);
+	if (dbg_fd < 0) {
+		printf("  WARN: cannot open debugfs dli_controller: %s\n",
+		       strerror(errno));
+		return;
+	}
+
+	char buf[1024];
+	int n = read(dbg_fd, buf, sizeof(buf) - 1);
+
+	close(dbg_fd);
+	if (n <= 0) {
+		printf("  FAIL: debugfs read returned %d\n", n);
+		return;
+	}
+	buf[n] = '\0';
+
+	/* Parse key fields from debugfs output */
+	unsigned int dbg_max_conn = 0, dbg_max_mtu = 0, dbg_max_mps = 0;
+	unsigned int dbg_transport = 0, dbg_meas = 0, dbg_sec = 0;
+	char *line = buf;
+
+	while (line && *line) {
+		sscanf(line, "max_connections: %u", &dbg_max_conn);
+		sscanf(line, "max_mtu: %u", &dbg_max_mtu);
+		sscanf(line, "max_mps: %u", &dbg_max_mps);
+		sscanf(line, "transport_modes: 0x%x", &dbg_transport);
+		sscanf(line, "measurement_cap: 0x%x", &dbg_meas);
+		sscanf(line, "security_cap: 0x%x", &dbg_sec);
+		line = strchr(line, '\n');
+		if (line)
+			line++;
+	}
+
+	/* Cross-check */
+	if (dli.max_connections == dbg_max_conn)
+		printf("  OK:   max_connections=%u consistent\n",
+		       dli.max_connections);
+	else
+		printf("  FAIL: max_connections ioctl=%u debugfs=%u\n",
+		       dli.max_connections, dbg_max_conn);
+
+	if (dli.max_mtu == dbg_max_mtu)
+		printf("  OK:   max_mtu=%u consistent\n", dli.max_mtu);
+	else
+		printf("  FAIL: max_mtu ioctl=%u debugfs=%u\n",
+		       dli.max_mtu, dbg_max_mtu);
+
+	if (dli.max_mps == dbg_max_mps)
+		printf("  OK:   max_mps=%u consistent\n", dli.max_mps);
+	else
+		printf("  FAIL: max_mps ioctl=%u debugfs=%u\n",
+		       dli.max_mps, dbg_max_mps);
+
+	if (dli.transport_modes == dbg_transport)
+		printf("  OK:   transport_modes=0x%02x consistent\n",
+		       dli.transport_modes);
+	else
+		printf("  FAIL: transport_modes ioctl=0x%02x debugfs=0x%02x\n",
+		       dli.transport_modes, dbg_transport);
+
+	if (dli.measurement_cap == dbg_meas)
+		printf("  OK:   measurement_cap=0x%02x consistent\n",
+		       dli.measurement_cap);
+	else
+		printf("  FAIL: measurement_cap ioctl=0x%02x debugfs=0x%02x\n",
+		       dli.measurement_cap, dbg_meas);
+
+	if (dli.security_cap == dbg_sec)
+		printf("  OK:   security_cap=0x%04x consistent\n",
+		       dli.security_cap);
+	else
+		printf("  FAIL: security_cap ioctl=0x%04x debugfs=0x%04x\n",
+		       dli.security_cap, dbg_sec);
+}
+
+/* ------------------------------------------------------------------ *
  * test_ssap_multi_notify — §10.6 multiple property notifications    *
  *                                                                    *
  * Registers a service with 3 notifiable properties, writes distinct *
@@ -9960,6 +10179,8 @@ int main(void)
 	test_measurement_stubs(fd);
 	test_dli_mgmt_plane(fd);
 	test_conn_info_fields(fd);
+	test_channel_tcid_standard(fd);
+	test_dli_info_consistency(fd);
 	test_ssap_multi_notify(fd);
 	test_ssap_write_readonly(fd);
 	test_conn_data_counters(fd);

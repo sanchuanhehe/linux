@@ -57,6 +57,8 @@
 #define SL_IOCTL_EXT_ADV_DISABLE   _IOW(SL_MAGIC, 0x17, uint8_t)
 #define SL_IOCTL_EXT_ADV_REMOVE    _IOW(SL_MAGIC, 0x18, uint8_t)
 #define SL_IOCTL_EXT_ADV_INFO      _IOWR(SL_MAGIC, 0x19, struct sle_ext_adv_info)
+#define SL_IOCTL_EXT_ADV_ENABLE_EX _IOW(SL_MAGIC, 0x1A, struct sle_ext_adv_enable_params)
+#define SL_IOCTL_EXT_ADV_TICK      _IO(SL_MAGIC, 0x1B)
 
 #define SL_IOCTL_INJECT_ADV      _IOW(SL_MAGIC, 0x20, struct sle_inject_adv)
 #define SL_IOCTL_SCAN_RESULT_COUNT _IO(SL_MAGIC, 0x21)
@@ -197,7 +199,8 @@ struct sle_ext_adv_config {
 	int8_t   tx_power_dbm;
 	uint8_t  include_tx_power;
 	uint16_t interval_ms;
-	uint8_t  _reserved[6];
+	uint8_t  ext_adv_timing;
+	uint8_t  _reserved[5];
 } __attribute__((packed));
 
 struct sle_ext_adv_data {
@@ -213,8 +216,18 @@ struct sle_ext_adv_info {
 	uint8_t  sid;
 	uint8_t  primary_phy;
 	uint16_t data_len;
-	uint16_t _pad;
+	uint8_t  ext_adv_timing;
+	uint8_t  max_adv_events;
 	uint64_t tx_count;
+	uint32_t events_sent;
+	uint8_t  _pad[4];
+} __attribute__((packed));
+
+struct sle_ext_adv_enable_params {
+	uint8_t  handle;
+	uint8_t  max_adv_events;
+	uint16_t duration_10ms;
+	uint8_t  _reserved[4];
 } __attribute__((packed));
 
 struct sle_inject_adv {
@@ -7663,6 +7676,148 @@ static void test_ext_advertising(int fd)
 		h = (uint8_t)i;
 		ioctl(fd, SL_IOCTL_EXT_ADV_REMOVE, &h);
 	}
+
+	/* --- Periodic advertising tests --- */
+
+	/* 14. Configure set 0 with ext_adv_timing=3 */
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.handle = 0;
+	cfg.discovery_level = 1;
+	cfg.sid = 2;
+	cfg.broadcast_type = 1;
+	cfg.interval_ms = 100;
+	cfg.ext_adv_timing = 3;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_CONFIGURE, &cfg);
+	if (ret == 0) {
+		printf("  OK:   configure set 0 (timing=3)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: configure with timing: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 15. Verify ext_adv_timing in info */
+	memset(&info, 0, sizeof(info));
+	info.handle = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_INFO, &info);
+	if (ret == 0 && info.ext_adv_timing == 3) {
+		printf("  OK:   ext_adv_timing=%u confirmed\n", info.ext_adv_timing);
+		ok_count++;
+	} else {
+		printf("  FAIL: ext_adv_timing=%u (expected 3)\n",
+		       info.ext_adv_timing);
+		fail_count++;
+	}
+
+	/* 16. Enable with max_events=5 via ENABLE_EX */
+	struct sle_ext_adv_enable_params en;
+	memset(&en, 0, sizeof(en));
+	en.handle = 0;
+	en.max_adv_events = 5;
+	en.duration_10ms = 0; /* no time limit */
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_ENABLE_EX, &en);
+	if (ret == 0) {
+		printf("  OK:   enable_ex (max_events=5)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: enable_ex: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 17. Verify active + max_adv_events in info */
+	memset(&info, 0, sizeof(info));
+	info.handle = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_INFO, &info);
+	if (ret == 0 && info.state == 2 && info.max_adv_events == 5 &&
+	    info.events_sent == 0) {
+		printf("  OK:   active, max_events=%u, events_sent=%u\n",
+		       info.max_adv_events, info.events_sent);
+		ok_count++;
+	} else {
+		printf("  FAIL: state=%u max=%u sent=%u\n",
+		       info.state, info.max_adv_events, info.events_sent);
+		fail_count++;
+	}
+
+	/* 18. Tick 3 times — should still be active */
+	for (int i = 0; i < 3; i++)
+		ioctl(fd, SL_IOCTL_EXT_ADV_TICK, NULL);
+	memset(&info, 0, sizeof(info));
+	info.handle = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_INFO, &info);
+	if (ret == 0 && info.state == 2 && info.events_sent == 3) {
+		printf("  OK:   after 3 ticks: active, events_sent=%u\n",
+		       info.events_sent);
+		ok_count++;
+	} else {
+		printf("  FAIL: after 3 ticks: state=%u events=%u\n",
+		       info.state, info.events_sent);
+		fail_count++;
+	}
+
+	/* 19. Tick 2 more — should auto-disable (5 events reached) */
+	for (int i = 0; i < 2; i++)
+		ioctl(fd, SL_IOCTL_EXT_ADV_TICK, NULL);
+	memset(&info, 0, sizeof(info));
+	info.handle = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_INFO, &info);
+	if (ret == 0 && info.state == 1 && info.events_sent == 5) {
+		printf("  OK:   auto-disabled after 5 events (state=%u)\n",
+		       info.state);
+		ok_count++;
+	} else {
+		printf("  FAIL: expected auto-disable: state=%u events=%u\n",
+		       info.state, info.events_sent);
+		fail_count++;
+	}
+
+	/* 20. Enable_ex with duration=3 (30ms timeout) */
+	memset(&en, 0, sizeof(en));
+	en.handle = 0;
+	en.max_adv_events = 0; /* no event limit */
+	en.duration_10ms = 3;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_ENABLE_EX, &en);
+	if (ret == 0) {
+		printf("  OK:   enable_ex (duration=30ms)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: enable_ex duration: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 21. Tick 2 times — still active */
+	for (int i = 0; i < 2; i++)
+		ioctl(fd, SL_IOCTL_EXT_ADV_TICK, NULL);
+	memset(&info, 0, sizeof(info));
+	info.handle = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_INFO, &info);
+	if (ret == 0 && info.state == 2) {
+		printf("  OK:   after 2 ticks: still active\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected active after 2 ticks, state=%u\n",
+		       info.state);
+		fail_count++;
+	}
+
+	/* 22. Tick once more — duration expires (3 ticks = 30ms) */
+	ioctl(fd, SL_IOCTL_EXT_ADV_TICK, NULL);
+	memset(&info, 0, sizeof(info));
+	info.handle = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_INFO, &info);
+	if (ret == 0 && info.state == 1) {
+		printf("  OK:   auto-disabled by duration timeout (state=%u)\n",
+		       info.state);
+		ok_count++;
+	} else {
+		printf("  FAIL: expected auto-disable by duration: state=%u\n",
+		       info.state);
+		fail_count++;
+	}
+
+	/* Cleanup periodic test set */
+	h = 0;
+	ioctl(fd, SL_IOCTL_EXT_ADV_REMOVE, &h);
 
 	printf("  Extended advertising: %d OK, %d FAIL\n", ok_count, fail_count);
 }

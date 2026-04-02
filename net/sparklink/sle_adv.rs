@@ -163,6 +163,10 @@ pub struct ExtAdvParams {
     pub sid: u8,
     /// Whether to include TX power in the extended header.
     pub include_tx_power: bool,
+    /// Extended advertising send timing (per §8.2.1).
+    /// 0x00 = send before next base advertising,
+    /// 0x01..0xFF = max base advs to skip before sending extended adv.
+    pub extended_adv_timing: u8,
 }
 
 impl Default for ExtAdvParams {
@@ -176,6 +180,7 @@ impl Default for ExtAdvParams {
             secondary_phy: ExtAdvPhy::Phy1M,
             sid: 0,
             include_tx_power: true,
+            extended_adv_timing: 0,
         }
     }
 }
@@ -203,6 +208,14 @@ pub struct ExtAdvSet {
     pub data_len: usize,
     /// Number of PDUs sent since enabled.
     pub tx_count: u64,
+    /// Advertising duration in 10ms units (0 = infinite).
+    pub duration_10ms: u16,
+    /// Maximum advertising events (0 = unlimited).
+    pub max_events: u8,
+    /// Number of advertising events sent since enabled.
+    pub events_sent: u32,
+    /// Elapsed ticks (each tick = 10ms) since enabled.
+    pub elapsed_ticks: u32,
 }
 
 impl ExtAdvSet {
@@ -214,6 +227,10 @@ impl ExtAdvSet {
             data: [0u8; EXT_ADV_DATA_MAX],
             data_len: 0,
             tx_count: 0,
+            duration_10ms: 0,
+            max_events: 0,
+            events_sent: 0,
+            elapsed_ticks: 0,
         }
     }
 
@@ -577,6 +594,19 @@ impl AdvScanInner {
 
     /// Enable an extended advertising set.
     pub fn ext_adv_enable(&mut self, handle: u8) -> Result {
+        self.ext_adv_enable_ex(handle, 0, 0)
+    }
+
+    /// Enable an extended advertising set with periodic parameters.
+    ///
+    /// `duration_10ms`: advertising duration in 10ms units (0 = infinite).
+    /// `max_events`: max advertising events before auto-disable (0 = unlimited).
+    pub fn ext_adv_enable_ex(
+        &mut self,
+        handle: u8,
+        duration_10ms: u16,
+        max_events: u8,
+    ) -> Result {
         let idx = handle as usize;
         if idx >= EXT_ADV_MAX_SETS {
             return Err(EINVAL);
@@ -587,6 +617,10 @@ impl AdvScanInner {
         }
         set.state = ExtAdvState::Active;
         set.tx_count = 0;
+        set.duration_10ms = duration_10ms;
+        set.max_events = max_events;
+        set.events_sent = 0;
+        set.elapsed_ticks = 0;
         Ok(())
     }
 
@@ -619,7 +653,10 @@ impl AdvScanInner {
     }
 
     /// Get info about an extended advertising set.
-    pub fn ext_adv_info(&self, handle: u8) -> Result<(ExtAdvState, u8, u8, usize, u64)> {
+    pub fn ext_adv_info(
+        &self,
+        handle: u8,
+    ) -> Result<(ExtAdvState, u8, u8, usize, u64, u8, u8, u32)> {
         let idx = handle as usize;
         if idx >= EXT_ADV_MAX_SETS {
             return Err(EINVAL);
@@ -631,6 +668,9 @@ impl AdvScanInner {
             set.params.primary_phy as u8,
             set.data_len,
             set.tx_count,
+            set.params.extended_adv_timing,
+            set.max_events,
+            set.events_sent,
         ))
     }
 
@@ -660,5 +700,34 @@ impl AdvScanInner {
             }
         }
         count
+    }
+
+    /// Simulate one advertising tick (10ms) for all active extended sets.
+    ///
+    /// Each tick: increments elapsed time, sends one event per active set,
+    /// and auto-disables sets that exceed their duration or event limit.
+    /// Returns the number of sets that were auto-disabled this tick.
+    pub fn ext_adv_tick(&mut self) -> u8 {
+        let mut disabled = 0u8;
+        for slot in &mut self.ext_adv_sets {
+            let set = match slot.as_mut() {
+                Some(s) if s.state == ExtAdvState::Active => s,
+                _ => continue,
+            };
+            set.elapsed_ticks += 1;
+            set.events_sent += 1;
+            set.tx_count += 1;
+
+            let duration_expired = set.duration_10ms > 0
+                && set.elapsed_ticks >= u32::from(set.duration_10ms);
+            let events_exhausted =
+                set.max_events > 0 && set.events_sent >= u32::from(set.max_events);
+
+            if duration_expired || events_exhausted {
+                set.state = ExtAdvState::Configured;
+                disabled += 1;
+            }
+        }
+        disabled
     }
 }

@@ -437,6 +437,13 @@ const SL_IOCTL_EXT_ADV_REMOVE: u32 = _IOW::<u8>(SL_MAGIC, 0x18);
 /// Get info about an extended advertising set.
 const SL_IOCTL_EXT_ADV_INFO: u32 = _IOWR::<SleExtAdvInfo>(SL_MAGIC, 0x19);
 
+/// Enable with periodic parameters (duration + max events).
+const SL_IOCTL_EXT_ADV_ENABLE_EX: u32 = _IOW::<SleExtAdvEnableParams>(SL_MAGIC, 0x1A);
+
+/// Simulate one 10ms advertising tick for active sets.
+/// Returns the number of sets auto-disabled this tick.
+const SL_IOCTL_EXT_ADV_TICK: u32 = _IO(SL_MAGIC, 0x1B);
+
 /// Inject a simulated advertising PDU for loopback testing.
 /// Userspace provides a SleInjectAdv struct; if in scanning state,
 /// the PDU is processed as a received advertisement.
@@ -808,7 +815,11 @@ pub struct SleExtAdvConfig {
     pub include_tx_power: u8,
     /// Advertising interval in milliseconds.
     pub interval_ms: u16,
-    _reserved: [u8; 6],
+    /// Extended advertising send timing (§8.2.1).
+    /// 0x00 = send before next base adv,
+    /// 0x01..0xFF = max base advs to skip.
+    pub ext_adv_timing: u8,
+    _reserved: [u8; 5],
 }
 
 /// Extended advertising data payload.
@@ -849,9 +860,15 @@ pub struct SleExtAdvInfo {
     pub primary_phy: u8,
     /// Data length.
     pub data_len: u16,
-    _pad: u16,
+    /// Extended advertising send timing.
+    pub ext_adv_timing: u8,
+    /// Max advertising events (0 = unlimited).
+    pub max_adv_events: u8,
     /// PDUs sent.
     pub tx_count: u64,
+    /// Events sent since last enable.
+    pub events_sent: u32,
+    _pad: [u8; 4],
 }
 
 // SAFETY: repr(C) with only primitive fields.
@@ -860,6 +877,22 @@ unsafe impl FromBytes for SleExtAdvConfig {}
 unsafe impl FromBytes for SleExtAdvData {}
 // SAFETY: repr(C) with only primitive fields.
 unsafe impl FromBytes for SleExtAdvInfo {}
+
+/// Extended advertising enable with periodic parameters.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleExtAdvEnableParams {
+    /// Set handle (0..3).
+    pub handle: u8,
+    /// Max advertising events (0 = unlimited).
+    pub max_adv_events: u8,
+    /// Duration in 10ms units (0 = infinite).
+    pub duration_10ms: u16,
+    _reserved: [u8; 4],
+}
+
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleExtAdvEnableParams {}
 
 /// Injected advertising data for loopback testing.
 #[repr(C)]
@@ -3631,6 +3664,7 @@ impl MiscDevice for SparkLinkCtl {
                     secondary_phy,
                     sid: cfg.sid,
                     include_tx_power: cfg.include_tx_power != 0,
+                    extended_adv_timing: cfg.ext_adv_timing,
                 };
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
@@ -3670,7 +3704,7 @@ impl MiscDevice for SparkLinkCtl {
                 let params: SleExtAdvInfo = read_user_struct(arg)?;
                 let ss = SUBSYSTEM.lock();
                 let s = ss.as_ref().ok_or(ENODEV)?;
-                let (state, sid, phy, data_len, tx_count) =
+                let (state, sid, phy, data_len, tx_count, timing, max_ev, ev_sent) =
                     s.adv_scan.ext_adv_info(params.handle)?;
                 drop(ss);
                 let out = SleExtAdvInfo {
@@ -3683,11 +3717,28 @@ impl MiscDevice for SparkLinkCtl {
                     sid,
                     primary_phy: phy,
                     data_len: data_len as u16,
-                    _pad: 0,
+                    ext_adv_timing: timing,
+                    max_adv_events: max_ev,
                     tx_count,
+                    events_sent: ev_sent,
+                    _pad: [0u8; 4],
                 };
                 write_user_struct(arg, &out)?;
                 Ok(0)
+            }
+            SL_IOCTL_EXT_ADV_ENABLE_EX => {
+                let p: SleExtAdvEnableParams = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.adv_scan
+                    .ext_adv_enable_ex(p.handle, p.duration_10ms, p.max_adv_events)?;
+                Ok(0)
+            }
+            SL_IOCTL_EXT_ADV_TICK => {
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let disabled = s.adv_scan.ext_adv_tick();
+                Ok(disabled as c_long)
             }
             SL_IOCTL_INJECT_ADV => {
                 let inject: SleInjectAdv = read_user_struct(arg)?;

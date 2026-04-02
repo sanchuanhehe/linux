@@ -28,6 +28,10 @@
 #include <time.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+
+#ifndef __packed
+#define __packed __attribute__((packed))
+#endif
 #include <linux/netlink.h>
 #include <linux/genetlink.h>
 
@@ -187,7 +191,7 @@ struct sci_dev_info {
 	uint8_t  addr[6];
 	uint8_t  name[32];
 	uint8_t  _reserved[24];
-} __attribute__((packed));
+} __packed;
 
 struct sle_adv_params {
 	uint16_t dev_index;
@@ -202,7 +206,7 @@ struct sle_scan_params {
 	uint16_t interval_ms;
 	uint8_t  filter_discovery_level;
 	uint8_t  _reserved[9];
-} __attribute__((packed));
+} __packed;
 
 /* Extended advertising structs */
 struct sle_ext_adv_config {
@@ -217,14 +221,14 @@ struct sle_ext_adv_config {
 	uint16_t interval_ms;
 	uint8_t  ext_adv_timing;
 	uint8_t  _reserved[5];
-} __attribute__((packed));
+} __packed;
 
 struct sle_ext_adv_data {
 	uint8_t  handle;
 	uint8_t  _pad;
 	uint16_t data_len;
 	uint8_t  data[252];
-} __attribute__((packed));
+} __packed;
 
 struct sle_ext_adv_info {
 	uint8_t  handle;
@@ -237,14 +241,14 @@ struct sle_ext_adv_info {
 	uint64_t tx_count;
 	uint32_t events_sent;
 	uint8_t  _pad[4];
-} __attribute__((packed));
+} __packed;
 
 struct sle_ext_adv_enable_params {
 	uint8_t  handle;
 	uint8_t  max_adv_events;
 	uint16_t duration_10ms;
 	uint8_t  _reserved[4];
-} __attribute__((packed));
+} __packed;
 
 struct sle_inject_adv {
 	uint8_t  addr[6];
@@ -253,14 +257,14 @@ struct sle_inject_adv {
 	uint8_t  name[32];
 	uint8_t  name_len;
 	uint8_t  _reserved[7];
-} __attribute__((packed));
+} __packed;
 
 struct sle_inject_raw_adv {
 	int8_t   rssi;
 	uint8_t  _pad;
 	uint16_t pdu_len;
 	uint8_t  pdu_data[264];
-} __attribute__((packed));
+} __packed;
 
 struct sle_connect_params {
 	uint8_t  peer_addr[6];
@@ -270,7 +274,7 @@ struct sle_connect_params {
 	uint8_t  _pad;
 	uint16_t timeout_10ms;
 	uint8_t  _reserved[4];
-} __attribute__((packed));
+} __packed;
 
 struct sle_conn_info {
 	uint64_t tx_bytes;
@@ -297,14 +301,14 @@ struct sle_conn_info {
 	uint16_t smtc_rx_credits;
 	uint16_t dudtc_tx_credits;
 	uint16_t dudtc_rx_credits;
-} __attribute__((packed));
+} __packed;
 
 struct sle_conn_data {
 	uint16_t handle;
 	uint16_t length;
 	uint8_t  data[255];
 	uint8_t  _reserved;
-} __attribute__((packed));
+} __packed;
 
 struct sle_inject_conn_resp {
 	uint16_t handle;
@@ -315,21 +319,21 @@ struct sle_inject_conn_resp {
 	uint16_t supervision_timeout;
 	uint16_t data_mtu;
 	uint16_t data_mps;
-} __attribute__((packed));
+} __packed;
 
 struct sle_conn_list {
 	uint16_t count;
 	uint16_t _pad;
 	uint16_t handles[8];
 	uint8_t  _reserved[4];
-} __attribute__((packed));
+} __packed;
 
 struct sle_conn_mtu_params {
 	uint16_t handle;
 	uint16_t mtu;
 	uint16_t mps;
 	uint16_t _pad;
-} __attribute__((packed));
+} __packed;
 
 /* AFH structs */
 struct sle_afh_map_params {
@@ -339,13 +343,13 @@ struct sle_afh_map_params {
 	uint8_t  map[10];
 	uint8_t  used_count;
 	uint8_t  _pad2;
-} __attribute__((packed));
+} __packed;
 
 struct sle_afh_rssi_report {
 	uint16_t handle;
 	uint8_t  channel;
 	int8_t   rssi_dbm;
-} __attribute__((packed));
+} __packed;
 
 struct sle_afh_classify_params {
 	uint16_t handle;
@@ -354,7 +358,7 @@ struct sle_afh_classify_params {
 	uint8_t  map_out[10];
 	uint8_t  used_count;
 	uint8_t  _pad;
-} __attribute__((packed));
+} __packed;
 
 struct sle_afh_hop_info {
 	uint16_t handle;
@@ -362,13 +366,13 @@ struct sle_afh_hop_info {
 	uint8_t  _pad;
 	uint16_t freq_mhz;
 	uint16_t event_counter;
-} __attribute__((packed));
+} __packed;
 
 struct sle_afh_retx_report {
 	uint16_t handle;
 	uint8_t  channel;
 	uint8_t  retransmitted;
-} __attribute__((packed));
+} __packed;
 
 /* Sync link management */
 struct sle_sync_cig_config {
@@ -436,12 +440,12 @@ struct sle_sync_link_info {
 /* Security */
 struct sle_psk_params {
 	uint8_t psk[16];
-} __attribute__((packed));
+} __packed;
 
 struct sle_pair_params {
 	uint8_t method;
 	uint8_t _reserved[3];
-} __attribute__((packed));
+} __packed;
 
 struct sle_sec_info {
 	uint8_t state;
@@ -450,21 +454,21 @@ struct sle_sec_info {
 	uint8_t enc_enabled;
 	uint8_t enc_key_fingerprint[4];
 	uint8_t _reserved[8];
-} __attribute__((packed));
+} __packed;
 
 struct sle_oob_data {
 	uint8_t data[64];
-} __attribute__((packed));
+} __packed;
 
 struct sle_passkey_input {
 	uint32_t passkey;
-} __attribute__((packed));
+} __packed;
 
 struct sle_password_params {
 	uint8_t  len;
 	uint8_t  _reserved[3];
 	uint8_t  data[32];
-} __attribute__((packed));
+} __packed;
 
 struct sle_ral_add_params {
 	uint8_t  resolve_algo;
@@ -475,13 +479,13 @@ struct sle_ral_add_params {
 	uint8_t  _reserved[2];
 	uint8_t  peer_irk[16];
 	uint8_t  local_irk[16];
-} __attribute__((packed));
+} __packed;
 
 struct sle_ral_remove_params {
 	uint8_t  peer_id_type;
 	uint8_t  _reserved;
 	uint8_t  peer_id[6];
-} __attribute__((packed));
+} __packed;
 
 struct sle_ral_query_params {
 	uint8_t  id_type;
@@ -489,14 +493,14 @@ struct sle_ral_query_params {
 	uint8_t  id[6];
 	uint8_t  rpa[6];
 	uint8_t  _pad[2];
-} __attribute__((packed));
+} __packed;
 
 struct sle_hash_test {
 	uint16_t in_len;
 	uint16_t _pad;
 	uint8_t  data[220];
 	uint8_t  digest[32];
-} __attribute__((packed));
+} __packed;
 
 struct sle_sm4_block_test {
 	uint8_t  key[16];
@@ -522,13 +526,13 @@ struct ssap_summary {
 	uint16_t mtu;
 	uint16_t notification_count;
 	uint8_t  _reserved[6];
-} __attribute__((packed));
+} __packed;
 
 struct ssap_read_write {
 	uint16_t handle;
 	uint16_t length;
 	uint8_t  data[252];
-} __attribute__((packed));
+} __packed;
 
 struct ssap_service_entry {
 	uint16_t start_handle;
@@ -536,20 +540,20 @@ struct ssap_service_entry {
 	uint16_t uuid16;
 	uint8_t  primary;
 	uint8_t  _pad;
-} __attribute__((packed));
+} __packed;
 
 struct ssap_service_list {
 	uint16_t count;
 	uint8_t  _pad[2];
 	struct ssap_service_entry services[15];
-} __attribute__((packed));
+} __packed;
 
 struct ssap_notification {
 	uint16_t handle;
 	uint8_t  indication;
 	uint8_t  length;
 	uint8_t  data[252];
-} __attribute__((packed));
+} __packed;
 
 struct ssap_add_service {
 	uint16_t uuid16;
@@ -558,7 +562,7 @@ struct ssap_add_service {
 	uint8_t  uuid128[16];
 	uint16_t start_handle;
 	uint8_t  _reserved[6];
-} __attribute__((packed));
+} __packed;
 
 struct ssap_add_property {
 	uint16_t uuid16;
@@ -567,7 +571,7 @@ struct ssap_add_property {
 	uint8_t  value[248];
 	uint16_t handle;
 	uint8_t  _reserved[2];
-} __attribute__((packed));
+} __packed;
 
 /* Power management */
 struct sle_pm_info {
@@ -584,19 +588,19 @@ struct sle_pm_info {
 	uint64_t sniff_events;
 	uint64_t idle_events;
 	uint8_t  _reserved[8];
-} __attribute__((packed));
+} __packed;
 
 struct sle_pm_state_cmd {
 	uint8_t target_state;
 	uint8_t _reserved[3];
-} __attribute__((packed));
+} __packed;
 
 struct sle_pm_interval {
 	uint16_t min_interval;
 	uint16_t max_interval;
 	uint16_t latency;
 	uint16_t supervision_timeout;
-} __attribute__((packed));
+} __packed;
 
 struct sle_subsys_stats {
 	uint16_t dev_count;
@@ -612,7 +616,7 @@ struct sle_subsys_stats {
 	uint8_t  _pad2[3];
 	uint32_t power_transitions;
 	uint32_t crc_errors;
-} __attribute__((packed));
+} __packed;
 
 /* Event wire format — must match SleWireEvent in sle_event.rs */
 struct sle_wire_event {
@@ -620,7 +624,7 @@ struct sle_wire_event {
 	uint8_t  payload_len;
 	uint8_t  payload[40];
 	uint8_t  _pad[2];
-} __attribute__((packed));
+} __packed;
 
 #define SLE_EVT_CONN_STATE   0x01
 #define SLE_EVT_ADV_REPORT   0x02
@@ -654,7 +658,7 @@ struct sle_dli_info {
 	uint16_t features_ext;
 	uint8_t  name[32];
 	uint8_t  _reserved[4];
-} __attribute__((packed));
+} __packed;
 
 /* DLI event from controller */
 struct sle_dli_event {
@@ -687,17 +691,17 @@ struct sle_phy_info {
 	uint8_t  code_rate_num;
 	uint8_t  code_rate_den;
 	uint8_t  _reserved[5];
-} __attribute__((packed));
+} __packed;
 
 struct sle_phy_mcs_cmd {
 	uint8_t  mcs_index;
 	uint8_t  _reserved[3];
-} __attribute__((packed));
+} __packed;
 
 struct sle_phy_txpower_cmd {
 	int8_t   tx_power_dbm;
 	uint8_t  _reserved[3];
-} __attribute__((packed));
+} __packed;
 
 struct sle_phy_mcs_select {
 	uint32_t min_kbps;
@@ -705,7 +709,7 @@ struct sle_phy_mcs_select {
 	int16_t  sinr_db_x10;
 	uint8_t  bandwidth_mhz;
 	uint8_t  selected_mcs;
-} __attribute__((packed));
+} __packed;
 
 struct sle_phy_hop_info {
 	uint8_t  channel;
@@ -713,17 +717,17 @@ struct sle_phy_hop_info {
 	uint16_t freq_mhz;
 	uint16_t event_counter;
 	uint8_t  _reserved[2];
-} __attribute__((packed));
+} __packed;
 
 struct sle_phy_bw_cmd {
 	uint8_t  bandwidth_mhz;
 	uint8_t  _reserved[3];
-} __attribute__((packed));
+} __packed;
 
 struct sle_sinr_thresholds {
 	int16_t  thresholds[13];
 	uint8_t  _pad[2];
-} __attribute__((packed));
+} __packed;
 
 /* ------------------------------------------------------------------ */
 /* Test helpers                                                        */
@@ -754,6 +758,7 @@ static void test_dev_count(int fd)
 {
 	test_header("DEV_COUNT");
 	int ret = ioctl(fd, SL_IOCTL_DEV_COUNT, NULL);
+
 	if (ret == 1) {
 		printf("  OK:   DEV_COUNT: %d device(s)\n", ret);
 	} else {
@@ -765,8 +770,10 @@ static void test_dev_info(int fd)
 {
 	test_header("DEV_INFO");
 	struct sci_dev_info info;
+
 	memset(&info, 0, sizeof(info));
 	int ret = ioctl(fd, SL_IOCTL_DEV_INFO, &info);
+
 	check("DEV_INFO", ret);
 	if (ret == 0) {
 		printf("  INFO: index=%u state=%u bus=%u addr=%02x:%02x:%02x:%02x:%02x:%02x name=%.32s\n",
@@ -781,6 +788,7 @@ static void test_dev_register(int fd)
 {
 	test_header("DEV_REGISTER / DEV_UNREGISTER");
 	int ret = ioctl(fd, SL_IOCTL_DEV_REGISTER, NULL);
+
 	check("DEV_REGISTER", ret);
 
 	ret = ioctl(fd, SL_IOCTL_DEV_UNREGISTER, NULL);
@@ -790,6 +798,7 @@ static void test_dev_register(int fd)
 static void set_role(int fd, uint8_t role)
 {
 	int ret = ioctl(fd, SL_IOCTL_SET_ROLE, &role);
+
 	if (ret < 0) {
 		printf("  FAIL: SET_ROLE(%d): %s\n", role, strerror(errno));
 	}
@@ -803,12 +812,14 @@ static void test_advertising(int fd)
 	set_role(fd, 1);
 
 	struct sle_adv_params params;
+
 	memset(&params, 0, sizeof(params));
 	params.dev_index = 0;
 	params.discovery_level = 1;  /* General discoverable */
 	params.interval_ms = 100;
 
 	int ret = ioctl(fd, SL_IOCTL_START_ADV, &params);
+
 	check("START_ADV (general, 100ms)", ret);
 
 	/* Try starting again — should fail with EBUSY */
@@ -840,6 +851,7 @@ static void test_scanning(int fd)
 	set_role(fd, 0);
 
 	struct sle_scan_params params;
+
 	memset(&params, 0, sizeof(params));
 	params.dev_index = 0;
 	params.window_ms = 50;
@@ -847,6 +859,7 @@ static void test_scanning(int fd)
 	params.filter_discovery_level = 0;  /* Accept all */
 
 	int ret = ioctl(fd, SL_IOCTL_START_SCAN, &params);
+
 	check("START_SCAN (passive, 50/100ms)", ret);
 
 	/* Query scan result count via DEV_COUNT */
@@ -865,16 +878,19 @@ static void test_mutual_exclusion(int fd)
 	set_role(fd, 1);
 
 	struct sle_adv_params adv;
+
 	memset(&adv, 0, sizeof(adv));
 	adv.discovery_level = 2;
 	adv.interval_ms = 200;
 
 	struct sle_scan_params scan;
+
 	memset(&scan, 0, sizeof(scan));
 	scan.window_ms = 30;
 	scan.interval_ms = 60;
 
 	int ret = ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+
 	if (ret < 0 && errno == EPERM) {
 		printf("  OK:   GNode cannot scan (EPERM)\n");
 	} else {
@@ -911,6 +927,7 @@ static void test_role_management(int fd)
 	/* Get initial role (should be TNode=0 by default) */
 	uint8_t role = 0xFF;
 	int ret = ioctl(fd, SL_IOCTL_GET_ROLE, &role);
+
 	check("GET_ROLE", ret);
 	if (role == 0)
 		printf("  OK:   default role is TNode (0)\n");
@@ -919,6 +936,7 @@ static void test_role_management(int fd)
 
 	/* Set role to GNode */
 	uint8_t gnode = 1;
+
 	ret = ioctl(fd, SL_IOCTL_SET_ROLE, &gnode);
 	check("SET_ROLE(GNode)", ret);
 
@@ -931,11 +949,13 @@ static void test_role_management(int fd)
 
 	/* Set back to TNode */
 	uint8_t tnode = 0;
+
 	ret = ioctl(fd, SL_IOCTL_SET_ROLE, &tnode);
 	check("SET_ROLE(TNode)", ret);
 
 	/* Invalid role should be rejected */
 	uint8_t bad = 3;
+
 	ret = ioctl(fd, SL_IOCTL_SET_ROLE, &bad);
 	if (ret < 0 && errno == EINVAL)
 		printf("  OK:   SET_ROLE(3) rejected with EINVAL\n");
@@ -948,6 +968,7 @@ static void test_unknown_ioctl(int fd)
 {
 	test_header("Unknown IOCTL");
 	int ret = ioctl(fd, _IO(SL_MAGIC, 0xFF), NULL);
+
 	if (ret < 0 && errno == ENOTTY) {
 		printf("  OK:   Unknown ioctl: correctly rejected (ENOTTY)\n");
 	} else {
@@ -965,12 +986,14 @@ static void test_loopback(int fd)
 
 	/* Start scanning */
 	struct sle_scan_params scan;
+
 	memset(&scan, 0, sizeof(scan));
 	scan.window_ms = 50;
 	scan.interval_ms = 100;
 	scan.filter_discovery_level = 0;
 
 	int ret = ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+
 	check("START_SCAN", ret);
 
 	/* Verify no results yet */
@@ -1030,16 +1053,19 @@ static void test_loopback_filter(int fd)
 	set_role(fd, 0);
 
 	struct sle_scan_params scan;
+
 	memset(&scan, 0, sizeof(scan));
 	scan.window_ms = 50;
 	scan.interval_ms = 100;
 	scan.filter_discovery_level = 2;  /* Accept level >= 2 only */
 
 	int ret = ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+
 	check("START_SCAN (filter>=2)", ret);
 
 	/* Inject level=1 — should be filtered */
 	struct sle_inject_adv inject;
+
 	memset(&inject, 0, sizeof(inject));
 	inject.addr[5] = 0x10;
 	inject.rssi = -30;
@@ -1076,6 +1102,7 @@ static void test_connect(int fd)
 	test_header("CONNECT / DISCONNECT (multi-connection)");
 
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xAA;
 	cp.peer_addr[1] = 0xBB;
@@ -1087,15 +1114,18 @@ static void test_connect(int fd)
 
 	/* Connect — should return handle > 0 */
 	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
 	if (ret <= 0) {
 		printf("  FAIL: CONNECT: expected handle > 0, got %d\n", ret);
 		return;
 	}
 	uint16_t handle = (uint16_t)ret;
+
 	printf("  OK:   CONNECT: handle=%u\n", handle);
 
 	/* Verify state via CONN_INFO */
 	struct sle_conn_info info;
+
 	memset(&info, 0, sizeof(info));
 	info.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
@@ -1117,6 +1147,7 @@ static void test_connect(int fd)
 
 	/* Connect to different peer — should succeed (multi-conn) */
 	struct sle_connect_params cp2;
+
 	memset(&cp2, 0, sizeof(cp2));
 	cp2.peer_addr[0] = 0x11;
 	cp2.peer_addr[5] = 0x02;
@@ -1124,6 +1155,7 @@ static void test_connect(int fd)
 	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp2);
 	if (ret > 0) {
 		uint16_t handle2 = (uint16_t)ret;
+
 		printf("  OK:   CONNECT (2nd peer): handle=%u\n", handle2);
 
 		/* Check CONN_COUNT */
@@ -1132,6 +1164,7 @@ static void test_connect(int fd)
 
 		/* Check CONN_LIST */
 		struct sle_conn_list list;
+
 		memset(&list, 0, sizeof(list));
 		ret = ioctl(fd, SL_IOCTL_CONN_LIST, &list);
 		if (ret == 0) {
@@ -1166,21 +1199,25 @@ static void test_conn_reject(int fd)
 	test_header("Connection rejection");
 
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xCC;
 	cp.peer_addr[5] = 0x02;
 	cp.gt_role = 1;  /* G node */
 
 	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
 	if (ret <= 0) {
 		printf("  FAIL: CONNECT: expected handle > 0, got %d\n", ret);
 		return;
 	}
 	uint16_t handle = (uint16_t)ret;
+
 	printf("  OK:   CONNECT: handle=%u\n", handle);
 
 	/* Inject rejection response */
 	struct sle_inject_conn_resp resp;
+
 	memset(&resp, 0, sizeof(resp));
 	resp.handle = handle;
 	resp.response_type = 3;  /* UserRejected */
@@ -1209,21 +1246,25 @@ static void test_conn_data_loopback(int fd)
 
 	/* Step 1: Connect */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xDD;
 	cp.peer_addr[5] = 0x03;
 	cp.gt_role = 0;
 
 	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
 	if (ret <= 0) {
 		printf("  FAIL: CONNECT: expected handle > 0, got %d\n", ret);
 		return;
 	}
 	uint16_t handle = (uint16_t)ret;
+
 	printf("  OK:   CONNECT: handle=%u\n", handle);
 
 	/* Step 2: Accept connection via injected response */
 	struct sle_inject_conn_resp resp;
+
 	memset(&resp, 0, sizeof(resp));
 	resp.handle = handle;
 	resp.response_type = 0;  /* Accepted */
@@ -1236,6 +1277,7 @@ static void test_conn_data_loopback(int fd)
 
 	/* Step 3: Verify Connected state and negotiated params */
 	struct sle_conn_info info;
+
 	memset(&info, 0, sizeof(info));
 	info.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
@@ -1259,9 +1301,11 @@ static void test_conn_data_loopback(int fd)
 
 	/* Step 4: Send data */
 	struct sle_conn_data sd;
+
 	memset(&sd, 0, sizeof(sd));
 	sd.handle = handle;
 	const char *msg = "Hello SparkLink!";
+
 	sd.length = strlen(msg);
 	memcpy(sd.data, msg, sd.length);
 	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
@@ -1269,9 +1313,11 @@ static void test_conn_data_loopback(int fd)
 
 	/* Step 5: Inject received data (simulating peer sending back) */
 	struct sle_conn_data rd;
+
 	memset(&rd, 0, sizeof(rd));
 	rd.handle = handle;
 	const char *reply = "ACK from peer";
+
 	rd.length = strlen(reply);
 	memcpy(rd.data, reply, rd.length);
 	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &rd);
@@ -1279,6 +1325,7 @@ static void test_conn_data_loopback(int fd)
 
 	/* Step 6: Receive the injected data */
 	struct sle_conn_data recv_buf;
+
 	memset(&recv_buf, 0, sizeof(recv_buf));
 	recv_buf.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &recv_buf);
@@ -1334,11 +1381,13 @@ static void test_sm3_hash(int fd)
 
 	/* SM3("abc") test vector from GB/T 32905-2016 A.1 */
 	struct sle_hash_test ht;
+
 	memset(&ht, 0, sizeof(ht));
 	memcpy(ht.data, "abc", 3);
 	ht.in_len = 3;
 
 	int ret = ioctl(fd, SL_IOCTL_SEC_SM3_TEST, &ht);
+
 	check("SEC_SM3_TEST", ret);
 
 	if (ret == 0) {
@@ -1369,6 +1418,7 @@ static void test_sm4_block(int fd)
 
 	/* GB/T 32907-2016 A.1 test vector */
 	struct sle_sm4_block_test bt;
+
 	memset(&bt, 0, sizeof(bt));
 
 	const uint8_t key[16] = {
@@ -1389,6 +1439,7 @@ static void test_sm4_block(int fd)
 	bt.decrypt = 0;
 
 	int ret = ioctl(fd, SL_IOCTL_SEC_SM4_BLOCK_TEST, &bt);
+
 	check("SM4_BLOCK_ENC", ret);
 
 	if (ret == 0) {
@@ -1405,6 +1456,7 @@ static void test_sm4_block(int fd)
 
 		/* Now decrypt and verify round-trip */
 		struct sle_sm4_block_test dt;
+
 		memset(&dt, 0, sizeof(dt));
 		memcpy(dt.key, key, 16);
 		memcpy(dt.input, expected_ct, 16);
@@ -1434,6 +1486,7 @@ static void test_hmac_sm3(int fd)
 	 *   # HMAC-SM3(key=16 bytes of 0x0b, data="Hi There")
 	 */
 	struct sle_hmac_test ht;
+
 	memset(&ht, 0, sizeof(ht));
 
 	/* Key: 16 bytes of 0x0b (similar to RFC 2104 test case 1) */
@@ -1442,10 +1495,12 @@ static void test_hmac_sm3(int fd)
 
 	/* Data: "Hi There" */
 	const char *msg = "Hi There";
+
 	ht.data_len = (uint16_t)strlen(msg);
 	memcpy(ht.data, msg, ht.data_len);
 
 	int ret = ioctl(fd, SL_IOCTL_SEC_HMAC_TEST, &ht);
+
 	check("HMAC_SM3", ret);
 
 	if (ret == 0) {
@@ -1456,6 +1511,7 @@ static void test_hmac_sm3(int fd)
 
 		/* Verify the digest is non-zero (basic sanity) */
 		int nonzero = 0;
+
 		for (int i = 0; i < 32; i++) {
 			if (ht.digest[i] != 0)
 				nonzero = 1;
@@ -1468,6 +1524,7 @@ static void test_hmac_sm3(int fd)
 
 		/* Verify determinism: same input should produce same output */
 		struct sle_hmac_test ht2;
+
 		memcpy(&ht2, &ht, sizeof(ht2));
 		memset(ht2.digest, 0, 32);
 		ret = ioctl(fd, SL_IOCTL_SEC_HMAC_TEST, &ht2);
@@ -1485,15 +1542,18 @@ static void test_security_pairing(int fd)
 
 	/* Step 1: Set PSK */
 	struct sle_psk_params psk;
+
 	memset(&psk, 0, sizeof(psk));
 	for (int i = 0; i < 16; i++)
 		psk.psk[i] = (uint8_t)i;
 
 	int ret = ioctl(fd, SL_IOCTL_SEC_SET_PSK, &psk);
+
 	check("SEC_SET_PSK", ret);
 
 	/* Step 2: Pair using PSK */
 	struct sle_pair_params pair;
+
 	memset(&pair, 0, sizeof(pair));
 	pair.method = 2;  /* PSK */
 
@@ -1502,6 +1562,7 @@ static void test_security_pairing(int fd)
 
 	/* Step 3: Check security info */
 	struct sle_sec_info sec;
+
 	memset(&sec, 0, sizeof(sec));
 	ret = ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
 	check("SEC_INFO", ret);
@@ -1531,12 +1592,15 @@ static void test_security_pairing(int fd)
 
 	/* Step 6: SM4 encrypt-decrypt roundtrip */
 	struct sle_conn_data enc_data;
+
 	memset(&enc_data, 0, sizeof(enc_data));
 	const char *plaintext = "SLE test data 123";
+
 	enc_data.length = strlen(plaintext);
 	memcpy(enc_data.data, plaintext, enc_data.length);
 
 	uint8_t original[255];
+
 	memcpy(original, enc_data.data, enc_data.length);
 
 	ret = ioctl(fd, SL_IOCTL_SEC_SM4_ENC_TEST, &enc_data);
@@ -1567,10 +1631,12 @@ static void test_security_ecdh(int fd)
 
 	/* Reset security state from previous PSK pairing */
 	int ret = ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+
 	check("SEC_RESET", ret);
 
 	/* Pair using Just Works (method=1, now backed by ECDH) */
 	struct sle_pair_params pair;
+
 	memset(&pair, 0, sizeof(pair));
 	pair.method = 1;  /* JustWorks */
 
@@ -1579,6 +1645,7 @@ static void test_security_ecdh(int fd)
 
 	/* Check security info */
 	struct sle_sec_info sec;
+
 	memset(&sec, 0, sizeof(sec));
 	ret = ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
 	check("SEC_INFO after ECDH", ret);
@@ -1603,12 +1670,15 @@ static void test_security_ecdh(int fd)
 	check("SEC_ENCRYPT_ON after ECDH", ret);
 
 	struct sle_conn_data enc_data;
+
 	memset(&enc_data, 0, sizeof(enc_data));
 	const char *text = "ECDH roundtrip test";
+
 	enc_data.length = strlen(text);
 	memcpy(enc_data.data, text, enc_data.length);
 
 	uint8_t original[255];
+
 	memcpy(original, enc_data.data, enc_data.length);
 
 	ret = ioctl(fd, SL_IOCTL_SEC_SM4_ENC_TEST, &enc_data);
@@ -1644,6 +1714,7 @@ static void test_security_numeric_comparison(int fd)
 
 	/* 1. Get passkey before pairing — should fail */
 	uint32_t passkey = 0;
+
 	ret = ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &passkey);
 	if (ret < 0 && errno == EINVAL) {
 		printf("  OK:   get_passkey before pair rejected (EINVAL)\n");
@@ -1655,6 +1726,7 @@ static void test_security_numeric_comparison(int fd)
 
 	/* 2. Start numeric comparison pairing (method=3) */
 	struct sle_pair_params pair;
+
 	memset(&pair, 0, sizeof(pair));
 	pair.method = 3;
 	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
@@ -1668,6 +1740,7 @@ static void test_security_numeric_comparison(int fd)
 
 	/* 3. Check state = AwaitingConfirm (4) */
 	struct sle_sec_info sec;
+
 	memset(&sec, 0, sizeof(sec));
 	ret = ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
 	if (ret == 0 && sec.state == 4 && sec.method == 3) {
@@ -1692,6 +1765,7 @@ static void test_security_numeric_comparison(int fd)
 
 	/* 5. Passkey is stable (same value on second read) */
 	uint32_t passkey2 = 0;
+
 	ret = ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &passkey2);
 	if (ret == 0 && passkey2 == passkey) {
 		printf("  OK:   passkey stable on re-read\n");
@@ -1735,15 +1809,19 @@ static void test_security_numeric_comparison(int fd)
 
 	/* 9. SM4 encrypt/decrypt roundtrip */
 	struct sle_conn_data enc_data;
+
 	memset(&enc_data, 0, sizeof(enc_data));
 	const char *text = "NC roundtrip test";
+
 	enc_data.length = strlen(text);
 	memcpy(enc_data.data, text, enc_data.length);
 	uint8_t orig[255];
+
 	memcpy(orig, enc_data.data, enc_data.length);
 
 	ret = ioctl(fd, SL_IOCTL_SEC_SM4_ENC_TEST, &enc_data);
 	int enc_ok = (ret == 0 && memcmp(enc_data.data, orig, enc_data.length) != 0);
+
 	if (enc_ok) {
 		ret = ioctl(fd, SL_IOCTL_SEC_SM4_DEC_TEST, &enc_data);
 		if (ret == 0 && memcmp(enc_data.data, orig, enc_data.length) == 0) {
@@ -1839,6 +1917,7 @@ static void test_security_oob_pin_password(int fd)
 
 	/* 3. Get the expected passkey via get_passkey */
 	uint32_t expected_pk = 0xFFFFFFFF;
+
 	ret = ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &expected_pk);
 	if (ret == 0 && expected_pk < 1000000) {
 		printf("  OK:   expected passkey=%06u\n", expected_pk);
@@ -1850,6 +1929,7 @@ static void test_security_oob_pin_password(int fd)
 
 	/* 4. Input wrong passkey — should fail with EACCES */
 	struct sle_passkey_input pk_in;
+
 	memset(&pk_in, 0, sizeof(pk_in));
 	pk_in.passkey = (expected_pk + 1) % 1000000;
 	ret = ioctl(fd, SL_IOCTL_SEC_INPUT_PASSKEY, &pk_in);
@@ -1906,15 +1986,19 @@ static void test_security_oob_pin_password(int fd)
 	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
 	if (ret == 0) {
 		struct sle_conn_data cd;
+
 		memset(&cd, 0, sizeof(cd));
 		const char *msg = "passkey roundtrip";
+
 		cd.length = strlen(msg);
 		memcpy(cd.data, msg, cd.length);
 		uint8_t orig[255];
+
 		memcpy(orig, cd.data, cd.length);
 
 		ioctl(fd, SL_IOCTL_SEC_SM4_ENC_TEST, &cd);
 		int changed = memcmp(cd.data, orig, cd.length) != 0;
+
 		ioctl(fd, SL_IOCTL_SEC_SM4_DEC_TEST, &cd);
 		if (changed && memcmp(cd.data, orig, cd.length) == 0) {
 			printf("  OK:   SM4 roundtrip after passkey entry\n");
@@ -1946,6 +2030,7 @@ static void test_security_oob_pin_password(int fd)
 
 	/* 10. Set OOB data and pair */
 	struct sle_oob_data oob;
+
 	memset(&oob, 0, sizeof(oob));
 	/* Simulate OOB data: fill with deterministic pattern */
 	for (int i = 0; i < 64; i++)
@@ -1987,15 +2072,19 @@ static void test_security_oob_pin_password(int fd)
 	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
 	if (ret == 0) {
 		struct sle_conn_data cd;
+
 		memset(&cd, 0, sizeof(cd));
 		const char *msg = "oob roundtrip";
+
 		cd.length = strlen(msg);
 		memcpy(cd.data, msg, cd.length);
 		uint8_t orig[255];
+
 		memcpy(orig, cd.data, cd.length);
 
 		ioctl(fd, SL_IOCTL_SEC_SM4_ENC_TEST, &cd);
 		int changed = memcmp(cd.data, orig, cd.length) != 0;
+
 		ioctl(fd, SL_IOCTL_SEC_SM4_DEC_TEST, &cd);
 		if (changed && memcmp(cd.data, orig, cd.length) == 0) {
 			printf("  OK:   SM4 roundtrip after OOB pairing\n");
@@ -2026,6 +2115,7 @@ static void test_security_oob_pin_password(int fd)
 
 	/* 15. Set password with invalid length 0 — fail */
 	struct sle_password_params pwd;
+
 	memset(&pwd, 0, sizeof(pwd));
 	pwd.len = 0;
 	ret = ioctl(fd, SL_IOCTL_SEC_SET_PASSWORD, &pwd);
@@ -2078,15 +2168,19 @@ static void test_security_oob_pin_password(int fd)
 	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
 	if (ret == 0) {
 		struct sle_conn_data cd;
+
 		memset(&cd, 0, sizeof(cd));
 		const char *msg = "password roundtrip";
+
 		cd.length = strlen(msg);
 		memcpy(cd.data, msg, cd.length);
 		uint8_t orig[255];
+
 		memcpy(orig, cd.data, cd.length);
 
 		ioctl(fd, SL_IOCTL_SEC_SM4_ENC_TEST, &cd);
 		int changed = memcmp(cd.data, orig, cd.length) != 0;
+
 		ioctl(fd, SL_IOCTL_SEC_SM4_DEC_TEST, &cd);
 		if (changed && memcmp(cd.data, orig, cd.length) == 0) {
 			printf("  OK:   SM4 roundtrip after password pairing\n");
@@ -2126,6 +2220,7 @@ static void test_rpa_management(int fd)
 
 	/* 1. RAL should start empty */
 	uint8_t count = 0xFF;
+
 	ret = ioctl(fd, SL_IOCTL_RAL_SIZE, &count);
 	if (ret == 0 && count == 0) {
 		printf("  OK:   RAL initial size is 0\n");
@@ -2138,12 +2233,14 @@ static void test_rpa_management(int fd)
 
 	/* 2. Add first device to RAL */
 	struct sle_ral_add_params add;
+
 	memset(&add, 0, sizeof(add));
 	add.resolve_algo = 0x01; /* HMAC-SM3 for local */
 	add.peer_id_type = 0x00;
 	add.peer_irkid = 1;
 	add.local_irkid = 2;
 	uint8_t peer_id1[6] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+
 	memcpy(add.peer_id, peer_id1, 6);
 	/* Fill IRKs with test patterns */
 	for (int i = 0; i < 16; i++) {
@@ -2182,12 +2279,14 @@ static void test_rpa_management(int fd)
 
 	/* 5. Add second device */
 	struct sle_ral_add_params add2;
+
 	memset(&add2, 0, sizeof(add2));
 	add2.resolve_algo = 0x02; /* HMAC-SM3 for peer */
 	add2.peer_id_type = 0x02;
 	add2.peer_irkid = 3;
 	add2.local_irkid = 4;
 	uint8_t peer_id2[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+
 	memcpy(add2.peer_id, peer_id2, 6);
 	for (int i = 0; i < 16; i++) {
 		add2.peer_irk[i] = (uint8_t)(0xC0 + i);
@@ -2215,6 +2314,7 @@ static void test_rpa_management(int fd)
 
 	/* 7. Read peer RPA for device 1 */
 	struct sle_ral_query_params qp;
+
 	memset(&qp, 0, sizeof(qp));
 	qp.id_type = 0x00;
 	memcpy(qp.id, peer_id1, 6);
@@ -2224,6 +2324,7 @@ static void test_rpa_management(int fd)
 		int resolvable = (qp.rpa[3] & 0xC0) == 0x40;
 		/* RPA should be non-zero */
 		int nonzero = 0;
+
 		for (int i = 0; i < 6; i++)
 			if (qp.rpa[i] != 0)
 				nonzero = 1;
@@ -2241,6 +2342,7 @@ static void test_rpa_management(int fd)
 
 	/* 8. Read local RPA for device 1 */
 	struct sle_ral_query_params ql;
+
 	memset(&ql, 0, sizeof(ql));
 	ql.id_type = 0x00;
 	memcpy(ql.id, peer_id1, 6);
@@ -2248,6 +2350,7 @@ static void test_rpa_management(int fd)
 	if (ret == 0) {
 		int resolvable = (ql.rpa[3] & 0xC0) == 0x40;
 		int nonzero = 0;
+
 		for (int i = 0; i < 6; i++)
 			if (ql.rpa[i] != 0)
 				nonzero = 1;
@@ -2274,6 +2377,7 @@ static void test_rpa_management(int fd)
 
 	/* 10. Enable RPA resolution */
 	uint8_t enable = 1;
+
 	ret = ioctl(fd, SL_IOCTL_RPA_ENABLE, &enable);
 	if (ret == 0) {
 		printf("  OK:   RPA resolution enabled\n");
@@ -2295,6 +2399,7 @@ static void test_rpa_management(int fd)
 
 	/* 12. RAL remove should fail while RPA is enabled (EBUSY) */
 	struct sle_ral_remove_params rm;
+
 	memset(&rm, 0, sizeof(rm));
 	rm.peer_id_type = 0x00;
 	memcpy(rm.peer_id, peer_id1, 6);
@@ -2330,6 +2435,7 @@ static void test_rpa_management(int fd)
 
 	/* 15. Set RPA timeout */
 	uint16_t timeout = 900;
+
 	ret = ioctl(fd, SL_IOCTL_RPA_SET_TIMEOUT, &timeout);
 	if (ret == 0) {
 		printf("  OK:   RPA timeout set to 900s\n");
@@ -2400,10 +2506,12 @@ static void test_ssap_service(int fd)
 
 	/* Step 1: Register built-in device info service */
 	int ret = ioctl(fd, SL_IOCTL_SSAP_REGISTER_SVC, NULL);
+
 	check("SSAP_REGISTER_SVC", ret);
 
 	/* Step 2: Get SSAP summary info */
 	struct ssap_summary info;
+
 	memset(&info, 0, sizeof(info));
 	ret = ioctl(fd, SL_IOCTL_SSAP_INFO, &info);
 	check("SSAP_INFO", ret);
@@ -2419,6 +2527,7 @@ static void test_ssap_service(int fd)
 
 	/* Step 3: Find primary services */
 	struct ssap_service_list slist;
+
 	memset(&slist, 0, sizeof(slist));
 	ret = ioctl(fd, SL_IOCTL_SSAP_FIND_SVC, &slist);
 	check("SSAP_FIND_SVC", ret);
@@ -2435,6 +2544,7 @@ static void test_ssap_service(int fd)
 
 	/* Step 4: Read device name property (handle 0x0011) */
 	struct ssap_read_write rw;
+
 	memset(&rw, 0, sizeof(rw));
 	rw.handle = 0x0011;
 	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
@@ -2474,6 +2584,7 @@ static void test_ssap_service(int fd)
 
 	/* Step 8: Check notification was generated from the write */
 	struct ssap_summary info2;
+
 	memset(&info2, 0, sizeof(info2));
 	ret = ioctl(fd, SL_IOCTL_SSAP_INFO, &info2);
 	if (ret == 0 && info2.notification_count > 0) {
@@ -2482,6 +2593,7 @@ static void test_ssap_service(int fd)
 
 		/* Dequeue the notification */
 		struct ssap_notification ntf;
+
 		memset(&ntf, 0, sizeof(ntf));
 		ret = ioctl(fd, SL_IOCTL_SSAP_DEQUEUE_NTF, &ntf);
 		check("SSAP_DEQUEUE_NTF", ret);
@@ -2511,12 +2623,15 @@ static void test_ssap_dynamic_registration(int fd)
 
 	/* Step 1: Add a custom primary service with 16-bit UUID */
 	struct ssap_add_service svc;
+
 	memset(&svc, 0, sizeof(svc));
 	svc.uuid16 = 0x1234;
 	svc.primary = 1;
 	int ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+
 	check("SSAP_ADD_SVC (uuid16=0x1234, primary)", ret);
 	uint16_t svc_handle = 0;
+
 	if (ret == 0) {
 		svc_handle = svc.start_handle;
 		printf("  OK:   service registered, start_handle=%u\n", svc_handle);
@@ -2524,6 +2639,7 @@ static void test_ssap_dynamic_registration(int fd)
 
 	/* Step 2: Add a property to the service (Read+Write, ops=0x03) */
 	struct ssap_add_property prop;
+
 	memset(&prop, 0, sizeof(prop));
 	prop.uuid16 = 0x2A00;
 	prop.ops = 0x03; /* Read | Write */
@@ -2532,6 +2648,7 @@ static void test_ssap_dynamic_registration(int fd)
 	ret = ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &prop);
 	check("SSAP_ADD_PROP (uuid16=0x2A00, ops=RW)", ret);
 	uint16_t prop_handle = 0;
+
 	if (ret == 0) {
 		prop_handle = prop.handle;
 		printf("  OK:   property added, handle=%u\n", prop_handle);
@@ -2539,6 +2656,7 @@ static void test_ssap_dynamic_registration(int fd)
 
 	/* Step 3: Add a second property with Notify (ops=0x04) */
 	struct ssap_add_property prop2;
+
 	memset(&prop2, 0, sizeof(prop2));
 	prop2.uuid16 = 0x2A01;
 	prop2.ops = 0x04; /* Notify */
@@ -2551,6 +2669,7 @@ static void test_ssap_dynamic_registration(int fd)
 
 	/* Step 4: Verify service count increased via SSAP_INFO */
 	struct ssap_summary info;
+
 	memset(&info, 0, sizeof(info));
 	ret = ioctl(fd, SL_IOCTL_SSAP_INFO, &info);
 	check("SSAP_INFO (after dynamic add)", ret);
@@ -2562,6 +2681,7 @@ static void test_ssap_dynamic_registration(int fd)
 	/* Step 5: Read the property we just created */
 	if (prop_handle != 0) {
 		struct ssap_read_write rw;
+
 		memset(&rw, 0, sizeof(rw));
 		rw.handle = prop_handle;
 		ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
@@ -2574,6 +2694,7 @@ static void test_ssap_dynamic_registration(int fd)
 
 	/* Step 6: Add a second service with 128-bit UUID */
 	struct ssap_add_service svc2;
+
 	memset(&svc2, 0, sizeof(svc2));
 	svc2.uuid16 = 0; /* use uuid128 */
 	svc2.primary = 1;
@@ -2598,6 +2719,7 @@ static void test_ssap_dynamic_registration(int fd)
 
 	/* Step 8: Try removing a non-existent service */
 	uint16_t bad_handle = 0xFFFF;
+
 	ret = ioctl(fd, SL_IOCTL_SSAP_REMOVE_SVC, &bad_handle);
 	if (ret < 0) {
 		printf("  OK:   Remove non-existent service rejected (errno=%d)\n", errno);
@@ -2607,6 +2729,7 @@ static void test_ssap_dynamic_registration(int fd)
 
 	/* Step 9: Verify service count after removal */
 	struct ssap_summary info2;
+
 	memset(&info2, 0, sizeof(info2));
 	ret = ioctl(fd, SL_IOCTL_SSAP_INFO, &info2);
 	check("SSAP_INFO (after remove)", ret);
@@ -2622,8 +2745,10 @@ static void test_power_management(int fd)
 
 	/* Step 1: Get initial PM info */
 	struct sle_pm_info pm;
+
 	memset(&pm, 0, sizeof(pm));
 	int ret = ioctl(fd, SL_IOCTL_PM_INFO, &pm);
+
 	check("PM_INFO (initial)", ret);
 	if (ret == 0) {
 		printf("  state=%u force_active=%u power=%u%% interval=%u timeout=%u\n",
@@ -2678,10 +2803,12 @@ static void test_power_management(int fd)
 
 	/* Step 6: Force active, then try suspend — should fail */
 	uint8_t fa = 1;
+
 	ret = ioctl(fd, SL_IOCTL_PM_FORCE_ACTIVE, &fa);
 	check("PM_FORCE_ACTIVE(1)", ret);
 
 	struct sle_pm_state_cmd cmd;
+
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.target_state = 3; /* Suspend */
 	ret = ioctl(fd, SL_IOCTL_PM_SET_STATE, &cmd);
@@ -2720,6 +2847,7 @@ static void test_power_management(int fd)
 static void drain_event_queue(int fd)
 {
 	struct sle_wire_event tmp;
+
 	while (read(fd, &tmp, sizeof(tmp)) > 0)
 		;
 }
@@ -2736,6 +2864,7 @@ static void test_event_notification(int fd)
 
 	/* Step 1: Verify empty event queue */
 	int ret = ioctl(fd, SL_IOCTL_EVENT_COUNT, NULL);
+
 	if (ret == 0) {
 		printf("  OK:   EVENT_COUNT=0 (initial)\n");
 	} else {
@@ -2745,6 +2874,7 @@ static void test_event_notification(int fd)
 	/* Step 2: read() on empty queue should return EAGAIN */
 	struct sle_wire_event evt;
 	ssize_t n = read(fd, &evt, sizeof(evt));
+
 	if (n < 0 && errno == EAGAIN) {
 		printf("  OK:   read() empty queue: EAGAIN\n");
 	} else {
@@ -2753,6 +2883,7 @@ static void test_event_notification(int fd)
 
 	/* Step 3: Trigger events via connect + inject adv */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xEE;
 	cp.peer_addr[5] = 0xAA;
@@ -2762,6 +2893,7 @@ static void test_event_notification(int fd)
 	cp.timeout_10ms = 100;
 	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
 	uint16_t handle = 0;
+
 	if (ret > 0) {
 		handle = (uint16_t)ret;
 		printf("  OK:   CONNECT generated event (handle=%u)\n", handle);
@@ -2772,12 +2904,14 @@ static void test_event_notification(int fd)
 
 	/* Start scanning and inject an adv to generate AdvReport event */
 	struct sle_scan_params scan;
+
 	memset(&scan, 0, sizeof(scan));
 	scan.window_ms = 50;
 	scan.interval_ms = 100;
 	ioctl(fd, SL_IOCTL_START_SCAN, &scan);
 
 	struct sle_inject_adv inject;
+
 	memset(&inject, 0, sizeof(inject));
 	inject.addr[0] = 0xBB;
 	inject.addr[5] = 0xCC;
@@ -2799,6 +2933,7 @@ static void test_event_notification(int fd)
 	/* Step 5: Read events via read() */
 	int total_read = 0;
 	int got_conn = 0, got_adv = 0;
+
 	while (total_read < 128) {
 		memset(&evt, 0, sizeof(evt));
 		n = read(fd, &evt, sizeof(evt));
@@ -2856,8 +2991,10 @@ static void test_event_stats(int fd)
 	test_header("Event Queue Statistics");
 
 	struct sle_event_stats stats;
+
 	memset(&stats, 0, sizeof(stats));
 	int ret = ioctl(fd, SL_IOCTL_EVENT_STATS, &stats);
+
 	if (ret != 0) {
 		printf("  FAIL: EVENT_STATS ioctl: %s\n", strerror(errno));
 		return;
@@ -2874,8 +3011,10 @@ static void test_dli_info(int fd)
 	test_header("DLI Controller Info");
 
 	struct sle_dli_info dli;
+
 	memset(&dli, 0, sizeof(dli));
 	int ret = ioctl(fd, SL_IOCTL_DLI_INFO, &dli);
+
 	if (ret != 0) {
 		printf("  FAIL: DLI_INFO ioctl: %s\n", strerror(errno));
 		return;
@@ -2883,9 +3022,10 @@ static void test_dli_info(int fd)
 	printf("  Name:         %.32s\n", dli.name);
 	printf("  Bus:          %u\n", dli.bus);
 
-	unsigned major = (dli.firmware_version >> 16) & 0xFF;
-	unsigned minor = (dli.firmware_version >> 8) & 0xFF;
-	unsigned patch = dli.firmware_version & 0xFF;
+	unsigned int major = (dli.firmware_version >> 16) & 0xFF;
+	unsigned int minor = (dli.firmware_version >> 8) & 0xFF;
+	unsigned int patch = dli.firmware_version & 0xFF;
+
 	printf("  Firmware:     %u.%u.%u\n", major, minor, patch);
 	printf("  Features:     0x%016lx\n", (unsigned long)dli.features);
 	printf("  Max conns:    %u\n", dli.max_connections);
@@ -2931,6 +3071,7 @@ static void test_usb_discovery(int fd)
 	test_header("USB DLI Hardware Discovery");
 
 	int ret = ioctl(fd, SL_IOCTL_USB_DEV_COUNT, NULL);
+
 	if (ret < 0) {
 		printf("  FAIL: USB_DEV_COUNT ioctl: %s\n", strerror(errno));
 		return;
@@ -2953,6 +3094,7 @@ static void test_dli_event_poll(int fd)
 
 	/* Drain any leftover events from previous tests */
 	struct sle_dli_event ev;
+
 	for (int i = 0; i < 64; i++) {
 		memset(&ev, 0, sizeof(ev));
 		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) < 0)
@@ -2962,6 +3104,7 @@ static void test_dli_event_poll(int fd)
 	/* 1. Empty queue should return EAGAIN */
 	memset(&ev, 0, sizeof(ev));
 	int ret = ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev);
+
 	if (ret < 0 && errno == EAGAIN)
 		printf("  OK:   poll_event returns EAGAIN on empty queue\n");
 	else
@@ -2969,6 +3112,7 @@ static void test_dli_event_poll(int fd)
 
 	/* 2. Trigger a DLI command that generates a CommandComplete event */
 	struct sle_adv_params adv;
+
 	memset(&adv, 0, sizeof(adv));
 	adv.discovery_level = 1;
 	adv.interval_ms = 100;
@@ -3019,6 +3163,7 @@ static void test_dli_routing(int fd)
 
 	/* Drain any leftover DLI events */
 	struct sle_dli_event ev;
+
 	for (int i = 0; i < 32; i++) {
 		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) < 0)
 			break;
@@ -3026,10 +3171,12 @@ static void test_dli_routing(int fd)
 
 	/* 1. START_SCAN → EnableScan command → CommandComplete event */
 	struct sle_scan_params sp;
+
 	memset(&sp, 0, sizeof(sp));
 	sp.window_ms = 10;
 	sp.interval_ms = 20;
 	int ret = ioctl(fd, SL_IOCTL_START_SCAN, &sp);
+
 	if (ret == 0) {
 		printf("  OK:   START_SCAN routed to DLI\n");
 		memset(&ev, 0, sizeof(ev));
@@ -3047,6 +3194,7 @@ static void test_dli_routing(int fd)
 
 	/* 2. CONNECT → CreateConnection command → CommandComplete event */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xBB;
 	cp.peer_addr[5] = 0x01;
@@ -3054,6 +3202,7 @@ static void test_dli_routing(int fd)
 	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
 	if (ret >= 0) {
 		uint16_t handle = (uint16_t)ret;
+
 		printf("  OK:   CONNECT routed to DLI (handle=%u)\n", handle);
 		memset(&ev, 0, sizeof(ev));
 		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) == 0 && ev.event_type == 0x01)
@@ -3074,6 +3223,7 @@ static void test_dli_routing(int fd)
 
 	/* 4. PHY SET_MCS → SetCodingModulation command */
 	struct sle_phy_mcs_cmd mcs_cmd;
+
 	memset(&mcs_cmd, 0, sizeof(mcs_cmd));
 	mcs_cmd.mcs_index = 2;
 	ret = ioctl(fd, SL_IOCTL_PHY_SET_MCS, &mcs_cmd);
@@ -3116,6 +3266,7 @@ static void test_poll_epoll(int fd)
 	/* Step 1: poll on empty queue — should timeout immediately */
 	struct pollfd pfd = { .fd = fd, .events = POLLIN };
 	int ret = poll(&pfd, 1, 0);
+
 	if (ret == 0) {
 		printf("  OK:   poll() returns 0 on empty queue\n");
 	} else {
@@ -3124,10 +3275,12 @@ static void test_poll_epoll(int fd)
 
 	/* Step 2: Trigger an event (connect) */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xBB;
 	cp.peer_addr[5] = 0xBB;
 	uint16_t handle = 0;
+
 	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
 	if (ret > 0) {
 		handle = (uint16_t)ret;
@@ -3148,6 +3301,7 @@ static void test_poll_epoll(int fd)
 
 	/* Step 4: Drain events via read() */
 	struct sle_wire_event evt;
+
 	while (read(fd, &evt, sizeof(evt)) > 0)
 		;
 
@@ -3190,6 +3344,7 @@ static void test_ring_buffer_stress(int fd)
 
 	/* Step 2: start scanning so we can inject advs to generate events */
 	struct sle_scan_params scan;
+
 	memset(&scan, 0, sizeof(scan));
 	scan.window_ms = 50;
 	scan.interval_ms = 100;
@@ -3198,6 +3353,7 @@ static void test_ring_buffer_stress(int fd)
 	/* Step 3: inject 80 events (exceeds 64-slot ring buffer) */
 	for (i = 0; i < 80; i++) {
 		struct sle_inject_adv inject;
+
 		memset(&inject, 0, sizeof(inject));
 		inject.addr[0] = 0xA0 + (i & 0x0F);
 		inject.addr[5] = (uint8_t)(i >> 4);
@@ -3220,6 +3376,7 @@ static void test_ring_buffer_stress(int fd)
 
 	/* Step 5: check stats — should show 80 enqueued, 16 dropped */
 	struct sle_event_stats stats;
+
 	memset(&stats, 0, sizeof(stats));
 	ioctl(fd, SL_IOCTL_EVENT_STATS, &stats);
 	printf("  stats: enqueued=%lu dropped=%lu delivered=%lu\n",
@@ -3235,6 +3392,7 @@ static void test_ring_buffer_stress(int fd)
 
 	/* Step 6: drain all events, verify we get exactly 64 */
 	int drained = 0;
+
 	while (drained < 100) {
 		n = read(fd, &evt, sizeof(evt));
 		if (n < 0) {
@@ -3272,6 +3430,7 @@ static void test_multi_conn_concurrent(int fd)
 	/* Step 1: Create 3 connections to different peers */
 	for (i = 0; i < 3; i++) {
 		struct sle_connect_params cp;
+
 		memset(&cp, 0, sizeof(cp));
 		cp.peer_addr[0] = 0xF0 + i;
 		cp.peer_addr[5] = 0x10 + i;
@@ -3281,6 +3440,7 @@ static void test_multi_conn_concurrent(int fd)
 		cp.timeout_10ms = 100;
 
 		int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
 		if (ret <= 0) {
 			printf("  FAIL: CONNECT #%d: ret=%d\n", i, ret);
 			goto cleanup;
@@ -3292,6 +3452,7 @@ static void test_multi_conn_concurrent(int fd)
 	/* Step 2: Accept all connections */
 	for (i = 0; i < 3; i++) {
 		struct sle_inject_conn_resp resp;
+
 		memset(&resp, 0, sizeof(resp));
 		resp.handle = handles[i];
 		resp.response_type = 0;
@@ -3300,11 +3461,13 @@ static void test_multi_conn_concurrent(int fd)
 		resp.supervision_timeout = 100;
 
 		int ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+
 		check("INJECT_CONN_RESP", ret);
 	}
 
 	/* Step 3: Verify CONN_COUNT */
 	int ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+
 	if (ret == 3) {
 		printf("  OK:   CONN_COUNT=3\n");
 	} else {
@@ -3314,10 +3477,12 @@ static void test_multi_conn_concurrent(int fd)
 	/* Step 4: Send unique data on each connection */
 	for (i = 0; i < 3; i++) {
 		struct sle_conn_data sd;
+
 		memset(&sd, 0, sizeof(sd));
 		sd.handle = handles[i];
 		char msg[32];
 		int len = snprintf(msg, sizeof(msg), "data-conn-%d", i);
+
 		sd.length = len;
 		memcpy(sd.data, msg, len);
 
@@ -3330,10 +3495,12 @@ static void test_multi_conn_concurrent(int fd)
 	/* Step 5: Inject receive data on each connection */
 	for (i = 0; i < 3; i++) {
 		struct sle_conn_data rd;
+
 		memset(&rd, 0, sizeof(rd));
 		rd.handle = handles[i];
 		char msg[32];
 		int len = snprintf(msg, sizeof(msg), "reply-%d", i);
+
 		rd.length = len;
 		memcpy(rd.data, msg, len);
 
@@ -3342,8 +3509,10 @@ static void test_multi_conn_concurrent(int fd)
 
 	/* Step 6: Receive and verify data on each connection */
 	int match_count = 0;
+
 	for (i = 0; i < 3; i++) {
 		struct sle_conn_data recv_buf;
+
 		memset(&recv_buf, 0, sizeof(recv_buf));
 		recv_buf.handle = handles[i];
 
@@ -3369,6 +3538,7 @@ static void test_multi_conn_concurrent(int fd)
 	/* Step 7: Check per-connection stats */
 	for (i = 0; i < 3; i++) {
 		struct sle_conn_info info;
+
 		memset(&info, 0, sizeof(info));
 		info.handle = handles[i];
 		ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
@@ -3449,6 +3619,7 @@ static int genl_resolve_family(int nlfd, const char *name)
 	/* Parse CTRL_ATTR_FAMILY_ID from response */
 	char *attr_start = buf + NLMSG_HDRLEN + GENL_HDRLEN;
 	int remaining = len - NLMSG_HDRLEN - GENL_HDRLEN;
+
 	while (remaining >= (int)NLA_HDRLEN) {
 		nla = (struct nlattr *)attr_start;
 		if (nla->nla_len < NLA_HDRLEN || (int)nla->nla_len > remaining)
@@ -3456,6 +3627,7 @@ static int genl_resolve_family(int nlfd, const char *name)
 		if (nla->nla_type == CTRL_ATTR_FAMILY_ID)
 			return *(uint16_t *)((char *)nla + NLA_HDRLEN);
 		int step = NLA_ALIGN(nla->nla_len);
+
 		attr_start += step;
 		remaining -= step;
 	}
@@ -3466,6 +3638,7 @@ static int genl_send_cmd(int nlfd, uint16_t family_id, uint8_t cmd,
 			 uint32_t seq, char *resp, int resp_size)
 {
 	struct genl_msg req;
+
 	memset(&req, 0, sizeof(req));
 	req.nlh.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
 	req.nlh.nlmsg_type = family_id;
@@ -3478,12 +3651,15 @@ static int genl_send_cmd(int nlfd, uint16_t family_id, uint8_t cmd,
 		return -1;
 
 	int len = recv(nlfd, resp, resp_size, 0);
+
 	if (len < 0)
 		return -1;
 
 	struct nlmsghdr *nlh = (struct nlmsghdr *)resp;
+
 	if (nlh->nlmsg_type == NLMSG_ERROR) {
 		struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(nlh);
+
 		if (err->error != 0)
 			return err->error;
 	}
@@ -3494,13 +3670,16 @@ static uint32_t genl_get_u32_attr(char *msg, int msg_len, uint16_t attr_type)
 {
 	char *attr_start = msg + NLMSG_HDRLEN + GENL_HDRLEN;
 	int remaining = msg_len - NLMSG_HDRLEN - GENL_HDRLEN;
+
 	while (remaining >= (int)NLA_HDRLEN) {
 		struct nlattr *nla = (struct nlattr *)attr_start;
+
 		if (nla->nla_len < NLA_HDRLEN || (int)nla->nla_len > remaining)
 			break;
 		if (nla->nla_type == attr_type && nla->nla_len >= NLA_HDRLEN + 4)
 			return *(uint32_t *)((char *)nla + NLA_HDRLEN);
 		int step = NLA_ALIGN(nla->nla_len);
+
 		attr_start += step;
 		remaining -= step;
 	}
@@ -3516,25 +3695,35 @@ static uint32_t genl_get_u32_attr(char *msg, int msg_len, uint16_t attr_type)
 static int read_configfs_attr(const char *name, char *buf, size_t sz)
 {
 	char path[256];
+
 	snprintf(path, sizeof(path), CONFIGFS_BASE "/%s", name);
 	int f = open(path, O_RDONLY);
-	if (f < 0) return -1;
+
+	if (f < 0)
+		return -1;
 	ssize_t n = read(f, buf, sz - 1);
+
 	close(f);
-	if (n < 0) return -1;
+	if (n < 0)
+		return -1;
 	buf[n] = '\0';
 	/* strip trailing newline */
-	if (n > 0 && buf[n - 1] == '\n') buf[n - 1] = '\0';
+	if (n > 0 && buf[n - 1] == '\n')
+		buf[n - 1] = '\0';
 	return 0;
 }
 
 static int write_configfs_attr(const char *name, const char *val)
 {
 	char path[256];
+
 	snprintf(path, sizeof(path), CONFIGFS_BASE "/%s", name);
 	int f = open(path, O_WRONLY);
-	if (f < 0) return -1;
+
+	if (f < 0)
+		return -1;
 	ssize_t n = write(f, val, strlen(val));
+
 	close(f);
 	return n > 0 ? 0 : -1;
 }
@@ -3545,8 +3734,10 @@ static void test_phy_layer(int fd)
 
 	/* 1. Get default PHY info */
 	struct sle_phy_info info;
+
 	memset(&info, 0, sizeof(info));
 	int ret = ioctl(fd, SL_IOCTL_PHY_INFO, &info);
+
 	check("PHY_INFO", ret);
 	/* Default: MCS 4, BW 1 MHz, TX power 10 dBm */
 	if (info.mcs_index == 4 && info.bandwidth_mhz == 1 &&
@@ -3576,6 +3767,7 @@ static void test_phy_layer(int fd)
 
 	/* 2. Set MCS to 9 (16QAM 1/2 OFDM) */
 	struct sle_phy_mcs_cmd mcs_cmd = { .mcs_index = 9 };
+
 	ret = ioctl(fd, SL_IOCTL_PHY_SET_MCS, &mcs_cmd);
 	check("PHY_SET_MCS(9)", ret);
 
@@ -3601,6 +3793,7 @@ static void test_phy_layer(int fd)
 
 	/* 4. Set bandwidth to 2 MHz */
 	struct sle_phy_bw_cmd bw_cmd = { .bandwidth_mhz = 2 };
+
 	ret = ioctl(fd, SL_IOCTL_PHY_SET_BW, &bw_cmd);
 	check("PHY_SET_BW(2)", ret);
 
@@ -3625,6 +3818,7 @@ static void test_phy_layer(int fd)
 
 	/* 6. Set TX power */
 	struct sle_phy_txpower_cmd txp = { .tx_power_dbm = -10 };
+
 	ret = ioctl(fd, SL_IOCTL_PHY_SET_TXPOWER, &txp);
 	check("PHY_SET_TXPOWER(-10)", ret);
 
@@ -3647,6 +3841,7 @@ static void test_phy_layer(int fd)
 
 	/* 7. MCS selection */
 	struct sle_phy_mcs_select sel;
+
 	memset(&sel, 0, sizeof(sel));
 	sel.min_kbps = 600;
 	sel.bandwidth_mhz = 1;
@@ -3663,6 +3858,7 @@ static void test_phy_layer(int fd)
 
 	/* 8. Frequency hopping: advance channel */
 	struct sle_phy_hop_info hop;
+
 	memset(&hop, 0, sizeof(hop));
 	ret = ioctl(fd, SL_IOCTL_PHY_HOP_NEXT, &hop);
 	check("PHY_HOP_NEXT(1)", ret);
@@ -3676,6 +3872,7 @@ static void test_phy_layer(int fd)
 	/* Hop multiple times and verify channel changes */
 	uint8_t prev_ch = hop.channel;
 	int hops_changed = 0;
+
 	for (int i = 0; i < 10; i++) {
 		memset(&hop, 0, sizeof(hop));
 		ioctl(fd, SL_IOCTL_PHY_HOP_NEXT, &hop);
@@ -3847,16 +4044,19 @@ static void test_configfs_ioctl_integration(int fd)
 	/* START_ADV with interval_ms=0 should use configfs default (250) */
 	set_role(fd, 1); /* GNode */
 	struct sle_adv_params adv;
+
 	memset(&adv, 0, sizeof(adv));
 	adv.discovery_level = 1;
 	adv.interval_ms = 0; /* trigger configfs fallback */
 	int ret = ioctl(fd, SL_IOCTL_START_ADV, &adv);
+
 	check("START_ADV (interval_ms=0, configfs fallback)", ret);
 	ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
 
 	/* START_SCAN with window_ms=0 should use configfs default (150) */
 	set_role(fd, 0); /* TNode */
 	struct sle_scan_params scan;
+
 	memset(&scan, 0, sizeof(scan));
 	scan.window_ms = 0; /* trigger configfs fallback */
 	scan.interval_ms = 0; /* trigger configfs fallback (2x window) */
@@ -3871,6 +4071,7 @@ static void test_configfs_ioctl_integration(int fd)
 
 	/* Drain DLI events */
 	struct sle_dli_event ev;
+
 	for (int i = 0; i < 32; i++) {
 		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) < 0)
 			break;
@@ -3895,17 +4096,20 @@ static void test_ioctl_throughput(int fd)
 
 	/* 1. DEV_COUNT ioctl throughput (lightest ioctl, no lock contention) */
 	struct timespec t0, t1;
+
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	for (int i = 0; i < iterations; i++) {
 		ioctl(fd, SL_IOCTL_DEV_COUNT, NULL);
 	}
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	uint64_t ns = elapsed_ns(&t0, &t1);
+
 	printf("  OK:   DEV_COUNT x%d: %lu ns total, %lu ns/call\n",
 	       iterations, (unsigned long)ns, (unsigned long)(ns / iterations));
 
 	/* 2. SSAP_INFO ioctl throughput (reads global subsystem with lock) */
 	struct ssap_summary info;
+
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	for (int i = 0; i < iterations; i++) {
 		memset(&info, 0, sizeof(info));
@@ -3918,6 +4122,7 @@ static void test_ioctl_throughput(int fd)
 
 	/* 3. PM_INFO ioctl (reads power subsystem state) */
 	struct sle_pm_info pm;
+
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	for (int i = 0; i < iterations; i++) {
 		memset(&pm, 0, sizeof(pm));
@@ -3930,6 +4135,7 @@ static void test_ioctl_throughput(int fd)
 
 	/* 4. DLI_INFO ioctl (reads DLI controller info) */
 	struct sle_dli_info dli;
+
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	for (int i = 0; i < iterations; i++) {
 		memset(&dli, 0, sizeof(dli));
@@ -3952,6 +4158,7 @@ static void test_ioctl_throughput(int fd)
 
 	/* 6. GET_ROLE ioctl (field read under lock) */
 	uint8_t role;
+
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	for (int i = 0; i < iterations; i++) {
 		ioctl(fd, SL_IOCTL_GET_ROLE, &role);
@@ -3963,6 +4170,7 @@ static void test_ioctl_throughput(int fd)
 
 	/* 7. SSAP_READ latency (read a known property) */
 	struct ssap_read_write rw;
+
 	memset(&rw, 0, sizeof(rw));
 	rw.handle = 1; /* DIS property handle */
 	clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -3979,10 +4187,12 @@ static void test_ioctl_throughput(int fd)
 	/* 8. Advertise start+stop cycle latency */
 	set_role(fd, 1); /* GNode for ADV */
 	struct sle_adv_params adv;
+
 	memset(&adv, 0, sizeof(adv));
 	adv.discovery_level = 1;
 	adv.interval_ms = 100;
 	int adv_cycles = 1000;
+
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	for (int i = 0; i < adv_cycles; i++) {
 		ioctl(fd, SL_IOCTL_START_ADV, &adv);
@@ -3996,6 +4206,7 @@ static void test_ioctl_throughput(int fd)
 
 	/* Drain DLI events generated by ADV cycles */
 	struct sle_dli_event ev;
+
 	for (int i = 0; i < 64; i++) {
 		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) < 0)
 			break;
@@ -4016,12 +4227,14 @@ static void test_multi_controller(int fd)
 	 */
 	uint16_t mask = 0;
 	int ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
+
 	if (ret < 0) {
 		printf("  FAIL: DEV_LIST ioctl: %s\n", strerror(errno));
 		return;
 	}
 	/* At least one device (the virtual controller) should be registered. */
 	int count = __builtin_popcount(mask);
+
 	if (count < 1) {
 		printf("  FAIL: DEV_LIST returned 0 devices\n");
 		return;
@@ -4032,6 +4245,7 @@ static void test_multi_controller(int fd)
 	 * DEV_SWITCH to a non-existent device should fail with ENODEV.
 	 */
 	uint16_t bad_id = 15;
+
 	ret = ioctl(fd, SL_IOCTL_DEV_SWITCH, &bad_id);
 	if (ret == 0) {
 		printf("  FAIL: DEV_SWITCH to non-existent dev15 succeeded\n");
@@ -4047,6 +4261,7 @@ static void test_multi_controller(int fd)
 	 */
 	int first_id = __builtin_ctz(mask);
 	uint16_t cur_id = (uint16_t)first_id;
+
 	ret = ioctl(fd, SL_IOCTL_DEV_SWITCH, &cur_id);
 	if (ret < 0) {
 		printf("  FAIL: DEV_SWITCH to current device (sle%d): %s\n",
@@ -4079,6 +4294,7 @@ static void test_multi_controller(int fd)
 
 		/* Switch to device B */
 		uint16_t target = (uint16_t)id_b;
+
 		ret = ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 		if (ret < 0) {
 			printf("  FAIL: DEV_SWITCH to sle%d: %s\n",
@@ -4089,6 +4305,7 @@ static void test_multi_controller(int fd)
 
 		/* Verify DEV_LIST unchanged after switch */
 		uint16_t new_mask = 0;
+
 		ret = ioctl(fd, SL_IOCTL_DEV_LIST, &new_mask);
 		if (ret < 0) {
 			printf("  FAIL: DEV_LIST after switch: %s\n",
@@ -4146,11 +4363,13 @@ static void test_e2e_data_path(int fd)
 
 	uint16_t mask = 0;
 	int ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
+
 	if (ret < 0) {
 		printf("  FAIL: DEV_LIST: %s\n", strerror(errno));
 		return;
 	}
 	int dev_count = __builtin_popcount(mask);
+
 	if (dev_count < 2) {
 		printf("  OK:   Skipped (need 2+ controllers, have %d)\n", dev_count);
 		return;
@@ -4158,8 +4377,12 @@ static void test_e2e_data_path(int fd)
 
 	/* Find another controller besides sle0 */
 	int id_other = -1;
+
 	for (int i = 1; i < 16; i++) {
-		if (mask & (1u << i)) { id_other = i; break; }
+		if (mask & (1u << i)) {
+			id_other = i;
+			break;
+		}
 	}
 	if (id_other < 0) {
 		printf("  FAIL: cannot find second controller in mask 0x%04x\n", mask);
@@ -4177,6 +4400,7 @@ static void test_e2e_data_path(int fd)
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 
 	struct sle_connect_params cp0;
+
 	memset(&cp0, 0, sizeof(cp0));
 	cp0.peer_addr[0] = 0xE0;
 	cp0.peer_addr[5] = 0x01;
@@ -4188,11 +4412,13 @@ static void test_e2e_data_path(int fd)
 		goto cleanup;
 	}
 	uint16_t h0 = (uint16_t)ret;
+
 	printf("  OK:   sle0 CONNECT handle=%u\n", h0);
 	ok_count++;
 
 	/* Accept connection so we can send/receive data */
 	struct sle_inject_conn_resp resp0;
+
 	memset(&resp0, 0, sizeof(resp0));
 	resp0.handle = h0;
 	resp0.response_type = 0;
@@ -4203,9 +4429,11 @@ static void test_e2e_data_path(int fd)
 
 	/* Send data */
 	struct sle_conn_data sd0;
+
 	memset(&sd0, 0, sizeof(sd0));
 	sd0.handle = h0;
 	const char *msg0 = "sle0-payload-e2e";
+
 	sd0.length = strlen(msg0);
 	memcpy(sd0.data, msg0, sd0.length);
 	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd0);
@@ -4218,14 +4446,17 @@ static void test_e2e_data_path(int fd)
 
 	/* Inject data and read it back */
 	struct sle_conn_data inj0;
+
 	memset(&inj0, 0, sizeof(inj0));
 	inj0.handle = h0;
 	const char *reply0 = "reply-for-sle0";
+
 	inj0.length = strlen(reply0);
 	memcpy(inj0.data, reply0, inj0.length);
 	ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj0);
 
 	struct sle_conn_data recv0;
+
 	memset(&recv0, 0, sizeof(recv0));
 	recv0.handle = h0;
 	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &recv0);
@@ -4271,12 +4502,14 @@ static void test_e2e_data_path(int fd)
 	 * Step 3: On sle_x — create independent connection.
 	 */
 	struct sle_connect_params cpx;
+
 	memset(&cpx, 0, sizeof(cpx));
 	cpx.peer_addr[0] = 0xF0;
 	cpx.peer_addr[5] = 0x02;
 	cpx.gt_role = 1;
 	ret = ioctl(fd, SL_IOCTL_CONNECT, &cpx);
 	uint16_t hx = 0;
+
 	if (ret > 0) {
 		hx = (uint16_t)ret;
 		printf("  OK:   sle%d CONNECT handle=%u\n", id_other, hx);
@@ -4284,15 +4517,18 @@ static void test_e2e_data_path(int fd)
 
 		/* Accept and send data on sle_x */
 		struct sle_inject_conn_resp respx;
+
 		memset(&respx, 0, sizeof(respx));
 		respx.handle = hx;
 		respx.response_type = 0;
 		ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &respx);
 
 		struct sle_conn_data sdx;
+
 		memset(&sdx, 0, sizeof(sdx));
 		sdx.handle = hx;
 		const char *msgx = "sle_x-independent";
+
 		sdx.length = strlen(msgx);
 		memcpy(sdx.data, msgx, sdx.length);
 		ioctl(fd, SL_IOCTL_CONN_SEND, &sdx);
@@ -4322,6 +4558,7 @@ static void test_e2e_data_path(int fd)
 
 	/* Verify connection info is intact */
 	struct sle_conn_info info0;
+
 	memset(&info0, 0, sizeof(info0));
 	info0.handle = h0;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info0);
@@ -4382,11 +4619,13 @@ static void test_air_medium_connect(int fd)
 
 	uint16_t mask = 0;
 	int ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
+
 	if (ret < 0) {
 		printf("  FAIL: DEV_LIST: %s\n", strerror(errno));
 		return;
 	}
 	int dev_count = __builtin_popcount(mask);
+
 	if (dev_count < 3) {
 		printf("  OK:   Skipped (need 3+ controllers, have %d)\n", dev_count);
 		return;
@@ -4394,10 +4633,15 @@ static void test_air_medium_connect(int fd)
 
 	/* Find two USB controllers (skip sle0) */
 	int id_a = -1, id_b = -1;
+
 	for (int i = 1; i < 16; i++) {
 		if (mask & (1u << i)) {
-			if (id_a < 0) id_a = i;
-			else if (id_b < 0) { id_b = i; break; }
+			if (id_a < 0)
+				id_a = i;
+			else if (id_b < 0) {
+				id_b = i;
+				break;
+			}
 		}
 	}
 	if (id_a < 0 || id_b < 0) {
@@ -4414,10 +4658,12 @@ static void test_air_medium_connect(int fd)
 	 * USB controllers from previous tests.
 	 */
 	int controllers[] = { id_a, id_b };
+
 	for (int c = 0; c < 2; c++) {
 		target = (uint16_t)controllers[c];
 		ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 		struct sle_conn_list cl;
+
 		memset(&cl, 0, sizeof(cl));
 		if (ioctl(fd, SL_IOCTL_CONN_LIST, &cl) == 0) {
 			for (int j = 0; j < cl.count && j < 8; j++) {
@@ -4433,9 +4679,11 @@ static void test_air_medium_connect(int fd)
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 
 	uint8_t role = 1; /* GNode for broadcasting */
+
 	ioctl(fd, SL_IOCTL_SET_ROLE, &role);
 
 	struct sle_adv_params adv;
+
 	memset(&adv, 0, sizeof(adv));
 	adv.dev_index = 0;
 	adv.discovery_level = 1;
@@ -4456,6 +4704,7 @@ static void test_air_medium_connect(int fd)
 	ioctl(fd, SL_IOCTL_SET_ROLE, &role);
 
 	struct sle_scan_params scan;
+
 	memset(&scan, 0, sizeof(scan));
 	scan.dev_index = 0;
 	scan.window_ms = 50;
@@ -4472,13 +4721,14 @@ static void test_air_medium_connect(int fd)
 	usleep(200000);
 
 	int scan_count = ioctl(fd, SL_IOCTL_SCAN_RESULT_COUNT, NULL);
+
 	if (scan_count > 0) {
 		printf("  OK:   sle%d found %d device(s) via air medium\n",
 		       id_b, scan_count);
 		ok_count++;
 	} else {
-		printf("  WARN: sle%d scan_count=%d (air broadcast may not"
-		       " have reached scan)\n", id_b, scan_count);
+		printf("  WARN: sle%d scan_count=%d (air broadcast may not have reached scan)\n",
+		       id_b, scan_count);
 	}
 
 	ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
@@ -4491,6 +4741,7 @@ static void test_air_medium_connect(int fd)
 	 * the CONN_INFO to verify the peer_addr matches.
 	 */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xDE;
 	cp.peer_addr[1] = 0xAD;
@@ -4503,12 +4754,14 @@ static void test_air_medium_connect(int fd)
 	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
 	if (ret > 0) {
 		uint16_t handle_b = (uint16_t)ret;
+
 		printf("  OK:   sle%d CONNECT to sle%d via air medium (handle=%u)\n",
 		       id_b, id_a, handle_b);
 		ok_count++;
 
 		/* Verify connection info shows the right peer */
 		struct sle_conn_info info;
+
 		memset(&info, 0, sizeof(info));
 		info.handle = handle_b;
 		ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
@@ -4524,6 +4777,7 @@ static void test_air_medium_connect(int fd)
 
 		/* Accept the connection for data exchange */
 		struct sle_inject_conn_resp resp;
+
 		memset(&resp, 0, sizeof(resp));
 		resp.handle = handle_b;
 		resp.response_type = 0;
@@ -4533,9 +4787,11 @@ static void test_air_medium_connect(int fd)
 		 * Bulk OUT to QEMU Device B, which relays via air medium
 		 * to QEMU Device A's data queue. */
 		struct sle_conn_data sd;
+
 		memset(&sd, 0, sizeof(sd));
 		sd.handle = handle_b;
 		const char *msg = "air-medium-test";
+
 		sd.length = strlen(msg);
 		memcpy(sd.data, msg, sd.length);
 		ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
@@ -4556,6 +4812,7 @@ static void test_air_medium_connect(int fd)
 
 		/* Find sle_a's connection handle via CONN_LIST */
 		struct sle_conn_list cl_a;
+
 		memset(&cl_a, 0, sizeof(cl_a));
 		ret = ioctl(fd, SL_IOCTL_CONN_LIST, &cl_a);
 		if (ret == 0 && cl_a.count > 0) {
@@ -4564,6 +4821,7 @@ static void test_air_medium_connect(int fd)
 			ok_count++;
 
 			struct sle_conn_data rd;
+
 			memset(&rd, 0, sizeof(rd));
 			rd.handle = cl_a.handles[0];
 			ret = ioctl(fd, SL_IOCTL_CONN_RECV, &rd);
@@ -4616,9 +4874,11 @@ static void test_conn_invalid_handle(int fd)
 
 	/* Step 1: CONN_INFO on non-existent handle */
 	struct sle_conn_info info;
+
 	memset(&info, 0, sizeof(info));
 	info.handle = 0xBEEF;
 	int ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+
 	if (ret < 0 && errno == ENOENT) {
 		printf("  OK:   CONN_INFO(0xBEEF): ENOENT\n");
 	} else {
@@ -4628,6 +4888,7 @@ static void test_conn_invalid_handle(int fd)
 
 	/* Step 2: CONN_SEND on non-existent handle */
 	struct sle_conn_data sd;
+
 	memset(&sd, 0, sizeof(sd));
 	sd.handle = 0xBEEF;
 	sd.length = 4;
@@ -4642,6 +4903,7 @@ static void test_conn_invalid_handle(int fd)
 
 	/* Step 3: CONN_RECV on non-existent handle */
 	struct sle_conn_data rd;
+
 	memset(&rd, 0, sizeof(rd));
 	rd.handle = 0xBEEF;
 	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &rd);
@@ -4654,6 +4916,7 @@ static void test_conn_invalid_handle(int fd)
 
 	/* Step 4: DISCONNECT on non-existent handle */
 	uint16_t bad_h = 0xBEEF;
+
 	ret = ioctl(fd, SL_IOCTL_DISCONNECT, &bad_h);
 	if (ret < 0) {
 		printf("  OK:   DISCONNECT(0xBEEF): rejected (errno=%d)\n", errno);
@@ -4663,6 +4926,7 @@ static void test_conn_invalid_handle(int fd)
 
 	/* Step 5: INJECT_CONN_RESP on non-existent handle */
 	struct sle_inject_conn_resp resp;
+
 	memset(&resp, 0, sizeof(resp));
 	resp.handle = 0xBEEF;
 	resp.response_type = 0;
@@ -4675,6 +4939,7 @@ static void test_conn_invalid_handle(int fd)
 
 	/* Step 6: Create-then-disconnect, then operate on stale handle */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xFA;
 	cp.peer_addr[5] = 0xCE;
@@ -4685,6 +4950,7 @@ static void test_conn_invalid_handle(int fd)
 		return;
 	}
 	uint16_t stale = (uint16_t)ret;
+
 	printf("  OK:   Created connection handle=%u for stale test\n", stale);
 
 	ioctl(fd, SL_IOCTL_DISCONNECT, &stale);
@@ -4716,21 +4982,28 @@ static void test_air_medium_bidir(int fd)
 
 	uint16_t mask = 0;
 	int ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
+
 	if (ret < 0) {
 		printf("  FAIL: DEV_LIST: %s\n", strerror(errno));
 		return;
 	}
 	int dev_count = __builtin_popcount(mask);
+
 	if (dev_count < 3) {
 		printf("  OK:   Skipped (need 3+ controllers, have %d)\n", dev_count);
 		return;
 	}
 
 	int id_a = -1, id_b = -1;
+
 	for (int i = 1; i < 16; i++) {
 		if (mask & (1u << i)) {
-			if (id_a < 0) id_a = i;
-			else if (id_b < 0) { id_b = i; break; }
+			if (id_a < 0)
+				id_a = i;
+			else if (id_b < 0) {
+				id_b = i;
+				break;
+			}
 		}
 	}
 	if (id_a < 0 || id_b < 0) {
@@ -4743,10 +5016,12 @@ static void test_air_medium_bidir(int fd)
 
 	/* Pre-clean */
 	int ids[] = { id_a, id_b };
+
 	for (int c = 0; c < 2; c++) {
 		target = (uint16_t)ids[c];
 		ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 		struct sle_conn_list cl;
+
 		memset(&cl, 0, sizeof(cl));
 		if (ioctl(fd, SL_IOCTL_CONN_LIST, &cl) == 0) {
 			for (int j = 0; j < cl.count && j < 8; j++)
@@ -4759,8 +5034,10 @@ static void test_air_medium_bidir(int fd)
 	target = (uint16_t)id_a;
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 	uint8_t role = 1;
+
 	ioctl(fd, SL_IOCTL_SET_ROLE, &role);
 	struct sle_adv_params adv;
+
 	memset(&adv, 0, sizeof(adv));
 	adv.discovery_level = 1;
 	adv.interval_ms = 100;
@@ -4773,6 +5050,7 @@ static void test_air_medium_bidir(int fd)
 	ioctl(fd, SL_IOCTL_SET_ROLE, &role);
 
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xDE; cp.peer_addr[1] = 0xAD;
 	cp.peer_addr[2] = 0xBE; cp.peer_addr[3] = 0xEF;
@@ -4783,11 +5061,13 @@ static void test_air_medium_bidir(int fd)
 		goto bidir_cleanup;
 	}
 	uint16_t hb = (uint16_t)ret;
+
 	printf("  OK:   sle%d connected (handle=%u)\n", id_b, hb);
 	ok_count++;
 
 	/* Accept connection on sle_b side */
 	struct sle_inject_conn_resp resp;
+
 	memset(&resp, 0, sizeof(resp));
 	resp.handle = hb;
 	resp.response_type = 0;
@@ -4795,9 +5075,11 @@ static void test_air_medium_bidir(int fd)
 
 	/* sle_b -> sle_a data */
 	struct sle_conn_data sd;
+
 	memset(&sd, 0, sizeof(sd));
 	sd.handle = hb;
 	const char *msg_b2a = "B-to-A";
+
 	sd.length = strlen(msg_b2a);
 	memcpy(sd.data, msg_b2a, sd.length);
 	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
@@ -4814,6 +5096,7 @@ static void test_air_medium_bidir(int fd)
 	usleep(200000);
 
 	struct sle_conn_list cl_a;
+
 	memset(&cl_a, 0, sizeof(cl_a));
 	ret = ioctl(fd, SL_IOCTL_CONN_LIST, &cl_a);
 	if (ret != 0 || cl_a.count == 0) {
@@ -4821,11 +5104,13 @@ static void test_air_medium_bidir(int fd)
 		goto bidir_cleanup;
 	}
 	uint16_t ha = cl_a.handles[0];
+
 	printf("  OK:   sle%d incoming connection handle=%u\n", id_a, ha);
 	ok_count++;
 
 	/* Receive data from sle_b */
 	struct sle_conn_data rd;
+
 	memset(&rd, 0, sizeof(rd));
 	rd.handle = ha;
 	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &rd);
@@ -4842,6 +5127,7 @@ static void test_air_medium_bidir(int fd)
 	memset(&sd, 0, sizeof(sd));
 	sd.handle = ha;
 	const char *msg_a2b = "A-to-B";
+
 	sd.length = strlen(msg_a2b);
 	memcpy(sd.data, msg_a2b, sd.length);
 	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
@@ -4930,12 +5216,14 @@ static void test_conn_max_capacity(int fd)
 	/* Fill all 8 connection slots */
 	for (int i = 0; i < 8; i++) {
 		struct sle_connect_params cp;
+
 		memset(&cp, 0, sizeof(cp));
 		cp.peer_addr[0] = 0xC0;
 		cp.peer_addr[1] = (uint8_t)i;
 		cp.peer_addr[5] = (uint8_t)(0x10 + i);
 		cp.gt_role = 0;
 		int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
 		if (ret > 0) {
 			handles[created] = (uint16_t)ret;
 			created++;
@@ -4949,6 +5237,7 @@ static void test_conn_max_capacity(int fd)
 
 		/* Verify CONN_COUNT */
 		int cnt = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+
 		if (cnt == 8) {
 			printf("  OK:   CONN_COUNT=8\n");
 		} else {
@@ -4957,17 +5246,20 @@ static void test_conn_max_capacity(int fd)
 
 		/* Try 9th connection — should fail */
 		struct sle_connect_params cp9;
+
 		memset(&cp9, 0, sizeof(cp9));
 		cp9.peer_addr[0] = 0xC0;
 		cp9.peer_addr[1] = 0x08;
 		cp9.peer_addr[5] = 0x18;
 		int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp9);
+
 		if (ret < 0) {
 			printf("  OK:   9th connection rejected (errno=%d)\n", errno);
 		} else {
 			printf("  FAIL: 9th connection should have been rejected (got handle=%d)\n", ret);
 			/* Clean up the unexpected handle */
 			uint16_t h9 = (uint16_t)ret;
+
 			ioctl(fd, SL_IOCTL_DISCONNECT, &h9);
 		}
 	} else {
@@ -4980,6 +5272,7 @@ static void test_conn_max_capacity(int fd)
 	}
 
 	int cnt = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+
 	if (cnt == 0) {
 		printf("  OK:   all connections disconnected\n");
 	} else {
@@ -5004,16 +5297,19 @@ static void test_ssap_indication(int fd)
 	 *   prop2: Indicate (ops=0x08)
 	 */
 	struct ssap_add_service svc;
+
 	memset(&svc, 0, sizeof(svc));
 	svc.uuid16 = 0xFE01;
 	svc.primary = 1;
 	int ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+
 	if (ret < 0) {
 		printf("  FAIL: SSAP_ADD_SVC: %s\n", strerror(errno));
 		return;
 	}
 
 	struct ssap_add_property p_ntf;
+
 	memset(&p_ntf, 0, sizeof(p_ntf));
 	p_ntf.uuid16 = 0xFE11;
 	p_ntf.ops = 0x07; /* Read|Write|Notify */
@@ -5025,9 +5321,11 @@ static void test_ssap_indication(int fd)
 		return;
 	}
 	uint16_t h_ntf = p_ntf.handle;
+
 	printf("  OK:   Notify property handle=0x%04x\n", h_ntf);
 
 	struct ssap_add_property p_ind;
+
 	memset(&p_ind, 0, sizeof(p_ind));
 	p_ind.uuid16 = 0xFE12;
 	p_ind.ops = 0x0B; /* Read|Write|Indicate */
@@ -5039,10 +5337,12 @@ static void test_ssap_indication(int fd)
 		return;
 	}
 	uint16_t h_ind = p_ind.handle;
+
 	printf("  OK:   Indicate property handle=0x%04x\n", h_ind);
 
 	/* Write to notify property */
 	struct ssap_read_write rw;
+
 	memset(&rw, 0, sizeof(rw));
 	rw.handle = h_ntf;
 	rw.length = 1;
@@ -5068,6 +5368,7 @@ static void test_ssap_indication(int fd)
 
 	/* Dequeue and check: notify prop should produce indication=0 */
 	struct ssap_notification ntf1;
+
 	memset(&ntf1, 0, sizeof(ntf1));
 	ret = ioctl(fd, SL_IOCTL_SSAP_DEQUEUE_NTF, &ntf1);
 	if (ret == 0) {
@@ -5086,6 +5387,7 @@ static void test_ssap_indication(int fd)
 	 * The indication path requires a separate SSAP_INDICATE ioctl
 	 * which is not yet exposed. */
 	struct ssap_notification ntf2;
+
 	memset(&ntf2, 0, sizeof(ntf2));
 	ret = ioctl(fd, SL_IOCTL_SSAP_DEQUEUE_NTF, &ntf2);
 	if (ret == 0) {
@@ -5098,6 +5400,7 @@ static void test_ssap_indication(int fd)
 
 	/* Cleanup: remove service */
 	uint16_t sh = svc.start_handle;
+
 	ioctl(fd, SL_IOCTL_SSAP_REMOVE_SVC, &sh);
 }
 
@@ -5114,6 +5417,7 @@ static void test_ssap_service_discovery(int fd)
 
 	/* Get baseline service count */
 	struct ssap_summary base;
+
 	memset(&base, 0, sizeof(base));
 	ioctl(fd, SL_IOCTL_SSAP_INFO, &base);
 	int base_count = base.service_count;
@@ -5124,10 +5428,12 @@ static void test_ssap_service_discovery(int fd)
 
 	for (int i = 0; i < 3; i++) {
 		struct ssap_add_service svc;
+
 		memset(&svc, 0, sizeof(svc));
 		svc.uuid16 = uuids[i];
 		svc.primary = 1;
 		int ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+
 		if (ret < 0) {
 			printf("  FAIL: add service 0x%04x: %s\n", uuids[i], strerror(errno));
 			goto sd_cleanup;
@@ -5139,6 +5445,7 @@ static void test_ssap_service_discovery(int fd)
 
 	/* Verify total service count increased by 3 */
 	struct ssap_summary info;
+
 	memset(&info, 0, sizeof(info));
 	ioctl(fd, SL_IOCTL_SSAP_INFO, &info);
 	if ((int)info.service_count == base_count + 3) {
@@ -5151,14 +5458,17 @@ static void test_ssap_service_discovery(int fd)
 
 	/* Find all services */
 	struct ssap_service_list slist;
+
 	memset(&slist, 0, sizeof(slist));
 	int ret = ioctl(fd, SL_IOCTL_SSAP_FIND_SVC, &slist);
+
 	if (ret == 0) {
 		printf("  OK:   FIND_SVC returned %u services\n", slist.count);
 
 		/* Verify all UUIDs are present */
 		for (int i = 0; i < 3; i++) {
 			int found = 0;
+
 			for (int j = 0; j < slist.count; j++) {
 				if (slist.services[j].uuid16 == uuids[i]) {
 					found = 1;
@@ -5195,6 +5505,7 @@ static void test_dev_switch_isolation(int fd)
 
 	uint16_t mask = 0;
 	int ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
+
 	if (ret < 0 || __builtin_popcount(mask) < 2) {
 		printf("  OK:   Skipped (need 2+ controllers)\n");
 		return;
@@ -5202,8 +5513,12 @@ static void test_dev_switch_isolation(int fd)
 
 	/* Find sle0 and another controller */
 	int id_other = -1;
+
 	for (int i = 1; i < 16; i++) {
-		if (mask & (1u << i)) { id_other = i; break; }
+		if (mask & (1u << i)) {
+			id_other = i;
+			break;
+		}
 	}
 	if (id_other < 0) {
 		printf("  OK:   Skipped (no second controller)\n");
@@ -5217,16 +5532,19 @@ static void test_dev_switch_isolation(int fd)
 	target = 0;
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 	uint8_t role_g = 1;
+
 	ioctl(fd, SL_IOCTL_SET_ROLE, &role_g);
 
 	/* Set sle_other as TNode */
 	target = (uint16_t)id_other;
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 	uint8_t role_t = 0;
+
 	ioctl(fd, SL_IOCTL_SET_ROLE, &role_t);
 
 	/* Verify roles are independent */
 	uint8_t r;
+
 	ret = ioctl(fd, SL_IOCTL_GET_ROLE, &r);
 	if (ret == 0 && r == 0) {
 		printf("  OK:   sle%d role=TNode\n", id_other);
@@ -5247,10 +5565,12 @@ static void test_dev_switch_isolation(int fd)
 
 	/* Create a connection on sle0 only */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xD1; cp.peer_addr[5] = 0x0D;
 	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
 	uint16_t h0 = 0;
+
 	if (ret > 0) {
 		h0 = (uint16_t)ret;
 		printf("  OK:   sle0 connection handle=%u\n", h0);
@@ -5313,10 +5633,12 @@ static void test_ssap_prop_edge_cases(int fd)
 
 	/* Add a test service with properties of different capabilities */
 	struct ssap_add_service svc;
+
 	memset(&svc, 0, sizeof(svc));
 	svc.uuid16 = 0xFE20;
 	svc.primary = 1;
 	int ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+
 	if (ret < 0) {
 		printf("  FAIL: add service: %s\n", strerror(errno));
 		return;
@@ -5325,6 +5647,7 @@ static void test_ssap_prop_edge_cases(int fd)
 
 	/* Read-only property */
 	struct ssap_add_property p_ro;
+
 	memset(&p_ro, 0, sizeof(p_ro));
 	p_ro.uuid16 = 0xFE21;
 	p_ro.ops = 0x01; /* Read only */
@@ -5339,6 +5662,7 @@ static void test_ssap_prop_edge_cases(int fd)
 
 	/* Read-write property */
 	struct ssap_add_property p_rw;
+
 	memset(&p_rw, 0, sizeof(p_rw));
 	p_rw.uuid16 = 0xFE22;
 	p_rw.ops = 0x03; /* Read | Write */
@@ -5352,6 +5676,7 @@ static void test_ssap_prop_edge_cases(int fd)
 
 	/* Test 1: Write to read-only property should fail */
 	struct ssap_read_write rw;
+
 	memset(&rw, 0, sizeof(rw));
 	rw.handle = h_ro;
 	rw.length = 1;
@@ -5442,16 +5767,19 @@ static void test_scan_filter_reject(int fd)
 
 	/* Start scan with strict filter: only level >= 3 */
 	struct sle_scan_params scan;
+
 	memset(&scan, 0, sizeof(scan));
 	scan.window_ms = 50;
 	scan.interval_ms = 100;
 	scan.filter_discovery_level = 3;
 
 	int ret = ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+
 	check("START_SCAN (filter>=3)", ret);
 
 	/* Inject advertisements at levels 0, 1, 2 — all should be rejected */
 	struct sle_inject_adv inject;
+
 	for (uint8_t level = 0; level < 3; level++) {
 		memset(&inject, 0, sizeof(inject));
 		inject.addr[5] = 0x30 + level;
@@ -5527,7 +5855,7 @@ struct sle_dli_cmd {
 	uint16_t param_len;
 	uint32_t seq;
 	uint8_t  params[240];
-} __attribute__((packed));
+} __packed;
 
 struct sle_mgmt_stats {
 	uint16_t pending;
@@ -5535,7 +5863,7 @@ struct sle_mgmt_stats {
 	uint32_t total_submitted;
 	uint32_t total_resolved;
 	uint32_t total_timeouts;
-} __attribute__((packed));
+} __packed;
 
 #define SL_IOCTL_DLI_SEND_CMD _IOWR(SL_MAGIC, 0x84, struct sle_dli_cmd)
 #define SL_IOCTL_MGMT_STATS   _IOR(SL_MAGIC, 0x85, struct sle_mgmt_stats)
@@ -5546,8 +5874,10 @@ static void test_dli_mgmt_plane(int fd)
 
 	/* Step 1: Baseline MGMT_STATS */
 	struct sle_mgmt_stats ms0;
+
 	memset(&ms0, 0, sizeof(ms0));
 	int ret = ioctl(fd, SL_IOCTL_MGMT_STATS, &ms0);
+
 	check("MGMT_STATS (baseline)", ret);
 	if (ret == 0) {
 		printf("  OK:   baseline: pending=%u submitted=%u resolved=%u timeouts=%u\n",
@@ -5559,6 +5889,7 @@ static void test_dli_mgmt_plane(int fd)
 
 	/* Step 2: Submit a DLI command (ReadCmdLen, opcode=0x0401) */
 	struct sle_dli_cmd cmd1;
+
 	memset(&cmd1, 0, sizeof(cmd1));
 	cmd1.opcode = 0x0401;   /* ReadCmdLen — valid SleOpcode */
 	cmd1.param_len = 0;
@@ -5572,6 +5903,7 @@ static void test_dli_mgmt_plane(int fd)
 
 	/* Step 3: Check MGMT_STATS after first command */
 	struct sle_mgmt_stats ms1;
+
 	memset(&ms1, 0, sizeof(ms1));
 	ret = ioctl(fd, SL_IOCTL_MGMT_STATS, &ms1);
 	check("MGMT_STATS (after cmd1)", ret);
@@ -5587,6 +5919,7 @@ static void test_dli_mgmt_plane(int fd)
 
 	/* Step 4: Submit a second command (ReadLocalFeatures, opcode=0x0403) */
 	struct sle_dli_cmd cmd2;
+
 	memset(&cmd2, 0, sizeof(cmd2));
 	cmd2.opcode = 0x0403;   /* ReadLocalFeatures — valid SleOpcode */
 	cmd2.param_len = 0;
@@ -5606,6 +5939,7 @@ static void test_dli_mgmt_plane(int fd)
 
 	/* Step 5: Final MGMT_STATS */
 	struct sle_mgmt_stats ms2;
+
 	memset(&ms2, 0, sizeof(ms2));
 	ret = ioctl(fd, SL_IOCTL_MGMT_STATS, &ms2);
 	check("MGMT_STATS (after cmd2)", ret);
@@ -5634,6 +5968,7 @@ static void test_conn_info_fields(int fd)
 	set_role(fd, 0); /* TNode */
 
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xF1;
 	cp.peer_addr[1] = 0xF2;
@@ -5644,15 +5979,18 @@ static void test_conn_info_fields(int fd)
 	cp.timeout_10ms = 200; /* 2000ms supervision */
 
 	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
 	if (ret <= 0) {
 		printf("  FAIL: CONNECT returned %d (%s)\n", ret, strerror(errno));
 		return;
 	}
 	uint16_t h = (uint16_t)ret;
+
 	printf("  OK:   CONNECT handle=%u\n", h);
 
 	/* Inject access-response to move to Connected (state=2) */
 	struct sle_inject_conn_resp resp;
+
 	memset(&resp, 0, sizeof(resp));
 	resp.handle = h;
 	resp.response_type = 0;
@@ -5664,6 +6002,7 @@ static void test_conn_info_fields(int fd)
 
 	/* Query and validate fields */
 	struct sle_conn_info info;
+
 	memset(&info, 0, sizeof(info));
 	info.handle = h;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
@@ -5729,6 +6068,7 @@ static void test_conn_info_fields(int fd)
 
 	/* Clean up */
 	uint16_t dh = h;
+
 	ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
 }
 
@@ -5745,16 +6085,20 @@ static void test_ssap_multi_notify(int fd)
 
 	/* Register a service with 3 notifiable properties */
 	struct ssap_add_service svc;
+
 	memset(&svc, 0, sizeof(svc));
 	svc.uuid16 = 0x2000;
 	svc.primary = 1;
 	int ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+
 	check("ADD_SVC (0x2000)", ret);
 	uint16_t svc_h = svc.start_handle;
 
 	uint16_t handles[3];
+
 	for (int i = 0; i < 3; i++) {
 		struct ssap_add_property prop;
+
 		memset(&prop, 0, sizeof(prop));
 		prop.uuid16 = 0x2001 + i;
 		prop.ops = 0x07;  /* Read + Write + Notify */
@@ -5768,6 +6112,7 @@ static void test_ssap_multi_notify(int fd)
 	/* Write distinct values to each */
 	for (int i = 0; i < 3; i++) {
 		struct ssap_read_write rw;
+
 		memset(&rw, 0, sizeof(rw));
 		rw.handle = handles[i];
 		rw.data[0] = 0xA0 + i;
@@ -5780,14 +6125,17 @@ static void test_ssap_multi_notify(int fd)
 	/* Trigger notifications for all 3 — ordered */
 	for (int i = 0; i < 3; i++) {
 		uint16_t nh = handles[i];
+
 		ret = ioctl(fd, SL_IOCTL_SSAP_NOTIFY, &nh);
 		check("SSAP_NOTIFY", ret);
 	}
 
 	/* Dequeue and verify order + data */
 	int ok_count = 0;
+
 	for (int i = 0; i < 3; i++) {
 		struct ssap_notification ntf;
+
 		memset(&ntf, 0, sizeof(ntf));
 		ret = ioctl(fd, SL_IOCTL_SSAP_DEQUEUE_NTF, &ntf);
 		if (ret == 0) {
@@ -5812,6 +6160,7 @@ static void test_ssap_multi_notify(int fd)
 
 	/* Verify queue is now empty */
 	struct ssap_notification ntf_extra;
+
 	memset(&ntf_extra, 0, sizeof(ntf_extra));
 	ret = ioctl(fd, SL_IOCTL_SSAP_DEQUEUE_NTF, &ntf_extra);
 	if (ret < 0 && errno == EAGAIN) {
@@ -5835,15 +6184,18 @@ static void test_ssap_write_readonly(int fd)
 	test_header("SSAP: write permission enforcement (§10.5)");
 
 	struct ssap_add_service svc;
+
 	memset(&svc, 0, sizeof(svc));
 	svc.uuid16 = 0x2100;
 	svc.primary = 1;
 	int ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+
 	check("ADD_SVC (0x2100)", ret);
 	uint16_t svc_h = svc.start_handle;
 
 	/* Read-only property (ops = 0x01) */
 	struct ssap_add_property prop_ro;
+
 	memset(&prop_ro, 0, sizeof(prop_ro));
 	prop_ro.uuid16 = 0x2101;
 	prop_ro.ops = 0x01; /* Read only */
@@ -5853,6 +6205,7 @@ static void test_ssap_write_readonly(int fd)
 
 	/* Write-only property (ops = 0x02) */
 	struct ssap_add_property prop_wo;
+
 	memset(&prop_wo, 0, sizeof(prop_wo));
 	prop_wo.uuid16 = 0x2102;
 	prop_wo.ops = 0x02; /* Write only */
@@ -5862,6 +6215,7 @@ static void test_ssap_write_readonly(int fd)
 
 	/* Test 1: Write to read-only should fail */
 	struct ssap_read_write rw;
+
 	memset(&rw, 0, sizeof(rw));
 	rw.handle = h_ro;
 	rw.data[0] = 0x42;
@@ -5917,6 +6271,7 @@ static void test_conn_data_counters(int fd)
 
 	/* Create connection */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xE1;
 	cp.peer_addr[5] = 0xE2;
@@ -5926,6 +6281,7 @@ static void test_conn_data_counters(int fd)
 	cp.timeout_10ms = 100;
 
 	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
 	if (ret <= 0) {
 		printf("  FAIL: CONNECT: %s\n", strerror(errno));
 		return;
@@ -5934,6 +6290,7 @@ static void test_conn_data_counters(int fd)
 
 	/* Inject response to move to Connected */
 	struct sle_inject_conn_resp resp;
+
 	memset(&resp, 0, sizeof(resp));
 	resp.handle = h;
 	resp.response_type = 0;
@@ -5944,6 +6301,7 @@ static void test_conn_data_counters(int fd)
 
 	/* Verify initial counters = 0 */
 	struct sle_conn_info info;
+
 	memset(&info, 0, sizeof(info));
 	info.handle = h;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
@@ -5954,6 +6312,7 @@ static void test_conn_data_counters(int fd)
 
 	/* Send 10 bytes */
 	struct sle_conn_data sd;
+
 	memset(&sd, 0, sizeof(sd));
 	sd.handle = h;
 	sd.length = 10;
@@ -5978,6 +6337,7 @@ static void test_conn_data_counters(int fd)
 
 	/* Inject received data (20 bytes) */
 	struct sle_conn_data id;
+
 	memset(&id, 0, sizeof(id));
 	id.handle = h;
 	id.length = 20;
@@ -6022,6 +6382,7 @@ static void test_conn_data_counters(int fd)
 	}
 
 	uint16_t dh = h;
+
 	ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
 }
 
@@ -6040,19 +6401,23 @@ static void test_pm_state_transitions(int fd)
 
 	/* Get initial state */
 	struct sle_pm_info pm;
+
 	memset(&pm, 0, sizeof(pm));
 	int ret = ioctl(fd, SL_IOCTL_PM_INFO, &pm);
+
 	check("PM_INFO (initial)", ret);
 	if (ret == 0)
 		printf("  initial state=%u\n", pm.state);
 
 	/* Ensure we start in Active with no force-active */
 	struct sle_pm_state_cmd sc;
+
 	memset(&sc, 0, sizeof(sc));
 	sc.target_state = 0; /* Active */
 	ioctl(fd, SL_IOCTL_PM_SET_STATE, &sc);
 
 	uint8_t fa_off = 0;
+
 	ioctl(fd, SL_IOCTL_PM_FORCE_ACTIVE, &fa_off);
 
 	/* Transition: Active → Suspend → Active (SET_STATE only supports
@@ -6092,6 +6457,7 @@ static void test_pm_state_transitions(int fd)
 
 	/* Tick-based Sniff transition: need interval set first */
 	struct sle_pm_interval intv;
+
 	memset(&intv, 0, sizeof(intv));
 	intv.min_interval = 16;
 	intv.max_interval = 32;
@@ -6115,6 +6481,7 @@ static void test_pm_state_transitions(int fd)
 
 	/* Force-active toggle */
 	uint8_t fa = 1;
+
 	ret = ioctl(fd, SL_IOCTL_PM_FORCE_ACTIVE, &fa);
 	check("PM_FORCE_ACTIVE (enable)", ret);
 
@@ -6280,6 +6647,7 @@ static void test_conn_send_bounds(int fd)
 
 	/* Create connection but DON'T inject response — stays Connecting */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xD1;
 	cp.peer_addr[5] = 0xD2;
@@ -6289,15 +6657,18 @@ static void test_conn_send_bounds(int fd)
 	cp.timeout_10ms = 100;
 
 	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
 	if (ret <= 0) {
 		printf("  FAIL: CONNECT: %s\n", strerror(errno));
 		return;
 	}
 	uint16_t h = (uint16_t)ret;
+
 	printf("  OK:   CONNECT handle=%u (Connecting state)\n", h);
 
 	/* Send during Connecting — should fail */
 	struct sle_conn_data sd;
+
 	memset(&sd, 0, sizeof(sd));
 	sd.handle = h;
 	sd.data[0] = 0x42;
@@ -6336,6 +6707,7 @@ static void test_conn_send_bounds(int fd)
 
 	/* Now inject response, move to Connected, verify send works */
 	struct sle_inject_conn_resp resp;
+
 	memset(&resp, 0, sizeof(resp));
 	resp.handle = h;
 	resp.response_type = 0;
@@ -6352,6 +6724,7 @@ static void test_conn_send_bounds(int fd)
 	check("CONN_SEND (Connected, 1 byte)", ret);
 
 	uint16_t dh = h;
+
 	ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
 }
 
@@ -6371,15 +6744,18 @@ static void test_ssap_permission_matrix(int fd)
 
 	/* Register service */
 	struct ssap_add_service svc;
+
 	memset(&svc, 0, sizeof(svc));
 	svc.uuid16 = 0x2200;
 	svc.primary = 1;
 	int ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &svc);
+
 	check("ADD_SVC (0x2200)", ret);
 	uint16_t svc_h = svc.start_handle;
 
 	/* Property: Read-only (0x01) */
 	struct ssap_add_property p_ro;
+
 	memset(&p_ro, 0, sizeof(p_ro));
 	p_ro.uuid16 = 0x2201;
 	p_ro.ops = 0x01;
@@ -6388,6 +6764,7 @@ static void test_ssap_permission_matrix(int fd)
 
 	/* Property: Write-only (0x02) */
 	struct ssap_add_property p_wo;
+
 	memset(&p_wo, 0, sizeof(p_wo));
 	p_wo.uuid16 = 0x2202;
 	p_wo.ops = 0x02;
@@ -6396,6 +6773,7 @@ static void test_ssap_permission_matrix(int fd)
 
 	/* Property: Read+Write (0x03) */
 	struct ssap_add_property p_rw;
+
 	memset(&p_rw, 0, sizeof(p_rw));
 	p_rw.uuid16 = 0x2203;
 	p_rw.ops = 0x03;
@@ -6404,6 +6782,7 @@ static void test_ssap_permission_matrix(int fd)
 
 	/* Property: Notify-only (0x04) */
 	struct ssap_add_property p_ntf;
+
 	memset(&p_ntf, 0, sizeof(p_ntf));
 	p_ntf.uuid16 = 0x2204;
 	p_ntf.ops = 0x04;
@@ -6505,6 +6884,7 @@ static void test_ssap_permission_matrix(int fd)
 
 	/* Notify on invalid handle */
 	uint16_t bogus = 0xFFFF;
+
 	ret = ioctl(fd, SL_IOCTL_SSAP_NOTIFY, &bogus);
 	if (ret < 0)
 		printf("  OK:   NOTIFY handle=0xFFFF rejected (%s)\n",
@@ -6529,6 +6909,7 @@ static void test_conn_stale_handle_ops(int fd)
 
 	/* Create and disconnect a connection to get a stale handle */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xC1;
 	cp.peer_addr[5] = 0xC2;
@@ -6538,20 +6919,24 @@ static void test_conn_stale_handle_ops(int fd)
 	cp.timeout_10ms = 100;
 
 	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
 	if (ret <= 0) {
 		printf("  FAIL: CONNECT: %s\n", strerror(errno));
 		return;
 	}
 	uint16_t h = (uint16_t)ret;
+
 	printf("  OK:   Created handle=%u\n", h);
 
 	/* Disconnect */
 	uint16_t dh = h;
+
 	ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
 	usleep(10000); /* wait for cleanup */
 
 	/* All operations on stale handle should fail */
 	struct sle_conn_info info;
+
 	memset(&info, 0, sizeof(info));
 	info.handle = h;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
@@ -6564,6 +6949,7 @@ static void test_conn_stale_handle_ops(int fd)
 	}
 
 	struct sle_conn_data sd;
+
 	memset(&sd, 0, sizeof(sd));
 	sd.handle = h;
 	sd.data[0] = 0x42;
@@ -6675,13 +7061,16 @@ static void test_event_overflow(int fd)
 
 	/* Drain any existing events */
 	struct sle_wire_event we;
+
 	while (read(fd, &we, sizeof(we)) > 0)
 		;
 
 	/* Get baseline stats */
 	struct sle_event_stats es0;
+
 	memset(&es0, 0, sizeof(es0));
 	int ret = ioctl(fd, SL_IOCTL_EVENT_STATS, &es0);
+
 	check("EVENT_STATS (baseline)", ret);
 	uint32_t base_dropped = es0.total_dropped;
 
@@ -6690,6 +7079,7 @@ static void test_event_overflow(int fd)
 	set_role(fd, 0);
 	for (int i = 0; i < 80; i++) {
 		struct sle_connect_params cp;
+
 		memset(&cp, 0, sizeof(cp));
 		cp.peer_addr[0] = (uint8_t)(i + 1);
 		cp.peer_addr[5] = (uint8_t)(i + 0x80);
@@ -6698,14 +7088,17 @@ static void test_event_overflow(int fd)
 		cp.mcs_index = 4;
 		cp.timeout_10ms = 100;
 		int h = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
 		if (h > 0) {
 			uint16_t dh = (uint16_t)h;
+
 			ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
 		}
 	}
 
 	/* Check event stats */
 	struct sle_event_stats es1;
+
 	memset(&es1, 0, sizeof(es1));
 	ret = ioctl(fd, SL_IOCTL_EVENT_STATS, &es1);
 	check("EVENT_STATS (after overflow)", ret);
@@ -6727,6 +7120,7 @@ static void test_event_overflow(int fd)
 
 	/* Drain and verify events are still valid */
 	int drained = 0;
+
 	while (read(fd, &we, sizeof(we)) > 0)
 		drained++;
 	printf("  OK:   Drained %d events after overflow\n", drained);
@@ -6755,14 +7149,18 @@ static void test_security_state_machine(int fd)
 
 	/* Check current security state */
 	struct sle_sec_info si;
+
 	memset(&si, 0, sizeof(si));
 	int ret = ioctl(fd, SL_IOCTL_SEC_INFO, &si);
+
 	check("SEC_INFO (query current state)", ret);
 	uint8_t initial_state = (ret == 0) ? si.state : 0;
+
 	printf("  initial security state=%u\n", initial_state);
 
 	/* 1. Invalid pairing method (method=99) — always fails regardless of state */
 	struct sle_pair_params pp;
+
 	memset(&pp, 0, sizeof(pp));
 	pp.method = 99;
 	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pp);
@@ -6880,10 +7278,12 @@ static void test_adv_scan_role_enforcement(int fd)
 	/* Set TNode and try to advertise — should fail */
 	set_role(fd, 0); /* TNode */
 	struct sle_adv_params ap;
+
 	memset(&ap, 0, sizeof(ap));
 	ap.interval_ms = 100;
 	ap.discovery_level = 0;
 	int ret = ioctl(fd, SL_IOCTL_START_ADV, &ap);
+
 	if (ret < 0 && errno == EPERM) {
 		printf("  OK:   TNode START_ADV rejected (EPERM)\n");
 	} else {
@@ -6895,6 +7295,7 @@ static void test_adv_scan_role_enforcement(int fd)
 	/* Set GNode and try to scan — should fail */
 	set_role(fd, 1); /* GNode */
 	struct sle_scan_params sp;
+
 	memset(&sp, 0, sizeof(sp));
 	sp.window_ms = 50;
 	sp.interval_ms = 100;
@@ -6961,8 +7362,10 @@ static void test_conn_list_accuracy(int fd)
 	/* Create 3 connections with known addresses */
 	uint16_t handles[3] = {0};
 	int created = 0;
+
 	for (int i = 0; i < 3; i++) {
 		struct sle_connect_params cp;
+
 		memset(&cp, 0, sizeof(cp));
 		cp.peer_addr[0] = (uint8_t)(0xA0 + i);
 		cp.peer_addr[5] = (uint8_t)(0xB0 + i);
@@ -6971,12 +7374,14 @@ static void test_conn_list_accuracy(int fd)
 		cp.mcs_index = 4;
 		cp.timeout_10ms = 100;
 		int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
 		if (ret > 0) {
 			handles[i] = (uint16_t)ret;
 			created++;
 
 			/* Inject response to move to Connected */
 			struct sle_inject_conn_resp resp;
+
 			memset(&resp, 0, sizeof(resp));
 			resp.handle = handles[i];
 			resp.response_type = 0;
@@ -6990,6 +7395,7 @@ static void test_conn_list_accuracy(int fd)
 
 	/* Get CONN_COUNT */
 	int count = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+
 	if (count >= created) {
 		printf("  OK:   CONN_COUNT=%d (>= %d created)\n", count, created);
 	} else {
@@ -6998,8 +7404,10 @@ static void test_conn_list_accuracy(int fd)
 
 	/* Get CONN_LIST and verify handles */
 	struct sle_conn_list cl;
+
 	memset(&cl, 0, sizeof(cl));
 	int ret = ioctl(fd, SL_IOCTL_CONN_LIST, &cl);
+
 	check("CONN_LIST", ret);
 	if (ret == 0) {
 		printf("  CONN_LIST: count=%u handles:", cl.count);
@@ -7009,6 +7417,7 @@ static void test_conn_list_accuracy(int fd)
 
 		/* Verify each created handle is in the list */
 		int found = 0;
+
 		for (int i = 0; i < created; i++) {
 			for (int j = 0; j < cl.count && j < 16; j++) {
 				if (cl.handles[j] == handles[i]) {
@@ -7028,6 +7437,7 @@ static void test_conn_list_accuracy(int fd)
 	/* Clean up */
 	for (int i = 0; i < created; i++) {
 		uint16_t dh = handles[i];
+
 		ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
 	}
 }
@@ -7046,11 +7456,13 @@ static void test_dli_reset_behavior(int fd)
 
 	/* Reset */
 	int ret = ioctl(fd, SL_IOCTL_DLI_RESET, NULL);
+
 	check("DLI_RESET", ret);
 	usleep(50000); /* wait for reset to propagate */
 
 	/* Check that subsystem state is still accessible after reset */
 	struct sle_sec_info si;
+
 	memset(&si, 0, sizeof(si));
 	ret = ioctl(fd, SL_IOCTL_SEC_INFO, &si);
 	check("SEC_INFO (post-reset)", ret);
@@ -7061,12 +7473,14 @@ static void test_dli_reset_behavior(int fd)
 
 	/* Check event stats are still accessible */
 	struct sle_event_stats es;
+
 	memset(&es, 0, sizeof(es));
 	ret = ioctl(fd, SL_IOCTL_EVENT_STATS, &es);
 	check("EVENT_STATS (post-reset)", ret);
 
 	/* DLI_INFO should still work */
 	struct sle_dli_info di;
+
 	memset(&di, 0, sizeof(di));
 	ret = ioctl(fd, SL_IOCTL_DLI_INFO, &di);
 	check("DLI_INFO (post-reset)", ret);
@@ -7078,6 +7492,7 @@ static void test_dli_reset_behavior(int fd)
 
 	/* Verify manager operations still work after reset */
 	struct sle_subsys_stats ss;
+
 	memset(&ss, 0, sizeof(ss));
 	ret = ioctl(fd, SL_IOCTL_SUBSYS_STATS, &ss);
 	check("SUBSYS_STATS (post-reset)", ret);
@@ -7104,6 +7519,7 @@ static void test_ssap_air_interface(int fd)
 
 	/* Step 2: Create a connection */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xBB;
 	cp.peer_addr[1] = 0xBB;
@@ -7115,10 +7531,12 @@ static void test_ssap_air_interface(int fd)
 		return;
 	}
 	uint16_t handle = (uint16_t)ret;
+
 	ok_count++;
 
 	/* Step 3: Accept connection */
 	struct sle_inject_conn_resp resp;
+
 	memset(&resp, 0, sizeof(resp));
 	resp.handle = handle;
 	resp.response_type = 0;
@@ -7132,6 +7550,7 @@ static void test_ssap_air_interface(int fd)
 	 * Wire format: [TCID=0x0A] [opcode=0x02] [MTU LE16=100,0]
 	 */
 	struct sle_conn_data inj;
+
 	memset(&inj, 0, sizeof(inj));
 	inj.handle = handle;
 	inj.data[0] = 0x0A;  /* TCID: SERVICE_MGMT */
@@ -7144,6 +7563,7 @@ static void test_ssap_air_interface(int fd)
 
 	/* Step 5: Verify SSAP session state via CONN_INFO */
 	struct sle_conn_info info;
+
 	memset(&info, 0, sizeof(info));
 	info.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
@@ -7173,6 +7593,7 @@ static void test_ssap_air_interface(int fd)
 	 * to avoid handle collisions from prior test registrations.
 	 */
 	struct ssap_add_service test_svc;
+
 	memset(&test_svc, 0, sizeof(test_svc));
 	test_svc.uuid16 = 0xFFA0;
 	test_svc.primary = 1;
@@ -7185,6 +7606,7 @@ static void test_ssap_air_interface(int fd)
 	}
 
 	struct ssap_add_property test_prop;
+
 	memset(&test_prop, 0, sizeof(test_prop));
 	test_prop.uuid16 = 0xFFA1;
 	test_prop.ops = 0x07;  /* READ | WRITE_NO_RSP | WRITE_WITH_RSP */
@@ -7198,6 +7620,7 @@ static void test_ssap_air_interface(int fd)
 		goto cleanup;
 	}
 	uint16_t writable_handle = test_prop.handle;
+
 	printf("  OK:   registered test property handle=0x%04x\n",
 	       writable_handle);
 	ok_count++;
@@ -7218,6 +7641,7 @@ static void test_ssap_air_interface(int fd)
 
 	/* Step 8: Verify property value changed via SSAP_READ ioctl */
 	struct ssap_read_write rw;
+
 	memset(&rw, 0, sizeof(rw));
 	rw.handle = writable_handle;
 	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
@@ -7248,6 +7672,7 @@ static void test_ssap_air_interface(int fd)
 	 * we verify by confirming no crash and checking service count.
 	 */
 	struct ssap_summary ssap_info;
+
 	memset(&ssap_info, 0, sizeof(ssap_info));
 	ret = ioctl(fd, SL_IOCTL_SSAP_INFO, &ssap_info);
 	if (ret == 0 && ssap_info.service_count >= 1) {
@@ -7264,12 +7689,14 @@ static void test_ssap_air_interface(int fd)
 	memset(&inj, 0, sizeof(inj));
 	inj.handle = handle;
 	const char *user_msg = "hello-over-air";
+
 	inj.length = strlen(user_msg);
 	memcpy(inj.data, user_msg, inj.length);
 	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
 	check("INJECT regular data", ret);
 
 	struct sle_conn_data recv_buf;
+
 	memset(&recv_buf, 0, sizeof(recv_buf));
 	recv_buf.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &recv_buf);
@@ -7287,6 +7714,7 @@ cleanup:
 	/* Clean up: disconnect */
 	;
 	uint16_t disc_handle = handle;
+
 	ioctl(fd, SL_IOCTL_DISCONNECT, &disc_handle);
 
 	printf("  SSAP air interface: %d OK, %d FAIL\n", ok_count, fail_count);
@@ -7310,6 +7738,7 @@ static void test_credit_flow_control(int fd)
 
 	/* Step 1: Create and accept a connection */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xCC;
 	cp.peer_addr[1] = 0xCC;
@@ -7322,6 +7751,7 @@ static void test_credit_flow_control(int fd)
 	uint16_t handle = (uint16_t)ret;
 
 	struct sle_inject_conn_resp resp;
+
 	memset(&resp, 0, sizeof(resp));
 	resp.handle = handle;
 	resp.response_type = 0;
@@ -7337,6 +7767,7 @@ static void test_credit_flow_control(int fd)
 
 	/* Step 2: Verify initial credit window */
 	struct sle_conn_info info;
+
 	memset(&info, 0, sizeof(info));
 	info.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
@@ -7367,6 +7798,7 @@ static void test_credit_flow_control(int fd)
 	 */
 	for (int i = 0; i < 5; i++) {
 		struct sle_conn_data inj;
+
 		memset(&inj, 0, sizeof(inj));
 		inj.handle = handle;
 		inj.data[0] = 0x0A; /* TCID: SMTC */
@@ -7404,6 +7836,7 @@ static void test_credit_flow_control(int fd)
 	 */
 	for (int i = 0; i < 8; i++) {
 		struct sle_conn_data inj;
+
 		memset(&inj, 0, sizeof(inj));
 		inj.handle = handle;
 		inj.data[0] = 0x0A;
@@ -7440,6 +7873,7 @@ static void test_credit_flow_control(int fd)
 	 */
 	{
 		struct sle_conn_data grant;
+
 		memset(&grant, 0, sizeof(grant));
 		grant.handle = handle;
 		grant.data[0] = 0x02; /* TCID: CMTC */
@@ -7468,6 +7902,7 @@ static void test_credit_flow_control(int fd)
 	/* Step 7: Verify DUDTC send is unaffected by credits */
 	{
 		struct sle_conn_data ud;
+
 		memset(&ud, 0, sizeof(ud));
 		ud.handle = handle;
 		memcpy(ud.data, "credit_test", 11);
@@ -7485,6 +7920,7 @@ static void test_credit_flow_control(int fd)
 cleanup:
 	;
 	uint16_t disc = handle;
+
 	ioctl(fd, SL_IOCTL_DISCONNECT, &disc);
 
 	printf("  Credit flow control: %d OK, %d FAIL\n", ok_count, fail_count);
@@ -7510,6 +7946,7 @@ static void test_supervision_timeout(int fd)
 	 * timeout should fire within a few pump cycles.
 	 */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xDD;
 	cp.peer_addr[1] = 0xDD;
@@ -7523,6 +7960,7 @@ static void test_supervision_timeout(int fd)
 	uint16_t handle = (uint16_t)ret;
 
 	struct sle_inject_conn_resp resp;
+
 	memset(&resp, 0, sizeof(resp));
 	resp.handle = handle;
 	resp.response_type = 0;
@@ -7537,6 +7975,7 @@ static void test_supervision_timeout(int fd)
 
 	/* Step 2: Verify connection is active */
 	struct sle_conn_info info;
+
 	memset(&info, 0, sizeof(info));
 	info.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
@@ -7554,6 +7993,7 @@ static void test_supervision_timeout(int fd)
 	usleep(60000); /* 60ms — under the 100ms timeout */
 	{
 		struct sle_conn_data ud;
+
 		memset(&ud, 0, sizeof(ud));
 		ud.handle = handle;
 		memcpy(ud.data, "keepalive", 9);
@@ -7644,6 +8084,7 @@ static void test_supervision_timeout(int fd)
 
 	{
 		uint16_t disc = handle2;
+
 		ioctl(fd, SL_IOCTL_DISCONNECT, &disc);
 	}
 
@@ -7654,6 +8095,7 @@ done:
 cleanup:
 	;
 	uint16_t disc = handle;
+
 	ioctl(fd, SL_IOCTL_DISCONNECT, &disc);
 	printf("  Supervision timeout: %d OK, %d FAIL\n", ok_count, fail_count);
 }
@@ -7668,45 +8110,47 @@ cleanup:
 
 /* CRC-12 lookup table — polynomial 0x0D25, LSB-first */
 static const uint16_t crc12_table[256] = {
-    0x000, 0xA54, 0xEE3, 0x4B7, 0x78D, 0xDD9, 0x96E, 0x33A,
-    0xF1A, 0x54E, 0x1F9, 0xBAD, 0x897, 0x2C3, 0x674, 0xC20,
-    0x47F, 0xE2B, 0xA9C, 0x0C8, 0x3F2, 0x9A6, 0xD11, 0x745,
-    0xB65, 0x131, 0x586, 0xFD2, 0xCE8, 0x6BC, 0x20B, 0x85F,
-    0x8FE, 0x2AA, 0x61D, 0xC49, 0xF73, 0x527, 0x190, 0xBC4,
-    0x7E4, 0xDB0, 0x907, 0x353, 0x069, 0xA3D, 0xE8A, 0x4DE,
-    0xC81, 0x6D5, 0x262, 0x836, 0xB0C, 0x158, 0x5EF, 0xFBB,
-    0x39B, 0x9CF, 0xD78, 0x72C, 0x416, 0xE42, 0xAF5, 0x0A1,
-    0xBB7, 0x1E3, 0x554, 0xF00, 0xC3A, 0x66E, 0x2D9, 0x88D,
-    0x4AD, 0xEF9, 0xA4E, 0x01A, 0x320, 0x974, 0xDC3, 0x797,
-    0xFC8, 0x59C, 0x12B, 0xB7F, 0x845, 0x211, 0x6A6, 0xCF2,
-    0x0D2, 0xA86, 0xE31, 0x465, 0x75F, 0xD0B, 0x9BC, 0x3E8,
-    0x349, 0x91D, 0xDAA, 0x7FE, 0x4C4, 0xE90, 0xA27, 0x073,
-    0xC53, 0x607, 0x2B0, 0x8E4, 0xBDE, 0x18A, 0x53D, 0xF69,
-    0x736, 0xD62, 0x9D5, 0x381, 0x0BB, 0xAEF, 0xE58, 0x40C,
-    0x82C, 0x278, 0x6CF, 0xC9B, 0xFA1, 0x5F5, 0x142, 0xB16,
-    0xD25, 0x771, 0x3C6, 0x992, 0xAA8, 0x0FC, 0x44B, 0xE1F,
-    0x23F, 0x86B, 0xCDC, 0x688, 0x5B2, 0xFE6, 0xB51, 0x105,
-    0x95A, 0x30E, 0x7B9, 0xDED, 0xED7, 0x483, 0x034, 0xA60,
-    0x640, 0xC14, 0x8A3, 0x2F7, 0x1CD, 0xB99, 0xF2E, 0x57A,
-    0x5DB, 0xF8F, 0xB38, 0x16C, 0x256, 0x802, 0xCB5, 0x6E1,
-    0xAC1, 0x095, 0x422, 0xE76, 0xD4C, 0x718, 0x3AF, 0x9FB,
-    0x1A4, 0xBF0, 0xF47, 0x513, 0x629, 0xC7D, 0x8CA, 0x29E,
-    0xEBE, 0x4EA, 0x05D, 0xA09, 0x933, 0x367, 0x7D0, 0xD84,
-    0x692, 0xCC6, 0x871, 0x225, 0x11F, 0xB4B, 0xFFC, 0x5A8,
-    0x988, 0x3DC, 0x76B, 0xD3F, 0xE05, 0x451, 0x0E6, 0xAB2,
-    0x2ED, 0x8B9, 0xC0E, 0x65A, 0x560, 0xF34, 0xB83, 0x1D7,
-    0xDF7, 0x7A3, 0x314, 0x940, 0xA7A, 0x02E, 0x499, 0xECD,
-    0xE6C, 0x438, 0x08F, 0xADB, 0x9E1, 0x3B5, 0x702, 0xD56,
-    0x176, 0xB22, 0xF95, 0x5C1, 0x6FB, 0xCAF, 0x818, 0x24C,
-    0xA13, 0x047, 0x4F0, 0xEA4, 0xD9E, 0x7CA, 0x37D, 0x929,
-    0x509, 0xF5D, 0xBEA, 0x1BE, 0x284, 0x8D0, 0xC67, 0x633,
+	0x000, 0xA54, 0xEE3, 0x4B7, 0x78D, 0xDD9, 0x96E, 0x33A,
+	0xF1A, 0x54E, 0x1F9, 0xBAD, 0x897, 0x2C3, 0x674, 0xC20,
+	0x47F, 0xE2B, 0xA9C, 0x0C8, 0x3F2, 0x9A6, 0xD11, 0x745,
+	0xB65, 0x131, 0x586, 0xFD2, 0xCE8, 0x6BC, 0x20B, 0x85F,
+	0x8FE, 0x2AA, 0x61D, 0xC49, 0xF73, 0x527, 0x190, 0xBC4,
+	0x7E4, 0xDB0, 0x907, 0x353, 0x069, 0xA3D, 0xE8A, 0x4DE,
+	0xC81, 0x6D5, 0x262, 0x836, 0xB0C, 0x158, 0x5EF, 0xFBB,
+	0x39B, 0x9CF, 0xD78, 0x72C, 0x416, 0xE42, 0xAF5, 0x0A1,
+	0xBB7, 0x1E3, 0x554, 0xF00, 0xC3A, 0x66E, 0x2D9, 0x88D,
+	0x4AD, 0xEF9, 0xA4E, 0x01A, 0x320, 0x974, 0xDC3, 0x797,
+	0xFC8, 0x59C, 0x12B, 0xB7F, 0x845, 0x211, 0x6A6, 0xCF2,
+	0x0D2, 0xA86, 0xE31, 0x465, 0x75F, 0xD0B, 0x9BC, 0x3E8,
+	0x349, 0x91D, 0xDAA, 0x7FE, 0x4C4, 0xE90, 0xA27, 0x073,
+	0xC53, 0x607, 0x2B0, 0x8E4, 0xBDE, 0x18A, 0x53D, 0xF69,
+	0x736, 0xD62, 0x9D5, 0x381, 0x0BB, 0xAEF, 0xE58, 0x40C,
+	0x82C, 0x278, 0x6CF, 0xC9B, 0xFA1, 0x5F5, 0x142, 0xB16,
+	0xD25, 0x771, 0x3C6, 0x992, 0xAA8, 0x0FC, 0x44B, 0xE1F,
+	0x23F, 0x86B, 0xCDC, 0x688, 0x5B2, 0xFE6, 0xB51, 0x105,
+	0x95A, 0x30E, 0x7B9, 0xDED, 0xED7, 0x483, 0x034, 0xA60,
+	0x640, 0xC14, 0x8A3, 0x2F7, 0x1CD, 0xB99, 0xF2E, 0x57A,
+	0x5DB, 0xF8F, 0xB38, 0x16C, 0x256, 0x802, 0xCB5, 0x6E1,
+	0xAC1, 0x095, 0x422, 0xE76, 0xD4C, 0x718, 0x3AF, 0x9FB,
+	0x1A4, 0xBF0, 0xF47, 0x513, 0x629, 0xC7D, 0x8CA, 0x29E,
+	0xEBE, 0x4EA, 0x05D, 0xA09, 0x933, 0x367, 0x7D0, 0xD84,
+	0x692, 0xCC6, 0x871, 0x225, 0x11F, 0xB4B, 0xFFC, 0x5A8,
+	0x988, 0x3DC, 0x76B, 0xD3F, 0xE05, 0x451, 0x0E6, 0xAB2,
+	0x2ED, 0x8B9, 0xC0E, 0x65A, 0x560, 0xF34, 0xB83, 0x1D7,
+	0xDF7, 0x7A3, 0x314, 0x940, 0xA7A, 0x02E, 0x499, 0xECD,
+	0xE6C, 0x438, 0x08F, 0xADB, 0x9E1, 0x3B5, 0x702, 0xD56,
+	0x176, 0xB22, 0xF95, 0x5C1, 0x6FB, 0xCAF, 0x818, 0x24C,
+	0xA13, 0x047, 0x4F0, 0xEA4, 0xD9E, 0x7CA, 0x37D, 0x929,
+	0x509, 0xF5D, 0xBEA, 0x1BE, 0x284, 0x8D0, 0xC67, 0x633,
 };
 
 static uint16_t test_crc12(uint16_t seed, const uint8_t *data, size_t len)
 {
 	uint16_t crc = seed & 0x0FFF;
+
 	for (size_t i = 0; i < len; i++) {
 		uint8_t idx = (uint8_t)(crc ^ data[i]);
+
 		crc = (crc >> 8) ^ crc12_table[idx];
 	}
 	return crc & 0x0FFF;
@@ -7722,6 +8166,7 @@ static size_t build_raw_adv_pdu(uint8_t *buf, const uint8_t *payload,
 {
 	/* Encode header: 4 bytes LE */
 	uint32_t w = 0;
+
 	w |= (uint32_t)(payload_len & 0xFF) << 20;
 	buf[0] = (uint8_t)(w);
 	buf[1] = (uint8_t)(w >> 8);
@@ -7731,6 +8176,7 @@ static size_t build_raw_adv_pdu(uint8_t *buf, const uint8_t *payload,
 	memcpy(buf + 4, payload, payload_len);
 
 	uint16_t crc = test_crc12(0x0A62, payload, payload_len);
+
 	if (corrupt_crc)
 		crc ^= 0x0001;
 	buf[4 + payload_len] = (uint8_t)(crc);
@@ -7750,6 +8196,7 @@ static void test_crc12_verification(int fd)
 
 	/* Start scanning so process_adv_pdu accepts PDUs */
 	struct sle_scan_params sp;
+
 	memset(&sp, 0, sizeof(sp));
 	sp.window_ms = 100;
 	sp.interval_ms = 200;
@@ -7764,11 +8211,13 @@ static void test_crc12_verification(int fd)
 	memset(&ss, 0, sizeof(ss));
 	ret = ioctl(fd, SL_IOCTL_SUBSYS_STATS, &ss);
 	uint32_t initial_crc_errors = 0;
+
 	if (ret == 0)
 		initial_crc_errors = ss.crc_errors;
 
 	/* Step 1: Inject raw ADV PDU with valid CRC — should succeed */
 	uint8_t payload[] = { 0x01, 0x01, 0x02 }; /* DiscoveryLevel TLV */
+
 	memset(&raw, 0, sizeof(raw));
 	raw.rssi = -40;
 	raw.pdu_len = (uint16_t)build_raw_adv_pdu(raw.pdu_data, payload,
@@ -7813,6 +8262,7 @@ static void test_crc12_verification(int fd)
 
 	/* Step 4: Inject another bad CRC and verify counter increments again */
 	uint8_t payload2[] = { 0x01, 0x01, 0x03, 0x02, 0x02, 0x07, 0x00 };
+
 	memset(&raw, 0, sizeof(raw));
 	raw.rssi = -55;
 	raw.pdu_len = (uint16_t)build_raw_adv_pdu(raw.pdu_data, payload2,
@@ -7839,6 +8289,7 @@ static void test_crc12_verification(int fd)
 
 	/* Step 5: Valid CRC does not increment error counter */
 	uint32_t before = ss.crc_errors;
+
 	memset(&raw, 0, sizeof(raw));
 	raw.rssi = -30;
 	raw.pdu_len = (uint16_t)build_raw_adv_pdu(raw.pdu_data, payload2,
@@ -7874,6 +8325,7 @@ static void test_mtu_mps_negotiation(int fd)
 
 	/* Step 1: Create connection with custom MTU=64 */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xBB;
 	cp.peer_addr[1] = 0xBB;
@@ -7886,6 +8338,7 @@ static void test_mtu_mps_negotiation(int fd)
 	uint16_t handle = (uint16_t)ret;
 
 	struct sle_inject_conn_resp resp;
+
 	memset(&resp, 0, sizeof(resp));
 	resp.handle = handle;
 	resp.response_type = 0;
@@ -7902,6 +8355,7 @@ static void test_mtu_mps_negotiation(int fd)
 
 	/* Verify MTU via CONN_INFO */
 	struct sle_conn_info info;
+
 	memset(&info, 0, sizeof(info));
 	info.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
@@ -7915,6 +8369,7 @@ static void test_mtu_mps_negotiation(int fd)
 
 	/* Step 2: Send data within MTU — should succeed */
 	struct sle_conn_data cd;
+
 	memset(&cd, 0, sizeof(cd));
 	cd.handle = handle;
 	cd.length = 32;
@@ -7945,6 +8400,7 @@ static void test_mtu_mps_negotiation(int fd)
 
 	/* Step 4: Increase MTU via SET_CONN_MTU */
 	struct sle_conn_mtu_params mtu_params;
+
 	memset(&mtu_params, 0, sizeof(mtu_params));
 	mtu_params.handle = handle;
 	mtu_params.mtu = 128;
@@ -8018,6 +8474,7 @@ static void test_mtu_mps_negotiation(int fd)
 cleanup:
 	{
 		uint16_t disc = handle;
+
 		ioctl(fd, SL_IOCTL_DISCONNECT, &disc);
 	}
 	printf("  MTU/MPS negotiation: %d OK, %d FAIL\n", ok_count, fail_count);
@@ -8038,6 +8495,7 @@ static void test_afh_channel_map(int fd)
 
 	/* Create a connection for AFH testing */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xAF;
 	cp.peer_addr[1] = 0xAF;
@@ -8050,6 +8508,7 @@ static void test_afh_channel_map(int fd)
 	uint16_t handle = (uint16_t)ret;
 
 	struct sle_inject_conn_resp resp;
+
 	memset(&resp, 0, sizeof(resp));
 	resp.handle = handle;
 	resp.response_type = 0;
@@ -8064,6 +8523,7 @@ static void test_afh_channel_map(int fd)
 
 	/* 1. Get default channel map — should be all 79 channels */
 	struct sle_afh_map_params map_p;
+
 	memset(&map_p, 0, sizeof(map_p));
 	map_p.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_AFH_GET_MAP, &map_p);
@@ -8110,6 +8570,7 @@ static void test_afh_channel_map(int fd)
 
 	/* 4. Hop next — channel should be within 0-39 range */
 	struct sle_afh_hop_info hop;
+
 	memset(&hop, 0, sizeof(hop));
 	hop.handle = handle;
 	ret = ioctl(fd, SL_IOCTL_AFH_HOP_NEXT, &hop);
@@ -8138,24 +8599,29 @@ static void test_afh_channel_map(int fd)
 
 	/* 6. Report RSSI measurements for channels */
 	int rssi_ok = 1;
+
 	for (int ch = 0; ch < 20; ch++) {
 		struct sle_afh_rssi_report rpt;
+
 		memset(&rpt, 0, sizeof(rpt));
 		rpt.handle = handle;
 		rpt.channel = (uint8_t)ch;
 		rpt.rssi_dbm = -30; /* good signal */
 		ret = ioctl(fd, SL_IOCTL_AFH_REPORT_RSSI, &rpt);
-		if (ret < 0) rssi_ok = 0;
+		if (ret < 0)
+			rssi_ok = 0;
 	}
 	/* Report bad RSSI for channels 20-39 */
 	for (int ch = 20; ch < 40; ch++) {
 		struct sle_afh_rssi_report rpt;
+
 		memset(&rpt, 0, sizeof(rpt));
 		rpt.handle = handle;
 		rpt.channel = (uint8_t)ch;
 		rpt.rssi_dbm = -90; /* bad signal */
 		ret = ioctl(fd, SL_IOCTL_AFH_REPORT_RSSI, &rpt);
-		if (ret < 0) rssi_ok = 0;
+		if (ret < 0)
+			rssi_ok = 0;
 	}
 	if (rssi_ok) {
 		printf("  OK:   reported RSSI for 40 channels\n");
@@ -8168,6 +8634,7 @@ static void test_afh_channel_map(int fd)
 	/* 7. Reject RSSI for invalid channel */
 	{
 		struct sle_afh_rssi_report rpt;
+
 		memset(&rpt, 0, sizeof(rpt));
 		rpt.handle = handle;
 		rpt.channel = 80; /* invalid */
@@ -8186,6 +8653,7 @@ static void test_afh_channel_map(int fd)
 	 *    Channels 0-19 avg -30 (good), 20-39 avg -90 (bad).
 	 *    Expected: channels 20-39 removed, keeping 0-19 (20 channels). */
 	struct sle_afh_classify_params cls;
+
 	memset(&cls, 0, sizeof(cls));
 	cls.handle = handle;
 	cls.threshold_dbm = -60;
@@ -8270,6 +8738,7 @@ static void test_afh_channel_map(int fd)
 		/* 2 retransmissions (score += 3 each = 6, which is >= 5) */
 		for (int t = 0; t < 2; t++) {
 			struct sle_afh_retx_report rpt;
+
 			memset(&rpt, 0, sizeof(rpt));
 			rpt.handle = handle;
 			rpt.channel = (uint8_t)ch;
@@ -8285,6 +8754,7 @@ static void test_afh_channel_map(int fd)
 	if (ret == 0 && cls.used_count <= 74) {
 		/* Channels 0-4 should be excluded (50% retx > 25% threshold) */
 		int ch0_used = (cls.map_out[0] & 0x01) != 0;
+
 		if (!ch0_used) {
 			printf("  OK:   retx classify: ch0 excluded (50%% retx), used=%u\n",
 			       cls.used_count);
@@ -8301,6 +8771,7 @@ static void test_afh_channel_map(int fd)
 cleanup:
 	{
 		uint16_t disc = handle;
+
 		ioctl(fd, SL_IOCTL_DISCONNECT, &disc);
 	}
 	printf("  AFH channel map: %d OK, %d FAIL\n", ok_count, fail_count);
@@ -8321,6 +8792,7 @@ static void test_ext_advertising(int fd)
 
 	/* 1. Configure set 0 with default parameters */
 	struct sle_ext_adv_config cfg;
+
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.handle = 0;
 	cfg.discovery_level = 2;
@@ -8342,6 +8814,7 @@ static void test_ext_advertising(int fd)
 
 	/* 2. Query info — should be Configured (state=1) */
 	struct sle_ext_adv_info info;
+
 	memset(&info, 0, sizeof(info));
 	info.handle = 0;
 	ret = ioctl(fd, SL_IOCTL_EXT_ADV_INFO, &info);
@@ -8355,6 +8828,7 @@ static void test_ext_advertising(int fd)
 
 	/* 3. Set advertising data */
 	struct sle_ext_adv_data adv_data;
+
 	memset(&adv_data, 0, sizeof(adv_data));
 	adv_data.handle = 0;
 	adv_data.data_len = 16;
@@ -8382,6 +8856,7 @@ static void test_ext_advertising(int fd)
 
 	/* 5. Enable set 0 */
 	uint8_t h = 0;
+
 	ret = ioctl(fd, SL_IOCTL_EXT_ADV_ENABLE, &h);
 	if (ret == 0) {
 		printf("  OK:   enable set 0\n");
@@ -8450,6 +8925,7 @@ static void test_ext_advertising(int fd)
 
 	/* 11. Configure multiple sets simultaneously */
 	int multi_ok = 1;
+
 	for (int i = 0; i < 4; i++) {
 		memset(&cfg, 0, sizeof(cfg));
 		cfg.handle = (uint8_t)i;
@@ -8458,7 +8934,8 @@ static void test_ext_advertising(int fd)
 		cfg.broadcast_type = 1;
 		cfg.interval_ms = 100;
 		ret = ioctl(fd, SL_IOCTL_EXT_ADV_CONFIGURE, &cfg);
-		if (ret != 0) multi_ok = 0;
+		if (ret != 0)
+			multi_ok = 0;
 	}
 	if (multi_ok) {
 		printf("  OK:   configured 4 sets concurrently\n");
@@ -8535,6 +9012,7 @@ static void test_ext_advertising(int fd)
 
 	/* 16. Enable with max_events=5 via ENABLE_EX */
 	struct sle_ext_adv_enable_params en;
+
 	memset(&en, 0, sizeof(en));
 	en.handle = 0;
 	en.max_adv_events = 5;
@@ -8663,6 +9141,7 @@ static void test_ssap_capacity_stress(int fd)
 	/* Register services until we hit the limit */
 	for (int i = 0; i < 64; i++) {
 		struct ssap_add_service svc;
+
 		memset(&svc, 0, sizeof(svc));
 		svc.uuid16 = (uint16_t)(0x3000 + i);
 		svc.primary = 1;
@@ -8678,6 +9157,7 @@ static void test_ssap_capacity_stress(int fd)
 		/* Add 2 properties to each service */
 		for (int j = 0; j < 2; j++) {
 			struct ssap_add_property prop;
+
 			memset(&prop, 0, sizeof(prop));
 			prop.uuid16 = (uint16_t)(0x3000 + i * 16 + j + 1);
 			prop.ops = 0x03; /* RW */
@@ -8691,6 +9171,7 @@ static void test_ssap_capacity_stress(int fd)
 
 	/* Get SSAP summary */
 	struct ssap_summary info;
+
 	memset(&info, 0, sizeof(info));
 	ret = ioctl(fd, SL_IOCTL_SSAP_INFO, &info);
 	check("SSAP_INFO (after stress)", ret);
@@ -8703,6 +9184,7 @@ static void test_ssap_capacity_stress(int fd)
 	/* Clean up */
 	for (int i = 0; i < svc_count; i++) {
 		uint16_t h = svc_handles[i];
+
 		ioctl(fd, SL_IOCTL_SSAP_REMOVE_SVC, &h);
 	}
 }
@@ -8725,6 +9207,7 @@ static void test_sync_link_management(int fd)
 	 * CONNECT puts it in Connecting state, then INJECT_CONN_RESP
 	 * transitions it to Connected. */
 	struct sle_connect_params cp;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.peer_addr[0] = 0xDD;
 	cp.peer_addr[1] = 0xEE;
@@ -8743,6 +9226,7 @@ static void test_sync_link_management(int fd)
 	uint16_t acl_handle = (uint16_t)ret;
 
 	struct sle_inject_conn_resp inject;
+
 	memset(&inject, 0, sizeof(inject));
 	inject.handle = acl_handle;
 	inject.supervision_timeout = 300;
@@ -8757,6 +9241,7 @@ static void test_sync_link_management(int fd)
 
 	/* 1. Configure CIG with 2 unicast links */
 	struct sle_sync_cig_config cig;
+
 	memset(&cig, 0, sizeof(cig));
 	cig.cig_id = 0x01;
 	cig.link_count = 2;
@@ -8782,6 +9267,7 @@ static void test_sync_link_management(int fd)
 
 	/* 2. Query sync link info before creation (should be Configured=0) */
 	struct sle_sync_link_info info;
+
 	memset(&info, 0, sizeof(info));
 	info.sync_handle = cis_h0;
 	ret = ioctl(fd, SL_IOCTL_SYNC_INFO, &info);
@@ -8798,6 +9284,7 @@ static void test_sync_link_management(int fd)
 
 	/* 3. Create (activate) CIG links bound to async handle 1 */
 	struct sle_sync_create_cmd create;
+
 	memset(&create, 0, sizeof(create));
 	create.group_id = 0x01;
 	create.link_count = 2;
@@ -8826,6 +9313,7 @@ static void test_sync_link_management(int fd)
 
 	/* 5. Configure data path on the active link */
 	struct sle_sync_datapath_cmd dp;
+
 	memset(&dp, 0, sizeof(dp));
 	dp.sync_handle = cis_h0;
 	dp.direction = 2;  /* bidirectional */
@@ -8854,6 +9342,7 @@ static void test_sync_link_management(int fd)
 
 	/* 7. Remove data path */
 	uint16_t dp_handle = cis_h0;
+
 	ret = ioctl(fd, SL_IOCTL_SYNC_DATAPATH_REMOVE, &dp_handle);
 	if (ret == 0) {
 		printf("  OK:   datapath removed\n");
@@ -8865,6 +9354,7 @@ static void test_sync_link_management(int fd)
 
 	/* 8. Cannot remove active CIG (EBUSY) */
 	uint8_t cig_id = 0x01;
+
 	ret = ioctl(fd, SL_IOCTL_SYNC_UCAST_REMOVE, &cig_id);
 	if (ret < 0 && errno == EBUSY) {
 		printf("  OK:   active CIG remove rejected (EBUSY)\n");
@@ -8917,6 +9407,7 @@ static void test_sync_link_management(int fd)
 
 	/* 12. Configure BIG (multicast) */
 	struct sle_sync_big_config big;
+
 	memset(&big, 0, sizeof(big));
 	big.big_id = 0x10;
 	big.link_count = 2;
@@ -8998,6 +9489,7 @@ static void test_phy_extreme_params(int fd)
 	/* MCS 0 (lowest) */
 	struct sle_phy_mcs_cmd mcs_cmd = { .mcs_index = 0 };
 	int ret = ioctl(fd, SL_IOCTL_PHY_SET_MCS, &mcs_cmd);
+
 	check("PHY_SET_MCS(0)", ret);
 
 	/* MCS 12 (highest valid) */
@@ -9007,6 +9499,7 @@ static void test_phy_extreme_params(int fd)
 
 	/* Verify MCS 12 */
 	struct sle_phy_info info;
+
 	memset(&info, 0, sizeof(info));
 	ioctl(fd, SL_IOCTL_PHY_INFO, &info);
 	if (info.mcs_index == 12) {
@@ -9026,6 +9519,7 @@ static void test_phy_extreme_params(int fd)
 
 	/* TX power minimum -20 */
 	struct sle_phy_txpower_cmd txp = { .tx_power_dbm = -20 };
+
 	ret = ioctl(fd, SL_IOCTL_PHY_SET_TXPOWER, &txp);
 	check("PHY_SET_TXPOWER(-20)", ret);
 
@@ -9045,6 +9539,7 @@ static void test_phy_extreme_params(int fd)
 
 	/* BW 0 (invalid) */
 	struct sle_phy_bw_cmd bw_cmd = { .bandwidth_mhz = 0 };
+
 	ret = ioctl(fd, SL_IOCTL_PHY_SET_BW, &bw_cmd);
 	if (ret < 0 && errno == EINVAL) {
 		printf("  OK:   BW=0 rejected (EINVAL)\n");
@@ -9063,6 +9558,7 @@ static void test_phy_extreme_params(int fd)
 
 	/* MCS select with impossible constraint (min 99999 kbps) */
 	struct sle_phy_mcs_select sel;
+
 	memset(&sel, 0, sizeof(sel));
 	sel.min_kbps = 99999;
 	sel.bandwidth_mhz = 1;
@@ -9088,6 +9584,7 @@ static void test_phy_extreme_params(int fd)
 
 	/* SINR thresholds: get default */
 	struct sle_sinr_thresholds sinr;
+
 	memset(&sinr, 0, sizeof(sinr));
 	ret = ioctl(fd, SL_IOCTL_PHY_GET_SINR, &sinr);
 	if (ret == 0 && sinr.thresholds[0] == -20 && sinr.thresholds[4] == 50) {
@@ -9135,6 +9632,7 @@ static void test_genetlink(void)
 	test_header("Generic Netlink: sparklink family");
 
 	int nlfd = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
+
 	if (nlfd < 0) {
 		printf("  FAIL: cannot open NETLINK_GENERIC socket: %s\n",
 		       strerror(errno));
@@ -9142,6 +9640,7 @@ static void test_genetlink(void)
 	}
 
 	struct sockaddr_nl sa;
+
 	memset(&sa, 0, sizeof(sa));
 	sa.nl_family = AF_NETLINK;
 	if (bind(nlfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
@@ -9152,6 +9651,7 @@ static void test_genetlink(void)
 
 	/* Step 1: Resolve sparklink family ID */
 	int family_id = genl_resolve_family(nlfd, SL_GENL_NAME);
+
 	if (family_id < 0) {
 		printf("  FAIL: cannot resolve genetlink family '%s'\n",
 		       SL_GENL_NAME);
@@ -9208,10 +9708,10 @@ int main(void)
 	printf("Device: %s\n", DEVICE);
 
 	int fd = open(DEVICE, O_RDWR | O_NONBLOCK);
+
 	if (fd < 0) {
 		fprintf(stderr, "Cannot open %s: %s\n", DEVICE, strerror(errno));
-		fprintf(stderr, "Make sure the sparklink module is loaded and "
-			"you have appropriate permissions.\n");
+		fprintf(stderr, "Make sure the sparklink module is loaded and you have appropriate permissions.\n");
 		return 1;
 	}
 	printf("Opened %s (fd=%d)\n", DEVICE, fd);
@@ -9224,6 +9724,7 @@ int main(void)
 	 */
 	{
 		uint16_t dev0 = 0;
+
 		if (ioctl(fd, SL_IOCTL_DEV_SWITCH, &dev0) == 0)
 			printf("Switched to sle0 (virtual controller)\n");
 	}

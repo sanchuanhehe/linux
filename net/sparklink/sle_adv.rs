@@ -509,8 +509,14 @@ impl AdvScanInner {
 
     /// Build the advertising PDU for the current configuration.
     ///
-    /// Called by the driver/timer to generate the next advertising frame.
-    pub fn build_adv_pdu(&self) -> Option<AdvPdu> {
+    /// `std_uuids` and `custom_uuids` are SSAP service UUID lists to include
+    /// in the advertising payload as FullStdServiceList / FullCustomServiceList
+    /// TLVs per T/XS 20001-2025 §6.3.
+    pub fn build_adv_pdu(
+        &self,
+        std_uuids: &[u16],
+        custom_uuids: &[[u8; 16]],
+    ) -> Option<AdvPdu> {
         if self.state != AdvScanState::Advertising && self.state != AdvScanState::AdvPending {
             return None;
         }
@@ -524,6 +530,14 @@ impl AdvScanInner {
         // Device name TLV
         if self.local_name_len > 0 {
             let _ = builder.push_complete_name(&self.local_name[..self.local_name_len]);
+        }
+        // Standard service list TLV (16-bit UUIDs from SSAP registry)
+        if !std_uuids.is_empty() {
+            let _ = builder.push_std_service_list(std_uuids);
+        }
+        // Custom service list TLV (128-bit UUIDs from SSAP registry)
+        if !custom_uuids.is_empty() {
+            let _ = builder.push_custom_service_list(custom_uuids);
         }
 
         Some(AdvPdu::build(

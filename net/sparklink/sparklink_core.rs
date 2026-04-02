@@ -785,7 +785,15 @@ fn do_start_adv(interval_ms: u32, discovery_level: u8) -> Result<i32> {
         return Err(EPERM);
     }
     s.adv_scan.start_advertising(params)?;
-    let _ = s.adv_scan.build_adv_pdu();
+    // Collect registered SSAP service UUIDs for advertising payload
+    let mut std_uuids = [0u16; 32];
+    let std_count = s.ssap.collect_std_uuids(&mut std_uuids);
+    let mut custom_uuids = [[0u8; 16]; 8];
+    let custom_count = s.ssap.collect_custom_uuids(&mut custom_uuids);
+    let _ = s.adv_scan.build_adv_pdu(
+        &std_uuids[..std_count],
+        &custom_uuids[..custom_count],
+    );
     match s.controller.enable_broadcast(true) {
         Ok(()) => {
             drain_controller_events(s);

@@ -321,6 +321,100 @@ impl AdvDataBuilder {
         self.push_tlv(AdvDataType::SleMacAddr as u8, addr)
     }
 
+    /// Append a complete standard service list TLV (type 0x05).
+    ///
+    /// Each UUID is encoded as 2 bytes little-endian per T/XS 20001-2025 §6.3.
+    pub fn push_std_service_list(&mut self, uuids: &[u16]) -> Result {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        let value_len = uuids.len() * 2;
+        let entry_len = 2 + value_len;
+        if entry_len > self.remaining() {
+            return Err(ENOMEM);
+        }
+        self.buf[self.len] = AdvDataType::FullStdServiceList as u8;
+        self.buf[self.len + 1] = value_len as u8;
+        let mut offset = self.len + 2;
+        for &uuid in uuids {
+            let le = uuid.to_le_bytes();
+            self.buf[offset] = le[0];
+            self.buf[offset + 1] = le[1];
+            offset += 2;
+        }
+        self.len += entry_len;
+        Ok(())
+    }
+
+    /// Append a complete custom (128-bit) service list TLV (type 0x06).
+    pub fn push_custom_service_list(&mut self, uuids: &[[u8; 16]]) -> Result {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        let value_len = uuids.len() * 16;
+        let entry_len = 2 + value_len;
+        if entry_len > self.remaining() {
+            return Err(ENOMEM);
+        }
+        self.buf[self.len] = AdvDataType::FullCustomServiceList as u8;
+        self.buf[self.len + 1] = value_len as u8;
+        let mut offset = self.len + 2;
+        for uuid in uuids {
+            self.buf[offset..offset + 16].copy_from_slice(uuid);
+            offset += 16;
+        }
+        self.len += entry_len;
+        Ok(())
+    }
+
+    /// Append a standard service data TLV (type 0x03): 16-bit UUID + data.
+    pub fn push_std_service_data(&mut self, uuid: u16, data: &[u8]) -> Result {
+        let value_len = 2 + data.len();
+        let entry_len = 2 + value_len;
+        if entry_len > self.remaining() {
+            return Err(ENOMEM);
+        }
+        self.buf[self.len] = AdvDataType::StdServiceData as u8;
+        self.buf[self.len + 1] = value_len as u8;
+        let le = uuid.to_le_bytes();
+        self.buf[self.len + 2] = le[0];
+        self.buf[self.len + 3] = le[1];
+        if !data.is_empty() {
+            self.buf[self.len + 4..self.len + 4 + data.len()].copy_from_slice(data);
+        }
+        self.len += entry_len;
+        Ok(())
+    }
+
+    /// Append a service structure hash TLV (type 0x09, 16 bytes).
+    pub fn push_service_hash(&mut self, hash: &[u8; 16]) -> Result {
+        self.push_tlv(AdvDataType::ServiceHash as u8, hash)
+    }
+
+    /// Append an access capability TLV (type 0x02, 1 byte).
+    pub fn push_access_capability(&mut self, cap: u8) -> Result {
+        self.push_tlv(AdvDataType::AccessCapability as u8, &[cap])
+    }
+
+    /// Append a manufacturer-specific data TLV (type 0xFF): 2-byte vendor ID + data.
+    pub fn push_manufacturer_specific(&mut self, vendor_id: u16, data: &[u8]) -> Result {
+        let value_len = 2 + data.len();
+        let entry_len = 2 + value_len;
+        if entry_len > self.remaining() {
+            return Err(ENOMEM);
+        }
+        self.buf[self.len] = AdvDataType::ManufacturerSpecific as u8;
+        self.buf[self.len + 1] = value_len as u8;
+        let le = vendor_id.to_le_bytes();
+        self.buf[self.len + 2] = le[0];
+        self.buf[self.len + 3] = le[1];
+        if !data.is_empty() {
+            self.buf[self.len + 4..self.len + 4 + data.len()].copy_from_slice(data);
+        }
+        self.len += entry_len;
+        Ok(())
+    }
+
     /// Append raw bytes directly to the payload (not TLV-wrapped).
     pub fn push_raw(&mut self, data: &[u8]) -> Result {
         if data.len() > self.remaining() {

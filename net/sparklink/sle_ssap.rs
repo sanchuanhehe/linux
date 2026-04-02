@@ -527,6 +527,38 @@ impl SsapInner {
         }
     }
 
+    /// Collect all registered standard (16-bit) service UUIDs.
+    ///
+    /// Used by the advertising engine to populate the FullStdServiceList TLV.
+    pub fn collect_std_uuids(&self, out: &mut [u16; 32]) -> usize {
+        let mut n = 0usize;
+        for svc in self.services.iter() {
+            if let SsapUuid::Uuid16(v) = svc.uuid {
+                if n < out.len() {
+                    out[n] = v;
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Collect all registered custom (128-bit) service UUIDs.
+    ///
+    /// Used by the advertising engine to populate the FullCustomServiceList TLV.
+    pub fn collect_custom_uuids(&self, out: &mut [[u8; 16]; 8]) -> usize {
+        let mut n = 0usize;
+        for svc in self.services.iter() {
+            if let SsapUuid::Uuid128(v) = svc.uuid {
+                if n < out.len() {
+                    out[n] = v;
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     // -----------------------------------------------------------------------
     // Service discovery (FINDSTRUCTURE)
     // -----------------------------------------------------------------------

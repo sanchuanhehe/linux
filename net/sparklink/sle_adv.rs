@@ -651,10 +651,7 @@ impl AdvScanInner {
     }
 
     /// Get info about an extended advertising set.
-    pub fn ext_adv_info(
-        &self,
-        handle: u8,
-    ) -> Result<ExtAdvInfo> {
+    pub fn ext_adv_info(&self, handle: u8) -> Result<ExtAdvInfo> {
         let idx = handle as usize;
         if idx >= EXT_ADV_MAX_SETS {
             return Err(EINVAL);

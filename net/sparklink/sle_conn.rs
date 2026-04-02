@@ -1541,7 +1541,11 @@ impl ConnManager {
         self.sync_links.retain(|l| l.cig_id != params.cig_id);
 
         let mut handles = [0u16; MAX_SYNC_LINKS_PER_CIG];
-        for (i, h) in handles.iter_mut().enumerate().take(params.link_count as usize) {
+        for (i, h) in handles
+            .iter_mut()
+            .enumerate()
+            .take(params.link_count as usize)
+        {
             let handle = self.alloc_sync_handle();
             let link = SyncLinkEntry {
                 handle,
@@ -1634,7 +1638,11 @@ impl ConnManager {
             .retain(|l| !(l.cig_id == params.big_id && l.link_type == SyncLinkType::Multicast));
 
         let mut handles = [0u16; MAX_SYNC_LINKS_PER_CIG];
-        for (i, h) in handles.iter_mut().enumerate().take(params.link_count as usize) {
+        for (i, h) in handles
+            .iter_mut()
+            .enumerate()
+            .take(params.link_count as usize)
+        {
             let handle = self.alloc_sync_handle();
             let link = SyncLinkEntry {
                 handle,

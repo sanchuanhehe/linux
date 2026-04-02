@@ -39,7 +39,7 @@ mod sle_workers;
 
 use sle_dli::SleController;
 use sle_uapi::*;
-use sle_workers::{CommandWorker, EventPump, drain_controller_events, send_credit_grant};
+use sle_workers::{drain_controller_events, send_credit_grant, CommandWorker, EventPump};
 
 use kernel::configfs_attrs;
 use kernel::sync::atomic::Relaxed;
@@ -583,7 +583,11 @@ impl SubsystemShared {
     /// (or creates) the state for `new_id`.  All live field accessors
     /// (`self.controller`, `self.conn`, etc.) transparently refer to
     /// the new device after this call.
-    pub(crate) fn switch_active_device(&mut self, new_id: u16, new_state: Option<PerDeviceState>) -> Result {
+    pub(crate) fn switch_active_device(
+        &mut self,
+        new_id: u16,
+        new_state: Option<PerDeviceState>,
+    ) -> Result {
         if new_id as usize >= sle_dev::SLE_DEV_MAX {
             return Err(EINVAL);
         }
@@ -1925,9 +1929,7 @@ impl MiscDevice for SparkLinkCtl {
                             ntf_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
                             if let Ok(pdu_len) = pdu.encode(&mut ntf_buf[1..]) {
                                 if pdu_len > 0 {
-                                    let _ = s
-                                        .controller
-                                        .send_data(handle, &ntf_buf[..1 + pdu_len]);
+                                    let _ = s.controller.send_data(handle, &ntf_buf[..1 + pdu_len]);
                                 }
                             }
                         }

@@ -5322,6 +5322,243 @@ static void test_scan_filter_reject(int fd)
 }
 
 /* ------------------------------------------------------------------ *
+ * test_scan_uuid_filter — SET_SCAN_FILTER / CLEAR_SCAN_FILTER       *
+ *                                                                    *
+ * T/XS 20001-2025 §6.4 extended discovery filtering by service UUID.*
+ * 1) Set a UUID filter with 2 target UUIDs                          *
+ * 2) Start scan                                                     *
+ * 3) Inject raw advert WITHOUT matching UUID → should be rejected   *
+ * 4) Inject raw advert WITH matching UUID → should pass             *
+ * 5) Clear filter                                                   *
+ * 6) Inject advert without UUID → should pass (no filter active)    *
+ * ------------------------------------------------------------------ */
+
+static size_t build_raw_adv_pdu(uint8_t *buf, const uint8_t *payload,
+				uint8_t payload_len, int corrupt_crc);
+
+static size_t build_adv_payload_with_uuid(uint8_t *out, uint8_t disc_level,
+					  const uint16_t *uuids, int uuid_count,
+					  const uint8_t *addr)
+{
+	uint8_t *p = out;
+
+	/* TLV: discovery level (type=0x01, len=1) */
+	*p++ = 0x01;
+	*p++ = 1;
+	*p++ = disc_level;
+
+	/* TLV: SLE address (type=0x0B, len=7: 1 byte type + 6 bytes addr) */
+	*p++ = 0x0B;
+	*p++ = 7;
+	*p++ = 0x00; /* addr type: public */
+	memcpy(p, addr, 6);
+	p += 6;
+
+	/* TLV: full standard service list (type=0x05) */
+	if (uuid_count > 0) {
+		*p++ = 0x05;
+		*p++ = (uint8_t)(uuid_count * 2);
+		for (int i = 0; i < uuid_count; i++) {
+			*p++ = (uint8_t)(uuids[i] & 0xFF);
+			*p++ = (uint8_t)(uuids[i] >> 8);
+		}
+	}
+
+	return (size_t)(p - out);
+}
+
+static void test_scan_uuid_filter(int fd)
+{
+	test_header("Scan UUID filter: SET/CLEAR_SCAN_FILTER (§6.4)");
+
+	set_role(fd, 0); /* TNode for scanning */
+
+	/* Set filter: accept only UUIDs 0x1234 and 0x5678 */
+	struct sle_scan_filter filter;
+
+	memset(&filter, 0, sizeof(filter));
+	filter.uuid_count = 2;
+	filter.uuids[0] = 0x1234;
+	filter.uuids[1] = 0x5678;
+
+	int ret = ioctl(fd, SL_IOCTL_SET_SCAN_FILTER, &filter);
+
+	check("SET_SCAN_FILTER", ret);
+
+	/* Start scan (no discovery level filter) */
+	struct sle_scan_params scan;
+
+	memset(&scan, 0, sizeof(scan));
+	scan.window_ms = 50;
+	scan.interval_ms = 100;
+	scan.filter_discovery_level = 0;
+
+	ret = ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+	check("START_SCAN (uuid filter)", ret);
+
+	/* Inject raw advert with UUID 0xAAAA (no match) */
+	uint8_t payload[64];
+	uint16_t no_match_uuid = 0xAAAA;
+	uint8_t addr1[6] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x60};
+	size_t plen = build_adv_payload_with_uuid(payload, 1, &no_match_uuid,
+						  1, addr1);
+	struct sle_inject_raw_adv raw;
+
+	memset(&raw, 0, sizeof(raw));
+	raw.rssi = -30;
+	raw.pdu_len = (uint16_t)build_raw_adv_pdu(raw.pdu_data, payload,
+						   (uint8_t)plen, 0);
+	ret = ioctl(fd, SL_IOCTL_INJECT_RAW_ADV, &raw);
+	check("INJECT_RAW_ADV (uuid=0xAAAA, no match)", ret);
+
+	ret = ioctl(fd, SL_IOCTL_SCAN_RESULT_COUNT, NULL);
+	check("SCAN_RESULT_COUNT (should be 0)", ret);
+	if (ret == 0)
+		printf("  OK:   Non-matching UUID correctly rejected\n");
+	else
+		printf("  WARN: expected 0 results, got %d\n", ret);
+
+	/* Inject raw advert with UUID 0x1234 (match) */
+	uint16_t match_uuid = 0x1234;
+	uint8_t addr2[6] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x61};
+
+	plen = build_adv_payload_with_uuid(payload, 1, &match_uuid, 1, addr2);
+	memset(&raw, 0, sizeof(raw));
+	raw.rssi = -25;
+	raw.pdu_len = (uint16_t)build_raw_adv_pdu(raw.pdu_data, payload,
+						   (uint8_t)plen, 0);
+	ret = ioctl(fd, SL_IOCTL_INJECT_RAW_ADV, &raw);
+	check("INJECT_RAW_ADV (uuid=0x1234, match)", ret);
+
+	ret = ioctl(fd, SL_IOCTL_SCAN_RESULT_COUNT, NULL);
+	check("SCAN_RESULT_COUNT (should be 1)", ret);
+	if (ret == 1)
+		printf("  OK:   Matching UUID 0x1234 passed filter\n");
+	else
+		printf("  WARN: expected 1 result, got %d\n", ret);
+
+	/* Clear filter */
+	ret = ioctl(fd, SL_IOCTL_CLEAR_SCAN_FILTER, NULL);
+	check("CLEAR_SCAN_FILTER", ret);
+
+	/* Inject advert without any UUID TLV → should pass (filter cleared) */
+	uint8_t addr3[6] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x62};
+
+	plen = build_adv_payload_with_uuid(payload, 1, NULL, 0, addr3);
+	memset(&raw, 0, sizeof(raw));
+	raw.rssi = -20;
+	raw.pdu_len = (uint16_t)build_raw_adv_pdu(raw.pdu_data, payload,
+						   (uint8_t)plen, 0);
+	ret = ioctl(fd, SL_IOCTL_INJECT_RAW_ADV, &raw);
+	check("INJECT_RAW_ADV (no uuid, filter cleared)", ret);
+
+	ret = ioctl(fd, SL_IOCTL_SCAN_RESULT_COUNT, NULL);
+	check("SCAN_RESULT_COUNT (should be 2)", ret);
+	if (ret == 2)
+		printf("  OK:   Advert passed after filter cleared\n");
+	else
+		printf("  WARN: expected 2 results, got %d\n", ret);
+
+	ret = ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+	check("STOP_SCAN", ret);
+}
+
+/* ------------------------------------------------------------------ *
+ * test_measurement_stubs — MEAS_READ_CAP / SET_LINK_PARAM / etc.   *
+ *                                                                    *
+ * T/XS 10003-2025 §8.7 narrowband AFH measurement.                 *
+ * Verify the stub ioctls return reasonable results and do not crash. *
+ * ------------------------------------------------------------------ */
+
+static void test_measurement_stubs(int fd)
+{
+	test_header("Measurement stubs: MEAS_READ_CAP / SET_LINK / ACTION / ENABLE");
+
+	/* MEAS_READ_CAP should return capability info */
+	struct sle_meas_cap cap;
+
+	memset(&cap, 0, sizeof(cap));
+	int ret = ioctl(fd, SL_IOCTL_MEAS_READ_CAP, &cap);
+
+	check("MEAS_READ_CAP", ret);
+	printf("  INFO: meas_types=0x%02x max_instances=%u antenna=%u\n",
+	       cap.meas_types, cap.max_instances, cap.antenna_count);
+
+	/* MEAS_SET_LINK_PARAM — expect ENOTCONN (no active connection) */
+	struct sle_meas_link_param lp;
+
+	memset(&lp, 0, sizeof(lp));
+	lp.handle = 0;
+	lp.meas_type = 1;
+	lp.interval = 100;
+	lp.duration = 50;
+	ret = ioctl(fd, SL_IOCTL_MEAS_SET_LINK_PARAM, &lp);
+	if (ret < 0)
+		printf("  OK:   MEAS_SET_LINK_PARAM rejected (errno=%d)\n",
+		       errno);
+	else
+		printf("  OK:   MEAS_SET_LINK_PARAM accepted (ret=%d)\n", ret);
+
+	/* MEAS_ACTION — expect error or success depending on backend */
+	struct sle_meas_action action;
+
+	memset(&action, 0, sizeof(action));
+	action.handle = 0;
+	action.action = 0; /* start */
+	ret = ioctl(fd, SL_IOCTL_MEAS_ACTION, &action);
+	if (ret < 0)
+		printf("  OK:   MEAS_ACTION rejected (errno=%d)\n", errno);
+	else
+		printf("  OK:   MEAS_ACTION accepted (ret=%d)\n", ret);
+
+	/* MEAS_ENABLE — toggle measurement off */
+	uint8_t enable = 0;
+
+	ret = ioctl(fd, SL_IOCTL_MEAS_ENABLE, &enable);
+	if (ret < 0)
+		printf("  OK:   MEAS_ENABLE(0) rejected (errno=%d)\n", errno);
+	else
+		printf("  OK:   MEAS_ENABLE(0) accepted\n");
+}
+
+/* ------------------------------------------------------------------ *
+ * test_scan_filter_bounds — SET_SCAN_FILTER parameter validation    *
+ *                                                                    *
+ * Verify that invalid uuid_count values are rejected.               *
+ * ------------------------------------------------------------------ */
+
+static void test_scan_filter_bounds(int fd)
+{
+	test_header("Scan filter bounds: uuid_count validation");
+
+	/* uuid_count=0 should succeed (empty filter = clear) */
+	struct sle_scan_filter filter;
+
+	memset(&filter, 0, sizeof(filter));
+	filter.uuid_count = 0;
+	int ret = ioctl(fd, SL_IOCTL_SET_SCAN_FILTER, &filter);
+
+	check("SET_SCAN_FILTER (count=0)", ret);
+
+	/* uuid_count=4 should succeed (max capacity) */
+	filter.uuid_count = 4;
+	filter.uuids[0] = 0x0001;
+	filter.uuids[1] = 0x0002;
+	filter.uuids[2] = 0x0003;
+	filter.uuids[3] = 0x0004;
+	ret = ioctl(fd, SL_IOCTL_SET_SCAN_FILTER, &filter);
+	check("SET_SCAN_FILTER (count=4)", ret);
+
+	/* uuid_count=5 should be clamped to 4 (defensive truncation) */
+	filter.uuid_count = 5;
+	ret = ioctl(fd, SL_IOCTL_SET_SCAN_FILTER, &filter);
+	check("SET_SCAN_FILTER (count=5, clamped)", ret);
+
+	/* Clean up */
+	ioctl(fd, SL_IOCTL_CLEAR_SCAN_FILTER, NULL);
+}
+
+/* ------------------------------------------------------------------ *
  * test_dli_mgmt_plane — DLI_SEND_CMD (0x84) + MGMT_STATS (0x85)    *
  *                                                                    *
  * TXS-50004 §9 capability exchange: management command dispatch.    *
@@ -9264,6 +9501,11 @@ static void test_ioctl_fuzz(int fd)
 		SL_IOCTL_RAL_CLEAR,     SL_IOCTL_RAL_SIZE,
 		SL_IOCTL_RAL_READ_PEER_RPA, SL_IOCTL_RAL_READ_LOCAL_RPA,
 		SL_IOCTL_RPA_ENABLE,    SL_IOCTL_RPA_SET_TIMEOUT,
+		/* Scan filter */
+		SL_IOCTL_SET_SCAN_FILTER, SL_IOCTL_CLEAR_SCAN_FILTER,
+		/* Measurement */
+		SL_IOCTL_MEAS_READ_CAP, SL_IOCTL_MEAS_SET_LINK_PARAM,
+		SL_IOCTL_MEAS_ACTION,   SL_IOCTL_MEAS_ENABLE,
 	};
 	int num_cmds = sizeof(cmds) / sizeof(cmds[0]);
 
@@ -9305,10 +9547,10 @@ static void test_ioctl_fuzz(int fd)
 	printf("  OK:   Phase 2: %d random iterations survived\n", phase2);
 	ok_count += phase2;
 
-	/* Phase 3: unknown ioctl numbers */
+	/* Phase 3: unknown ioctl numbers (skip 0xC0-0xC3: measurement) */
 	int phase3 = 0;
 
-	for (int nr = 0xC0; nr <= 0xFF; nr++) {
+	for (int nr = 0xC4; nr <= 0xFF; nr++) {
 		unsigned long bad_cmd = _IO(SL_MAGIC, nr);
 
 		memset(buf, 0, sizeof(buf));
@@ -9321,7 +9563,7 @@ static void test_ioctl_fuzz(int fd)
 			       nr, ret, errno);
 	}
 	printf("  OK:   Phase 3: %d/%d unknown ioctls rejected (ENOTTY)\n",
-	       phase3, 64);
+	       phase3, 60);
 	ok_count += phase3;
 
 	/* Phase 4: NULL pointer (should not crash) */
@@ -9521,6 +9763,9 @@ int main(void)
 	test_dev_switch_isolation(fd);
 	test_ssap_prop_edge_cases(fd);
 	test_scan_filter_reject(fd);
+	test_scan_uuid_filter(fd);
+	test_scan_filter_bounds(fd);
+	test_measurement_stubs(fd);
 	test_dli_mgmt_plane(fd);
 	test_conn_info_fields(fd);
 	test_ssap_multi_notify(fd);

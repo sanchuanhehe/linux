@@ -3031,7 +3031,9 @@ impl MiscDevice for SparkLinkCtl {
             | SL_IOCTL_EXT_ADV_TICK
             | SL_IOCTL_INJECT_ADV
             | SL_IOCTL_INJECT_RAW_ADV
-            | SL_IOCTL_SCAN_RESULT_COUNT => ioctl_dispatch_adv(me, cmd, arg),
+            | SL_IOCTL_SCAN_RESULT_COUNT
+            | SL_IOCTL_SET_SCAN_FILTER
+            | SL_IOCTL_CLEAR_SCAN_FILTER => ioctl_dispatch_adv(me, cmd, arg),
             // --- Connection management ---
             SL_IOCTL_CONNECT
             | SL_IOCTL_DISCONNECT

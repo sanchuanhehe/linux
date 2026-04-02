@@ -119,15 +119,15 @@ impl ScanFilter {
         let mut pos = 0;
         let end = data_len.min(data.len());
         while pos + 1 < end {
-            let tlv_len = data[pos] as usize;
-            let tlv_type = data[pos + 1];
+            let tlv_type = data[pos];
+            let tlv_len = data[pos + 1] as usize;
             if tlv_len == 0 {
                 break;
             }
             // Standard service list types: 0x05 (full) and 0x07 (partial)
             if tlv_type == 0x05 || tlv_type == 0x07 {
                 let value_start = pos + 2;
-                let value_end = (pos + 1 + tlv_len).min(end);
+                let value_end = (pos + 2 + tlv_len).min(end);
                 let mut i = value_start;
                 while i + 1 < value_end {
                     let uuid = u16::from_le_bytes([data[i], data[i + 1]]);
@@ -139,7 +139,7 @@ impl ScanFilter {
                     i += 2;
                 }
             }
-            pos += 1 + tlv_len;
+            pos += 2 + tlv_len;
         }
         false
     }

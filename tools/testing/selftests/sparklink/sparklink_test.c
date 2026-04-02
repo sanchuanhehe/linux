@@ -9156,6 +9156,220 @@ static void test_phy_extreme_params(int fd)
 	ioctl(fd, SL_IOCTL_PHY_SET_SINR, &sinr);
 }
 
+/* ------------------------------------------------------------------ *
+ * test_ioctl_fuzz — deterministic ioctl fuzzing                      *
+ * ------------------------------------------------------------------ *
+ *
+ * Sends crafted payloads to every ioctl command to verify the kernel
+ * rejects malformed input without panicking.  Uses a fixed PRNG seed
+ * for reproducibility.
+ */
+
+/* Simple xorshift32 PRNG — deterministic, no libc dependency */
+static uint32_t fuzz_rng_state = 0xDEADBEEF;
+
+static uint32_t fuzz_rand(void)
+{
+	fuzz_rng_state ^= fuzz_rng_state << 13;
+	fuzz_rng_state ^= fuzz_rng_state >> 17;
+	fuzz_rng_state ^= fuzz_rng_state << 5;
+	return fuzz_rng_state;
+}
+
+static void fuzz_fill(void *buf, size_t len)
+{
+	uint8_t *p = buf;
+
+	for (size_t i = 0; i < len; i++)
+		p[i] = (uint8_t)(fuzz_rand() & 0xFF);
+}
+
+static void test_ioctl_fuzz(int fd)
+{
+	test_header("Ioctl fuzz: deterministic payload injection");
+
+	int ok_count = 0;
+	int crash_count = 0;
+
+	/*
+	 * All known ioctl command numbers.  The kernel must handle every
+	 * one gracefully regardless of payload content.
+	 */
+	static const unsigned long cmds[] = {
+		/* Device management */
+		SL_IOCTL_DEV_REGISTER,  SL_IOCTL_DEV_UNREGISTER,
+		SL_IOCTL_DEV_COUNT,     SL_IOCTL_DEV_INFO,
+		SL_IOCTL_DEV_SWITCH,    SL_IOCTL_DEV_LIST,
+		/* Advertising */
+		SL_IOCTL_START_ADV,     SL_IOCTL_STOP_ADV,
+		SL_IOCTL_START_SCAN,    SL_IOCTL_STOP_SCAN,
+		SL_IOCTL_EXT_ADV_CONFIGURE, SL_IOCTL_EXT_ADV_SET_DATA,
+		SL_IOCTL_EXT_ADV_ENABLE, SL_IOCTL_EXT_ADV_DISABLE,
+		SL_IOCTL_EXT_ADV_REMOVE, SL_IOCTL_EXT_ADV_INFO,
+		SL_IOCTL_EXT_ADV_ENABLE_EX, SL_IOCTL_EXT_ADV_TICK,
+		/* Scan / inject */
+		SL_IOCTL_INJECT_ADV,    SL_IOCTL_SCAN_RESULT_COUNT,
+		SL_IOCTL_INJECT_RAW_ADV,
+		/* Connection */
+		SL_IOCTL_CONNECT,       SL_IOCTL_DISCONNECT,
+		SL_IOCTL_CONN_INFO,     SL_IOCTL_CONN_SEND,
+		SL_IOCTL_CONN_RECV,     SL_IOCTL_INJECT_CONN_RESP,
+		SL_IOCTL_INJECT_CONN_DATA, SL_IOCTL_CONN_COUNT,
+		SL_IOCTL_CONN_LIST,     SL_IOCTL_SET_CONN_MTU,
+		/* AFH */
+		SL_IOCTL_AFH_SET_MAP,   SL_IOCTL_AFH_GET_MAP,
+		SL_IOCTL_AFH_REPORT_RSSI, SL_IOCTL_AFH_CLASSIFY,
+		SL_IOCTL_AFH_HOP_NEXT,  SL_IOCTL_AFH_REPORT_RETX,
+		/* Security */
+		SL_IOCTL_SEC_SET_PSK,   SL_IOCTL_SEC_PAIR,
+		SL_IOCTL_SEC_INFO,      SL_IOCTL_SEC_ENCRYPT_ON,
+		SL_IOCTL_SEC_SM3_TEST,  SL_IOCTL_SEC_SM4_ENC_TEST,
+		SL_IOCTL_SEC_SM4_DEC_TEST, SL_IOCTL_SEC_SM4_BLOCK_TEST,
+		SL_IOCTL_SEC_HMAC_TEST, SL_IOCTL_SEC_RESET,
+		SL_IOCTL_SEC_GET_PASSKEY, SL_IOCTL_SEC_CONFIRM_PASSKEY,
+		SL_IOCTL_SEC_REJECT_PASSKEY, SL_IOCTL_SEC_SET_OOB,
+		SL_IOCTL_SEC_INPUT_PASSKEY, SL_IOCTL_SEC_SET_PASSWORD,
+		/* SSAP */
+		SL_IOCTL_SSAP_REGISTER_SVC, SL_IOCTL_SSAP_INFO,
+		SL_IOCTL_SSAP_READ,     SL_IOCTL_SSAP_WRITE,
+		SL_IOCTL_SSAP_FIND_SVC, SL_IOCTL_SSAP_NOTIFY,
+		SL_IOCTL_SSAP_DEQUEUE_NTF, SL_IOCTL_SSAP_ADD_SVC,
+		SL_IOCTL_SSAP_ADD_PROP, SL_IOCTL_SSAP_REMOVE_SVC,
+		/* Power management */
+		SL_IOCTL_PM_INFO,       SL_IOCTL_PM_SET_STATE,
+		SL_IOCTL_PM_SET_INTERVAL, SL_IOCTL_PM_FORCE_ACTIVE,
+		SL_IOCTL_PM_TICK,       SL_IOCTL_PM_ACTIVITY,
+		/* Sync link */
+		SL_IOCTL_SYNC_UCAST_PARAM, SL_IOCTL_SYNC_UCAST_CREATE,
+		SL_IOCTL_SYNC_UCAST_REMOVE, SL_IOCTL_SYNC_MCAST_PARAM,
+		SL_IOCTL_SYNC_MCAST_CREATE, SL_IOCTL_SYNC_MCAST_REMOVE,
+		SL_IOCTL_SYNC_DATAPATH_CFG, SL_IOCTL_SYNC_DATAPATH_REMOVE,
+		SL_IOCTL_SYNC_INFO,
+		/* Events */
+		SL_IOCTL_EVENT_COUNT,   SL_IOCTL_EVENT_STATS,
+		/* DLI */
+		SL_IOCTL_DLI_INFO,      SL_IOCTL_USB_DEV_COUNT,
+		SL_IOCTL_DLI_POLL_EVENT, SL_IOCTL_DLI_RESET,
+		/* Stats */
+		SL_IOCTL_SUBSYS_STATS,
+		/* PHY */
+		SL_IOCTL_PHY_INFO,      SL_IOCTL_PHY_SET_MCS,
+		SL_IOCTL_PHY_SET_TXPOWER, SL_IOCTL_PHY_MCS_SELECT,
+		SL_IOCTL_PHY_HOP_NEXT,  SL_IOCTL_PHY_SET_BW,
+		SL_IOCTL_PHY_GET_SINR,  SL_IOCTL_PHY_SET_SINR,
+		/* Role */
+		SL_IOCTL_SET_ROLE,      SL_IOCTL_GET_ROLE,
+		/* RAL/RPA */
+		SL_IOCTL_RAL_ADD,       SL_IOCTL_RAL_REMOVE,
+		SL_IOCTL_RAL_CLEAR,     SL_IOCTL_RAL_SIZE,
+		SL_IOCTL_RAL_READ_PEER_RPA, SL_IOCTL_RAL_READ_LOCAL_RPA,
+		SL_IOCTL_RPA_ENABLE,    SL_IOCTL_RPA_SET_TIMEOUT,
+	};
+	int num_cmds = sizeof(cmds) / sizeof(cmds[0]);
+
+	/* Test patterns */
+	static const uint8_t patterns[][4] = {
+		{0x00, 0x00, 0x00, 0x00},  /* all zeros */
+		{0xFF, 0xFF, 0xFF, 0xFF},  /* all ones */
+		{0x80, 0x00, 0x00, 0x00},  /* sign bit / MSB */
+		{0x7F, 0xFF, 0xFF, 0xFF},  /* max positive */
+		{0x41, 0x41, 0x41, 0x41},  /* ASCII 'AAAA' */
+	};
+	int num_patterns = sizeof(patterns) / sizeof(patterns[0]);
+
+	/* Phase 1: known ioctls with patterned payloads */
+	uint8_t buf[512];
+
+	for (int c = 0; c < num_cmds; c++) {
+		for (int p = 0; p < num_patterns; p++) {
+			memset(buf, 0, sizeof(buf));
+			for (size_t i = 0; i < sizeof(buf); i++)
+				buf[i] = patterns[p][i % 4];
+			ioctl(fd, cmds[c], buf);
+			ok_count++;
+		}
+	}
+	printf("  OK:   Phase 1: %d pattern iterations survived\n", ok_count);
+
+	/* Phase 2: known ioctls with pseudorandom payloads */
+	int phase2 = 0;
+
+	fuzz_rng_state = 0xDEADBEEF;
+	for (int round = 0; round < 8; round++) {
+		for (int c = 0; c < num_cmds; c++) {
+			fuzz_fill(buf, sizeof(buf));
+			ioctl(fd, cmds[c], buf);
+			phase2++;
+		}
+	}
+	printf("  OK:   Phase 2: %d random iterations survived\n", phase2);
+	ok_count += phase2;
+
+	/* Phase 3: unknown ioctl numbers */
+	int phase3 = 0;
+
+	for (int nr = 0xC0; nr <= 0xFF; nr++) {
+		unsigned long bad_cmd = _IO(SL_MAGIC, nr);
+
+		memset(buf, 0, sizeof(buf));
+		int ret = ioctl(fd, bad_cmd, buf);
+
+		if (ret < 0 && errno == ENOTTY)
+			phase3++;
+		else
+			printf("  WARN: unknown ioctl 0x%02x: ret=%d errno=%d\n",
+			       nr, ret, errno);
+	}
+	printf("  OK:   Phase 3: %d/%d unknown ioctls rejected (ENOTTY)\n",
+	       phase3, 64);
+	ok_count += phase3;
+
+	/* Phase 4: NULL pointer (should not crash) */
+	for (int c = 0; c < num_cmds; c++)
+		ioctl(fd, cmds[c], NULL);
+	printf("  OK:   Phase 4: %d NULL-arg calls survived\n", num_cmds);
+	ok_count += num_cmds;
+
+	/* Phase 5: boundary lengths for data-carrying ioctls */
+	static const unsigned long data_cmds[] = {
+		SL_IOCTL_CONN_SEND, SL_IOCTL_INJECT_CONN_DATA,
+		SL_IOCTL_EXT_ADV_SET_DATA, SL_IOCTL_SEC_SM3_TEST,
+		SL_IOCTL_SEC_HMAC_TEST, SL_IOCTL_SSAP_READ,
+		SL_IOCTL_SSAP_WRITE,
+	};
+	int phase5 = 0;
+
+	for (int d = 0; d < (int)(sizeof(data_cmds) / sizeof(data_cmds[0])); d++) {
+		/* length field at offset 2 (uint16_t), try boundary values */
+		uint16_t lengths[] = {0, 1, 127, 128, 252, 255, 256, 0x7FFF, 0xFFFF};
+
+		for (int l = 0; l < (int)(sizeof(lengths) / sizeof(lengths[0])); l++) {
+			memset(buf, 0x42, sizeof(buf));
+			memcpy(buf + 2, &lengths[l], sizeof(uint16_t));
+			ioctl(fd, data_cmds[d], buf);
+			phase5++;
+		}
+	}
+	printf("  OK:   Phase 5: %d boundary-length iterations survived\n",
+	       phase5);
+	ok_count += phase5;
+
+	/* Reset security/state after fuzzing to avoid contamination */
+	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+	{
+		struct sle_pair_params pair;
+
+		memset(&pair, 0, sizeof(pair));
+		pair.method = 1;
+		ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	}
+	ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+	ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
+	ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+
+	printf("  Ioctl fuzz: %d OK, %d CRASH\n", ok_count, crash_count);
+}
+
 static void test_genetlink(void)
 {
 	test_header("Generic Netlink: sparklink family");
@@ -9334,6 +9548,7 @@ int main(void)
 	test_ext_advertising(fd);
 	test_sync_link_management(fd);
 	test_phy_extreme_params(fd);
+	test_ioctl_fuzz(fd);
 	test_genetlink();
 
 	printf("\n=== All tests completed ===\n");

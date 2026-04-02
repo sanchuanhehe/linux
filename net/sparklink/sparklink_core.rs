@@ -817,6 +817,14 @@ pub struct SleConnInfo {
     pub ssap_info_exchanged: u8,
     /// SSAP session negotiated MTU (0 if no session bound).
     pub ssap_mtu: u16,
+    /// SMTC TX credits remaining (Reliable channel).
+    pub smtc_tx_credits: u16,
+    /// SMTC RX credits remaining (Reliable channel).
+    pub smtc_rx_credits: u16,
+    /// DUDTC TX credits remaining (0 if Unreliable).
+    pub dudtc_tx_credits: u16,
+    /// DUDTC RX credits remaining (0 if Unreliable).
+    pub dudtc_rx_credits: u16,
 }
 
 // SAFETY: SleConnInfo is repr(C) with only primitive fields.
@@ -2169,6 +2177,25 @@ impl_has_delayed_work! {
 // Unified controller event processing
 // ---------------------------------------------------------------------------
 
+/// Send a credit grant PDU on the management channel (CMTC).
+///
+/// Format: `[TCID_CMTC] [CREDIT_GRANT_PDU_TYPE] [target_tcid] [credits LE16]`
+fn send_credit_grant(
+    ctrl: &sle_dli::ControllerBackend,
+    handle: u16,
+    target_tcid: u16,
+    credits: u16,
+) {
+    let mut buf = [0u8; 5];
+    buf[0] = sle_conn::tcid::MANAGEMENT as u8;
+    buf[1] = sle_conn::CREDIT_GRANT_PDU_TYPE;
+    buf[2] = target_tcid as u8;
+    let c = credits.to_le_bytes();
+    buf[3] = c[0];
+    buf[4] = c[1];
+    let _ = ctrl.send_data(handle, &buf);
+}
+
 /// Process a single controller event: resolve pending commands, drive
 /// state machine transitions, and publish to broadcast ring / DLI ring.
 ///
@@ -2241,24 +2268,48 @@ fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent
             let raw = data.as_slice();
             if raw.is_empty() {
                 // Empty payload, nothing to route.
+            } else if raw[0] as u16 == sle_conn::tcid::MANAGEMENT
+                && raw.len() >= 5
+                && raw[1] == sle_conn::CREDIT_GRANT_PDU_TYPE
+            {
+                // Credit grant PDU on management channel.
+                // Format: [TCID 0x02] [0xFC] [target_tcid u8] [credits LE16]
+                let target_tcid = raw[2] as u16;
+                let credits = u16::from_le_bytes([raw[3], raw[4]]);
+                let _ = shared.conn.receive_credits(*handle, target_tcid, credits);
             } else if raw[0] as u16 == sle_conn::tcid::SERVICE_MGMT && raw.len() > 1 {
                 // SSAP PDU on service management channel (TCID 0x0A).
+                // Track RX credit for the reliable SMTC channel.
+                let needs_grant = shared.conn.consume_rx_credit(
+                    *handle, sle_conn::tcid::SERVICE_MGMT,
+                );
                 let pdu_data = &raw[1..];
                 let mut resp_buf = [0u8; sle_ssap::SSAP_PDU_MAX];
                 let resp_len = shared.conn.process_ssap_pdu(
                     *handle, pdu_data, &mut shared.ssap, &mut resp_buf,
                 ).unwrap_or(0);
-                // Send response PDU back with TCID prefix.
+                // Send response PDU back with TCID prefix, consuming TX credit.
                 if resp_len > 0 {
-                    let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
-                    tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
-                    tx_buf[1..1 + resp_len].copy_from_slice(&resp_buf[..resp_len]);
-                    let _ = shared.controller.send_data(*handle, &tx_buf[..1 + resp_len]);
+                    if shared.conn.consume_tx_credit(
+                        *handle, sle_conn::tcid::SERVICE_MGMT,
+                    ).is_ok() {
+                        let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                        tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                        tx_buf[1..1 + resp_len].copy_from_slice(&resp_buf[..resp_len]);
+                        let _ = shared.controller.send_data(
+                            *handle, &tx_buf[..1 + resp_len],
+                        );
+                    }
                 }
                 // Drain pending notifications/indications triggered by the PDU.
                 loop {
                     match shared.ssap.dequeue_notification() {
                         Some(n) => {
+                            if shared.conn.consume_tx_credit(
+                                *handle, sle_conn::tcid::SERVICE_MGMT,
+                            ).is_err() {
+                                break; // No credits remaining for notifications.
+                            }
                             let pdu = if n.indication {
                                 sle_ssap::SsapPdu::ValueInd { handle: n.handle, data: n.data }
                             } else {
@@ -2277,15 +2328,32 @@ fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent
                         None => break,
                     }
                 }
+                // Send credit grant if RX credits are low.
+                if needs_grant {
+                    if let Ok(granted) = shared.conn.grant_credits(
+                        *handle, sle_conn::tcid::SERVICE_MGMT,
+                    ) {
+                        send_credit_grant(
+                            &shared.controller,
+                            *handle,
+                            sle_conn::tcid::SERVICE_MGMT,
+                            granted,
+                        );
+                    }
+                }
             } else {
                 // User data — strip TCID prefix if present, enqueue to rx_queue.
-                let payload = if raw[0] as u16 == sle_conn::tcid::DEFAULT_DATA
+                let tcid = if raw[0] as u16 == sle_conn::tcid::DEFAULT_DATA
                     && raw.len() > 1
                 {
-                    &raw[1..]
+                    let _ = shared.conn.consume_rx_credit(
+                        *handle, sle_conn::tcid::DEFAULT_DATA,
+                    );
+                    sle_conn::tcid::DEFAULT_DATA
                 } else {
-                    raw
+                    0 // Legacy data without TCID prefix.
                 };
+                let payload = if tcid != 0 { &raw[1..] } else { raw };
                 let seq = shared.conn.info(*handle)
                     .map(|e| e.seq.rx_seq)
                     .unwrap_or(0);
@@ -3220,6 +3288,11 @@ impl MiscDevice for SparkLinkCtl {
                     info.ssap_mtu = session.mtu;
                     info.ssap_info_exchanged = if session.info_exchanged { 1 } else { 0 };
                 }
+                // Credit state for reliable transport channels.
+                info.smtc_tx_credits = entry.channels.svc_mgmt.tx_credits;
+                info.smtc_rx_credits = entry.channels.svc_mgmt.rx_credits;
+                info.dudtc_tx_credits = entry.channels.data.tx_credits;
+                info.dudtc_rx_credits = entry.channels.data.rx_credits;
                 drop(ss);
                 write_user_struct(arg, &info)?;
                 Ok(0)
@@ -3298,28 +3371,49 @@ impl MiscDevice for SparkLinkCtl {
                     let s = ss.as_mut().ok_or(ENODEV)?;
                     let handle = s.conn.resolve_handle(cd.handle)?;
                     if !raw.is_empty()
+                        && raw[0] as u16 == sle_conn::tcid::MANAGEMENT
+                        && raw.len() >= 5
+                        && raw[1] == sle_conn::CREDIT_GRANT_PDU_TYPE
+                    {
+                        // Credit grant PDU injection.
+                        let target_tcid = raw[2] as u16;
+                        let credits = u16::from_le_bytes([raw[3], raw[4]]);
+                        let _ = s.conn.receive_credits(handle, target_tcid, credits);
+                    } else if !raw.is_empty()
                         && raw[0] as u16 == sle_conn::tcid::SERVICE_MGMT
                         && raw.len() > 1
                     {
                         // SSAP PDU injection — route through SSAP processing.
+                        let needs_grant = s.conn.consume_rx_credit(
+                            handle, sle_conn::tcid::SERVICE_MGMT,
+                        );
                         let pdu_data = &raw[1..];
                         let mut resp_buf = [0u8; sle_ssap::SSAP_PDU_MAX];
                         let resp_len = s.conn.process_ssap_pdu(
                             handle, pdu_data, &mut s.ssap, &mut resp_buf,
                         ).unwrap_or(0);
                         if resp_len > 0 {
-                            let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
-                            tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
-                            tx_buf[1..1 + resp_len]
-                                .copy_from_slice(&resp_buf[..resp_len]);
-                            let _ = s.controller.send_data(
-                                handle, &tx_buf[..1 + resp_len],
-                            );
+                            if s.conn.consume_tx_credit(
+                                handle, sle_conn::tcid::SERVICE_MGMT,
+                            ).is_ok() {
+                                let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                                tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                                tx_buf[1..1 + resp_len]
+                                    .copy_from_slice(&resp_buf[..resp_len]);
+                                let _ = s.controller.send_data(
+                                    handle, &tx_buf[..1 + resp_len],
+                                );
+                            }
                         }
                         // Drain notifications triggered by the write.
                         loop {
                             match s.ssap.dequeue_notification() {
                                 Some(n) => {
+                                    if s.conn.consume_tx_credit(
+                                        handle, sle_conn::tcid::SERVICE_MGMT,
+                                    ).is_err() {
+                                        break;
+                                    }
                                     let pdu = if n.indication {
                                         sle_ssap::SsapPdu::ValueInd {
                                             handle: n.handle, data: n.data,
@@ -3347,12 +3441,28 @@ impl MiscDevice for SparkLinkCtl {
                                 None => break,
                             }
                         }
+                        // Send credit grant if RX credits are low.
+                        if needs_grant {
+                            if let Ok(granted) = s.conn.grant_credits(
+                                handle, sle_conn::tcid::SERVICE_MGMT,
+                            ) {
+                                send_credit_grant(
+                                    &s.controller,
+                                    handle,
+                                    sle_conn::tcid::SERVICE_MGMT,
+                                    granted,
+                                );
+                            }
+                        }
                     } else {
                         // Regular data injection — strip TCID if present.
                         let payload = if !raw.is_empty()
                             && raw[0] as u16 == sle_conn::tcid::DEFAULT_DATA
                             && raw.len() > 1
                         {
+                            let _ = s.conn.consume_rx_credit(
+                                handle, sle_conn::tcid::DEFAULT_DATA,
+                            );
                             &raw[1..]
                         } else {
                             raw

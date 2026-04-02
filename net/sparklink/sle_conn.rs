@@ -84,6 +84,15 @@ pub struct TransportChannel {
     pub rx_credits: u16,
 }
 
+/// Initial credit window for reliable transport channels.
+pub const INITIAL_CREDITS: u16 = 16;
+/// When rx_credits drops below this threshold, send a credit grant.
+const CREDIT_LOW_WATERMARK: u16 = 4;
+/// Number of credits to grant at a time.
+const CREDIT_GRANT_SIZE: u16 = 16;
+/// PDU type for credit grant on the management channel.
+pub const CREDIT_GRANT_PDU_TYPE: u8 = 0xFC;
+
 impl TransportChannel {
     /// Create a channel with standard defaults.
     const fn new(tcid: u16, mode: TransportMode, mtu: u16) -> Self {
@@ -96,6 +105,41 @@ impl TransportChannel {
             tx_credits: 0,
             rx_credits: 0,
         }
+    }
+
+    /// Try to consume a TX credit before sending. For Unreliable channels,
+    /// always succeeds. Returns EAGAIN when no credits remain.
+    pub fn try_consume_tx_credit(&mut self) -> Result {
+        if self.mode == TransportMode::Unreliable {
+            return Ok(());
+        }
+        if self.tx_credits == 0 {
+            return Err(EAGAIN);
+        }
+        self.tx_credits -= 1;
+        Ok(())
+    }
+
+    /// Record a received PDU. Returns true if rx_credits fell below the
+    /// watermark and a credit grant should be sent to the peer.
+    /// For Unreliable channels, always returns false.
+    pub fn consume_rx_credit(&mut self) -> bool {
+        if self.mode == TransportMode::Unreliable {
+            return false;
+        }
+        self.rx_credits = self.rx_credits.saturating_sub(1);
+        self.rx_credits < CREDIT_LOW_WATERMARK
+    }
+
+    /// Replenish rx_credits and return the number of credits granted.
+    pub fn grant_rx_credits(&mut self) -> u16 {
+        self.rx_credits = self.rx_credits.saturating_add(CREDIT_GRANT_SIZE);
+        CREDIT_GRANT_SIZE
+    }
+
+    /// Apply a credit grant received from the peer.
+    pub fn receive_tx_credits(&mut self, credits: u16) {
+        self.tx_credits = self.tx_credits.saturating_add(credits);
     }
 }
 
@@ -130,6 +174,13 @@ impl ChannelSet {
         self.mgmt.state = ChannelState::Open;
         self.svc_mgmt.state = ChannelState::Open;
         self.data.state = ChannelState::Open;
+        // Initialize credits for Reliable channels.
+        for ch in [&mut self.mgmt, &mut self.svc_mgmt, &mut self.data] {
+            if ch.mode == TransportMode::Reliable {
+                ch.tx_credits = INITIAL_CREDITS;
+                ch.rx_credits = INITIAL_CREDITS;
+            }
+        }
     }
 
     /// Close all channels (called on disconnection).
@@ -137,6 +188,10 @@ impl ChannelSet {
         self.mgmt.state = ChannelState::Closed;
         self.svc_mgmt.state = ChannelState::Closed;
         self.data.state = ChannelState::Closed;
+        for ch in [&mut self.mgmt, &mut self.svc_mgmt, &mut self.data] {
+            ch.tx_credits = 0;
+            ch.rx_credits = 0;
+        }
     }
 
     /// Update data channel MTU/MPS based on negotiated connection parameters.
@@ -1007,5 +1062,43 @@ impl ConnManager {
     pub fn ssap_session_info(&self, handle: u16) -> Option<(u16, bool)> {
         let entry = self.find(handle).ok()?;
         entry.ssap_session.as_ref().map(|s| (s.mtu, s.info_exchanged))
+    }
+
+    /// Consume a TX credit on the specified channel before sending a PDU.
+    pub fn consume_tx_credit(&mut self, handle: u16, tcid: u16) -> Result {
+        let entry = self.find_mut(handle)?;
+        let ch = entry.channels.by_tcid_mut(tcid).ok_or(EINVAL)?;
+        ch.try_consume_tx_credit()
+    }
+
+    /// Record a received PDU on a channel and return whether credits need
+    /// refilling (rx_credits fell below the watermark).
+    pub fn consume_rx_credit(&mut self, handle: u16, tcid: u16) -> bool {
+        self.find_mut(handle)
+            .ok()
+            .and_then(|e| e.channels.by_tcid_mut(tcid))
+            .map(|ch| ch.consume_rx_credit())
+            .unwrap_or(false)
+    }
+
+    /// Grant more credits for a channel, returning the number granted.
+    pub fn grant_credits(&mut self, handle: u16, tcid: u16) -> Result<u16> {
+        let entry = self.find_mut(handle)?;
+        let ch = entry.channels.by_tcid_mut(tcid).ok_or(EINVAL)?;
+        Ok(ch.grant_rx_credits())
+    }
+
+    /// Apply credits received from the peer for a specific channel.
+    pub fn receive_credits(&mut self, handle: u16, tcid: u16, credits: u16) -> Result {
+        let entry = self.find_mut(handle)?;
+        let ch = entry.channels.by_tcid_mut(tcid).ok_or(EINVAL)?;
+        ch.receive_tx_credits(credits);
+        Ok(())
+    }
+
+    /// Get credit state for a specific channel. Returns (tx_credits, rx_credits).
+    pub fn channel_credits(&self, handle: u16, tcid: u16) -> Option<(u16, u16)> {
+        let entry = self.find(handle).ok()?;
+        entry.channels.by_tcid(tcid).map(|ch| (ch.tx_credits, ch.rx_credits))
     }
 }

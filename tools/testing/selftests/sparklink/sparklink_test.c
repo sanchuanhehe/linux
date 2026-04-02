@@ -195,6 +195,10 @@ struct sle_conn_info {
 	uint8_t  data_mode;
 	uint8_t  ssap_info_exchanged;
 	uint16_t ssap_mtu;
+	uint16_t smtc_tx_credits;
+	uint16_t smtc_rx_credits;
+	uint16_t dudtc_tx_credits;
+	uint16_t dudtc_rx_credits;
 } __attribute__((packed));
 
 struct sle_conn_data {
@@ -6265,6 +6269,204 @@ cleanup:
 }
 
 /* ------------------------------------------------------------------ *
+ * test_credit_flow_control — credit-based flow control on SMTC      *
+ *                                                                    *
+ * Verifies that reliable transport channels enforce credit-based    *
+ * flow control: initial credit window, RX credit tracking with     *
+ * automatic grant generation, TX credit enforcement, and credit    *
+ * grant PDU processing.                                             *
+ * ------------------------------------------------------------------ */
+static void test_credit_flow_control(int fd)
+{
+	test_header("Credit-based flow control");
+
+	int ret;
+	int ok_count = 0;
+	int fail_count = 0;
+
+	/* Step 1: Create and accept a connection */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xCC;
+	cp.peer_addr[1] = 0xCC;
+	cp.peer_addr[5] = 0x01;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT returned %d\n", ret);
+		return;
+	}
+	uint16_t handle = (uint16_t)ret;
+
+	struct sle_inject_conn_resp resp;
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = handle;
+	resp.response_type = 0;
+	resp.bandwidth_mhz = 1;
+	resp.mcs_index = 4;
+	resp.supervision_timeout = 100;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+	if (ret < 0) {
+		printf("  FAIL: INJECT_CONN_RESP: %s\n", strerror(errno));
+		goto cleanup;
+	}
+	ok_count++;
+
+	/* Step 2: Verify initial credit window */
+	struct sle_conn_info info;
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret == 0 && info.smtc_tx_credits == 16 &&
+	    info.smtc_rx_credits == 16) {
+		printf("  OK:   initial SMTC credits tx=%u rx=%u\n",
+		       info.smtc_tx_credits, info.smtc_rx_credits);
+		ok_count++;
+	} else {
+		printf("  FAIL: initial SMTC credits tx=%u rx=%u (expect 16/16)\n",
+		       info.smtc_tx_credits, info.smtc_rx_credits);
+		fail_count++;
+	}
+
+	/* Step 3: Verify DUDTC has no credits (Unreliable mode) */
+	if (info.dudtc_tx_credits == 0 && info.dudtc_rx_credits == 0) {
+		printf("  OK:   DUDTC credits 0/0 (Unreliable)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: DUDTC tx=%u rx=%u (expect 0/0)\n",
+		       info.dudtc_tx_credits, info.dudtc_rx_credits);
+		fail_count++;
+	}
+
+	/* Step 4: Inject 5 SSAP ExchangeInfoReq PDUs.
+	 * Each consumes 1 RX credit and 1 TX credit (for the response).
+	 * After 5: tx=11, rx=11 (both above watermark 4).
+	 */
+	for (int i = 0; i < 5; i++) {
+		struct sle_conn_data inj;
+		memset(&inj, 0, sizeof(inj));
+		inj.handle = handle;
+		inj.data[0] = 0x0A; /* TCID: SMTC */
+		inj.data[1] = 0x01; /* ExchangeInfoReq */
+		inj.data[2] = 23;   /* MTU LE16 */
+		inj.data[3] = 0;
+		inj.data[4] = 23;   /* MPS LE16 */
+		inj.data[5] = 0;
+		inj.length = 6;
+		ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
+		if (ret < 0) {
+			printf("  FAIL: INJECT #%d: %s\n", i + 1, strerror(errno));
+			fail_count++;
+			goto cleanup;
+		}
+	}
+
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret == 0 && info.smtc_tx_credits == 11 &&
+	    info.smtc_rx_credits == 11) {
+		printf("  OK:   after 5 PDUs: tx=%u rx=%u\n",
+		       info.smtc_tx_credits, info.smtc_rx_credits);
+		ok_count++;
+	} else {
+		printf("  FAIL: after 5 PDUs: tx=%u rx=%u (expect 11/11)\n",
+		       info.smtc_tx_credits, info.smtc_rx_credits);
+		fail_count++;
+	}
+
+	/* Step 5: Inject 8 more PDUs (total 13).
+	 * RX: 11 -> 10 -> ... -> 4 -> 3 (< watermark) -> grant +16 = 19
+	 * TX: 11 -> 10 -> ... -> 3
+	 */
+	for (int i = 0; i < 8; i++) {
+		struct sle_conn_data inj;
+		memset(&inj, 0, sizeof(inj));
+		inj.handle = handle;
+		inj.data[0] = 0x0A;
+		inj.data[1] = 0x01;
+		inj.data[2] = 23; inj.data[3] = 0;
+		inj.data[4] = 23; inj.data[5] = 0;
+		inj.length = 6;
+		ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
+		if (ret < 0) {
+			printf("  FAIL: INJECT batch #%d: %s\n",
+			       i + 1, strerror(errno));
+			fail_count++;
+			goto cleanup;
+		}
+	}
+
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret == 0 && info.smtc_tx_credits == 3 &&
+	    info.smtc_rx_credits == 19) {
+		printf("  OK:   after 13 PDUs: tx=%u rx=%u (grant triggered)\n",
+		       info.smtc_tx_credits, info.smtc_rx_credits);
+		ok_count++;
+	} else {
+		printf("  FAIL: after 13 PDUs: tx=%u rx=%u (expect 3/19)\n",
+		       info.smtc_tx_credits, info.smtc_rx_credits);
+		fail_count++;
+	}
+
+	/* Step 6: Inject credit grant PDU from "peer" to replenish TX.
+	 * Format: [TCID 0x02] [0xFC] [target=0x0A] [credits=16 LE16]
+	 * TX should go from 3 to 19.
+	 */
+	{
+		struct sle_conn_data grant;
+		memset(&grant, 0, sizeof(grant));
+		grant.handle = handle;
+		grant.data[0] = 0x02; /* TCID: CMTC */
+		grant.data[1] = 0xFC; /* Credit grant PDU type */
+		grant.data[2] = 0x0A; /* Target channel: SMTC */
+		grant.data[3] = 16;   /* Credits LE16 low */
+		grant.data[4] = 0;    /* Credits LE16 high */
+		grant.length = 5;
+		ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &grant);
+		check("INJECT credit grant PDU", ret);
+	}
+
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret == 0 && info.smtc_tx_credits == 19) {
+		printf("  OK:   after credit grant: tx=%u (3+16=19)\n",
+		       info.smtc_tx_credits);
+		ok_count++;
+	} else {
+		printf("  FAIL: after credit grant: tx=%u (expect 19)\n",
+		       info.smtc_tx_credits);
+		fail_count++;
+	}
+
+	/* Step 7: Verify DUDTC send is unaffected by credits */
+	{
+		struct sle_conn_data ud;
+		memset(&ud, 0, sizeof(ud));
+		ud.handle = handle;
+		memcpy(ud.data, "credit_test", 11);
+		ud.length = 11;
+		ret = ioctl(fd, SL_IOCTL_CONN_SEND, &ud);
+		if (ret >= 0) {
+			printf("  OK:   DUDTC send succeeds without credits\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: DUDTC send: %s\n", strerror(errno));
+			fail_count++;
+		}
+	}
+
+cleanup:
+	;
+	uint16_t disc = handle;
+	ioctl(fd, SL_IOCTL_DISCONNECT, &disc);
+
+	printf("  Credit flow control: %d OK, %d FAIL\n", ok_count, fail_count);
+}
+
+/* ------------------------------------------------------------------ *
  * test_ssap_capacity_stress — SSAP service/property limits          *
  *                                                                    *
  * Registers services until the subsystem refuses, verifying that    *
@@ -6592,6 +6794,7 @@ int main(void)
 	test_dli_reset_behavior(fd);
 	test_ssap_capacity_stress(fd);
 	test_ssap_air_interface(fd);
+	test_credit_flow_control(fd);
 	test_phy_extreme_params(fd);
 	test_genetlink();
 

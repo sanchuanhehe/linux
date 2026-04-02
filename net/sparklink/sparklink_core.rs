@@ -459,6 +459,9 @@ const SL_IOCTL_CONN_COUNT: u32 = _IO(SL_MAGIC, 0x37);
 /// Get list of active connection handles.
 const SL_IOCTL_CONN_LIST: u32 = _IOR::<SleConnList>(SL_MAGIC, 0x38);
 
+/// Set per-connection data channel MTU and MPS.
+const SL_IOCTL_SET_CONN_MTU: u32 = _IOW::<SleConnMtuParams>(SL_MAGIC, 0x39);
+
 // --- Security management ioctls ---
 
 /// Set the pre-shared key for PSK pairing.
@@ -907,6 +910,10 @@ pub struct SleInjectConnResp {
     _pad: u8,
     /// Supervision timeout in 10 ms units.
     pub supervision_timeout: u16,
+    /// Data channel MTU (0 = use default 247).
+    pub data_mtu: u16,
+    /// Data channel MPS (0 = use MTU value).
+    pub data_mps: u16,
 }
 
 impl Default for SleInjectConnResp {
@@ -918,6 +925,8 @@ impl Default for SleInjectConnResp {
             mcs_index: 4,
             _pad: 0,
             supervision_timeout: 100,
+            data_mtu: 0,
+            data_mps: 0,
         }
     }
 }
@@ -936,6 +945,22 @@ pub struct SleConnList {
     pub handles: [u16; 8],
     _reserved: [u8; 4],
 }
+
+/// Per-connection MTU/MPS update parameters.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleConnMtuParams {
+    /// Connection handle.
+    pub handle: u16,
+    /// New data channel MTU (23..=max_pdu_size).
+    pub mtu: u16,
+    /// New data channel MPS (0 = keep current, clamped to MTU).
+    pub mps: u16,
+    _pad: u16,
+}
+
+// SAFETY: SleConnMtuParams is repr(C) with only primitive fields.
+unsafe impl FromBytes for SleConnMtuParams {}
 
 // ---------------------------------------------------------------------------
 // Security management userspace data structures
@@ -3412,6 +3437,11 @@ impl MiscDevice for SparkLinkCtl {
                     let handle = s.conn.resolve_handle(resp.handle)?;
                     let peer_addr = s.conn.info(handle).map(|e| e.peer_addr).unwrap_or([0u8; 6]);
                     let result = s.conn.process_access_response(handle, resp_type, params);
+                    // Apply per-connection MTU/MPS if specified.
+                    if result.is_ok() && resp.data_mtu > 0 {
+                        let mps = if resp.data_mps > 0 { Some(resp.data_mps) } else { None };
+                        let _ = s.conn.set_data_mtu(handle, resp.data_mtu, mps);
+                    }
                     (handle, peer_addr, result)
                 };
                 match &result {
@@ -3571,6 +3601,15 @@ impl MiscDevice for SparkLinkCtl {
                 list.handles[..count].copy_from_slice(&handles[..count]);
                 drop(ss);
                 write_user_struct(arg, &list)?;
+                Ok(0)
+            }
+            SL_IOCTL_SET_CONN_MTU => {
+                let params: SleConnMtuParams = read_user_struct(arg)?;
+                let mps = if params.mps > 0 { Some(params.mps) } else { None };
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let handle = s.conn.resolve_handle(params.handle)?;
+                s.conn.set_data_mtu(handle, params.mtu, mps)?;
                 Ok(0)
             }
             // --- Security management ---

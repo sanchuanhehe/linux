@@ -64,6 +64,7 @@
 #define SL_IOCTL_INJECT_CONN_DATA _IOW(SL_MAGIC, 0x36, struct sle_conn_data)
 #define SL_IOCTL_CONN_COUNT      _IO(SL_MAGIC, 0x37)
 #define SL_IOCTL_CONN_LIST       _IOR(SL_MAGIC, 0x38, struct sle_conn_list)
+#define SL_IOCTL_SET_CONN_MTU   _IOW(SL_MAGIC, 0x39, struct sle_conn_mtu_params)
 
 /* Security management */
 #define SL_IOCTL_SEC_SET_PSK     _IOW(SL_MAGIC, 0x40, struct sle_psk_params)
@@ -223,6 +224,8 @@ struct sle_inject_conn_resp {
 	uint8_t  mcs_index;
 	uint8_t  _pad;
 	uint16_t supervision_timeout;
+	uint16_t data_mtu;
+	uint16_t data_mps;
 } __attribute__((packed));
 
 struct sle_conn_list {
@@ -230,6 +233,13 @@ struct sle_conn_list {
 	uint16_t _pad;
 	uint16_t handles[8];
 	uint8_t  _reserved[4];
+} __attribute__((packed));
+
+struct sle_conn_mtu_params {
+	uint16_t handle;
+	uint16_t mtu;
+	uint16_t mps;
+	uint16_t _pad;
 } __attribute__((packed));
 
 /* Security */
@@ -6845,6 +6855,170 @@ static void test_crc12_verification(int fd)
 }
 
 /* ------------------------------------------------------------------ *
+ * test_mtu_mps_negotiation — per-connection MTU/MPS enforcement     *
+ *                                                                    *
+ * Verifies that MTU is enforced on the send path and that per-      *
+ * connection MTU can be set via INJECT_CONN_RESP and SET_CONN_MTU.  *
+ * ------------------------------------------------------------------ */
+static void test_mtu_mps_negotiation(int fd)
+{
+	test_header("MTU/MPS connection-level negotiation");
+
+	int ok_count = 0, fail_count = 0;
+	int ret;
+
+	/* Step 1: Create connection with custom MTU=64 */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xBB;
+	cp.peer_addr[1] = 0xBB;
+	cp.peer_addr[5] = 0x01;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT returned %d\n", ret);
+		return;
+	}
+	uint16_t handle = (uint16_t)ret;
+
+	struct sle_inject_conn_resp resp;
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = handle;
+	resp.response_type = 0;
+	resp.bandwidth_mhz = 1;
+	resp.mcs_index = 4;
+	resp.supervision_timeout = 3200;
+	resp.data_mtu = 64;
+	resp.data_mps = 0;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+	if (ret < 0) {
+		printf("  FAIL: INJECT_CONN_RESP: %s\n", strerror(errno));
+		goto cleanup;
+	}
+
+	/* Verify MTU via CONN_INFO */
+	struct sle_conn_info info;
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret == 0 && info.data_mtu == 64) {
+		printf("  OK:   data_mtu=64 after INJECT_CONN_RESP\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: data_mtu=%u (expected 64)\n", info.data_mtu);
+		fail_count++;
+	}
+
+	/* Step 2: Send data within MTU — should succeed */
+	struct sle_conn_data cd;
+	memset(&cd, 0, sizeof(cd));
+	cd.handle = handle;
+	cd.length = 32;
+	memset(cd.data, 0xAA, 32);
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &cd);
+	if (ret >= 0) {
+		printf("  OK:   send 32 bytes (within MTU=64) succeeded\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: send 32 bytes rejected: errno=%d (%s) handle=%u\n",
+		       errno, strerror(errno), handle);
+		fail_count++;
+	}
+
+	/* Step 3: Send data exceeding MTU — should fail with EFBIG */
+	memset(&cd, 0, sizeof(cd));
+	cd.handle = handle;
+	cd.length = 100;
+	memset(cd.data, 0xBB, 100);
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &cd);
+	if (ret < 0 && errno == EFBIG) {
+		printf("  OK:   send 100 bytes rejected (EFBIG, MTU=64)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EFBIG, got ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* Step 4: Increase MTU via SET_CONN_MTU */
+	struct sle_conn_mtu_params mtu_params;
+	memset(&mtu_params, 0, sizeof(mtu_params));
+	mtu_params.handle = handle;
+	mtu_params.mtu = 128;
+	ret = ioctl(fd, SL_IOCTL_SET_CONN_MTU, &mtu_params);
+	if (ret == 0) {
+		printf("  OK:   SET_CONN_MTU to 128 succeeded\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: SET_CONN_MTU: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* Verify new MTU */
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret == 0 && info.data_mtu == 128) {
+		printf("  OK:   data_mtu=128 after SET_CONN_MTU\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: data_mtu=%u (expected 128)\n", info.data_mtu);
+		fail_count++;
+	}
+
+	/* Step 5: Now send 100 bytes — should succeed */
+	memset(&cd, 0, sizeof(cd));
+	cd.handle = handle;
+	cd.length = 100;
+	memset(cd.data, 0xCC, 100);
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &cd);
+	if (ret >= 0) {
+		printf("  OK:   send 100 bytes succeeded (MTU=128)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: send 100 bytes rejected after MTU increase: %s\n",
+		       strerror(errno));
+		fail_count++;
+	}
+
+	/* Step 6: Reject invalid MTU (too small) */
+	memset(&mtu_params, 0, sizeof(mtu_params));
+	mtu_params.handle = handle;
+	mtu_params.mtu = 10; /* below minimum 23 */
+	ret = ioctl(fd, SL_IOCTL_SET_CONN_MTU, &mtu_params);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   SET_CONN_MTU mtu=10 rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EINVAL for mtu=10, got ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* Step 7: Set MTU with MPS */
+	memset(&mtu_params, 0, sizeof(mtu_params));
+	mtu_params.handle = handle;
+	mtu_params.mtu = 100;
+	mtu_params.mps = 50;
+	ret = ioctl(fd, SL_IOCTL_SET_CONN_MTU, &mtu_params);
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret == 0 && info.data_mtu == 100 && info.data_mps == 50) {
+		printf("  OK:   MTU=100, MPS=50 set correctly\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: MTU=%u MPS=%u (expected 100/50)\n",
+		       info.data_mtu, info.data_mps);
+		fail_count++;
+	}
+
+cleanup:
+	{
+		uint16_t disc = handle;
+		ioctl(fd, SL_IOCTL_DISCONNECT, &disc);
+	}
+	printf("  MTU/MPS negotiation: %d OK, %d FAIL\n", ok_count, fail_count);
+}
+
+/* ------------------------------------------------------------------ *
  * test_ssap_capacity_stress — SSAP service/property limits          *
  *                                                                    *
  * Registers services until the subsystem refuses, verifying that    *
@@ -7175,6 +7349,7 @@ int main(void)
 	test_credit_flow_control(fd);
 	test_supervision_timeout(fd);
 	test_crc12_verification(fd);
+	test_mtu_mps_negotiation(fd);
 	test_phy_extreme_params(fd);
 	test_genetlink();
 

@@ -965,6 +965,10 @@ impl ConnManager {
         if data.is_empty() || data.len() > CONN_DATA_MAX {
             return Err(EINVAL);
         }
+        let mtu = entry.channels.data.mtu as usize;
+        if data.len() > mtu {
+            return Err(EFBIG);
+        }
         entry.tx_queue.enqueue(data)?;
         entry.seq.advance_tx();
         entry.tx_bytes += data.len() as u64;
@@ -1117,6 +1121,32 @@ impl ConnManager {
     pub fn channel_credits(&self, handle: u16, tcid: u16) -> Option<(u16, u16)> {
         let entry = self.find(handle).ok()?;
         entry.channels.by_tcid(tcid).map(|ch| (ch.tx_credits, ch.rx_credits))
+    }
+
+    /// Set per-connection MTU for the data channel.
+    ///
+    /// Bounds: 23 <= mtu <= max_pdu_size (from negotiated params).
+    /// MPS is clamped to the new MTU value if it would exceed MTU.
+    /// If `mps` is Some and > 0, also set MPS (clamped to mtu).
+    pub fn set_data_mtu(&mut self, handle: u16, mtu: u16, mps: Option<u16>) -> Result {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
+            return Err(EPIPE);
+        }
+        let max = entry.params.max_pdu_size;
+        if mtu < 23 || mtu > max {
+            return Err(EINVAL);
+        }
+        entry.channels.data.mtu = mtu;
+        if let Some(m) = mps {
+            if m > 0 {
+                entry.channels.data.mps = m.min(mtu);
+            }
+        }
+        if entry.channels.data.mps > mtu {
+            entry.channels.data.mps = mtu;
+        }
+        Ok(())
     }
 
     /// Check all Connected entries for supervision timeout expiry.

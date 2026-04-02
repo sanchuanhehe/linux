@@ -192,6 +192,8 @@ pub enum ExtAdvState {
     Active,
 }
 
+pub type ExtAdvInfo = (ExtAdvState, u8, u8, usize, u64, u8, u8, u32);
+
 /// A single extended advertising set.
 pub struct ExtAdvSet {
     /// Set handle (0..EXT_ADV_MAX_SETS-1).
@@ -652,7 +654,7 @@ impl AdvScanInner {
     pub fn ext_adv_info(
         &self,
         handle: u8,
-    ) -> Result<(ExtAdvState, u8, u8, usize, u64, u8, u8, u32)> {
+    ) -> Result<ExtAdvInfo> {
         let idx = handle as usize;
         if idx >= EXT_ADV_MAX_SETS {
             return Err(EINVAL);
@@ -688,11 +690,9 @@ impl AdvScanInner {
     /// Count active extended advertising sets.
     pub fn ext_adv_active_count(&self) -> u8 {
         let mut count = 0u8;
-        for slot in &self.ext_adv_sets {
-            if let Some(set) = slot {
-                if set.state == ExtAdvState::Active {
-                    count += 1;
-                }
+        for set in self.ext_adv_sets.iter().flatten() {
+            if set.state == ExtAdvState::Active {
+                count += 1;
             }
         }
         count

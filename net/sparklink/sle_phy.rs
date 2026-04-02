@@ -130,27 +130,20 @@ pub fn data_rate_kbps(mcs_index: u8, bandwidth_mhz: u8) -> Option<u32> {
 /// sinr_thresholds: approximate minimum SINR (dB, x10) required for
 /// each MCS index at BER=1e-5.
 pub fn mcs_select(min_kbps: u32, bandwidth_mhz: u8, sinr_db_x10: i16) -> u8 {
-    // Approximate SINR thresholds (dB x10) per MCS index
-    const SINR_THRESH: [i16; 13] = [
-        -20, // MCS 0: BPSK 1/4
-         10, // MCS 1: BPSK 1/2
-         40, // MCS 2: BPSK 3/4
-         20, // MCS 3: QPSK 1/4
-         50, // MCS 4: QPSK 1/2
-         80, // MCS 5: QPSK 3/4
-        100, // MCS 6: 16QAM 1/2
-         60, // MCS 7: QPSK 1/2 OFDM
-         90, // MCS 8: QPSK 3/4 OFDM
-        120, // MCS 9: 16QAM 1/2 OFDM
-        150, // MCS 10: 16QAM 3/4 OFDM
-        190, // MCS 11: 64QAM 3/4 OFDM
-        230, // MCS 12: 256QAM 5/6 OFDM
-    ];
+    mcs_select_with_thresholds(min_kbps, bandwidth_mhz, sinr_db_x10, &DEFAULT_SINR_THRESHOLDS)
+}
 
+/// MCS selection with custom SINR thresholds.
+pub fn mcs_select_with_thresholds(
+    min_kbps: u32,
+    bandwidth_mhz: u8,
+    sinr_db_x10: i16,
+    sinr_thresholds: &[i16; 13],
+) -> u8 {
     let mut best = 0u8;
     for i in 0..13u8 {
         let rate = u32::from(MCS_TABLE[i as usize].data_rate_1m_kbps) * u32::from(bandwidth_mhz);
-        if rate >= min_kbps && SINR_THRESH[i as usize] <= sinr_db_x10 {
+        if rate >= min_kbps && sinr_thresholds[i as usize] <= sinr_db_x10 {
             best = i;
         }
     }
@@ -439,7 +432,26 @@ pub struct PhyConfig {
     pub hopping: HoppingState,
     /// Antenna configuration.
     pub antenna: AntennaConfig,
+    /// SINR thresholds (dB x10) per MCS index (0-12).
+    pub sinr_thresholds: [i16; 13],
 }
+
+/// Default SINR thresholds (dB x10) per MCS index at BER=1e-5.
+pub const DEFAULT_SINR_THRESHOLDS: [i16; 13] = [
+    -20, // MCS 0: BPSK 1/4
+     10, // MCS 1: BPSK 3/8
+     40, // MCS 2: QPSK 1/4
+     20, // MCS 3: QPSK 3/8
+     50, // MCS 4: QPSK 1/2
+     80, // MCS 5: QPSK 5/8
+    100, // MCS 6: QPSK 3/4
+     60, // MCS 7: QPSK 7/8
+     90, // MCS 8: QPSK 1
+    120, // MCS 9: 8PSK 5/8
+    150, // MCS 10: 8PSK 3/4
+    190, // MCS 11: 8PSK 7/8
+    230, // MCS 12: 8PSK 1
+];
 
 impl PhyConfig {
     /// Create a default PHY configuration (MCS 4, 1 MHz, SISO).
@@ -451,6 +463,7 @@ impl PhyConfig {
             tx_power_dbm: 10,
             hopping: HoppingState::new(7, ChannelMap::all_used()),
             antenna: AntennaConfig::default(),
+            sinr_thresholds: DEFAULT_SINR_THRESHOLDS,
         }
     }
 

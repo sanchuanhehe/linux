@@ -660,6 +660,12 @@ const SL_IOCTL_PHY_HOP_NEXT: u32 = _IOR::<SlePhyHopInfo>(SL_MAGIC, 0x94);
 /// Set bandwidth.
 const SL_IOCTL_PHY_SET_BW: u32 = _IOW::<SlePhyBwCmd>(SL_MAGIC, 0x95);
 
+/// Get SINR thresholds (dB x10, 13 entries for MCS 0-12).
+const SL_IOCTL_PHY_GET_SINR: u32 = _IOR::<SleSinrThresholds>(SL_MAGIC, 0x96);
+
+/// Set SINR thresholds (dB x10, 13 entries for MCS 0-12).
+const SL_IOCTL_PHY_SET_SINR: u32 = _IOW::<SleSinrThresholds>(SL_MAGIC, 0x97);
+
 /// Set local GT node role (0=TNode, 1=GNode).
 const SL_IOCTL_SET_ROLE: u32 = _IOW::<u8>(SL_MAGIC, 0xA0);
 
@@ -1977,6 +1983,24 @@ pub struct SlePhyBwCmd {
     _reserved: [u8; 3],
 }
 
+/// SINR thresholds per MCS index (dB x10).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleSinrThresholds {
+    /// 13 threshold values for MCS 0-12 (unit: dB x10).
+    pub thresholds: [i16; 13],
+    _pad: [u8; 2],
+}
+
+impl Default for SleSinrThresholds {
+    fn default() -> Self {
+        Self {
+            thresholds: sle_phy::DEFAULT_SINR_THRESHOLDS,
+            _pad: [0; 2],
+        }
+    }
+}
+
 // SAFETY: All PHY ioctl structs are repr(C) with only primitive fields.
 unsafe impl FromBytes for SlePhyInfo {}
 // SAFETY: repr(C), all fields are primitives.
@@ -1989,6 +2013,8 @@ unsafe impl FromBytes for SlePhyMcsSelect {}
 unsafe impl FromBytes for SlePhyHopInfo {}
 // SAFETY: repr(C), all fields are primitives.
 unsafe impl FromBytes for SlePhyBwCmd {}
+// SAFETY: repr(C), all fields are primitives.
+unsafe impl FromBytes for SleSinrThresholds {}
 
 // ---------------------------------------------------------------------------
 // SCI bus types
@@ -4731,10 +4757,16 @@ impl MiscDevice for SparkLinkCtl {
             }
             SL_IOCTL_PHY_MCS_SELECT => {
                 let mut sel: SlePhyMcsSelect = read_user_struct(arg)?;
-                let best = sle_phy::mcs_select(sel.min_kbps, sel.bandwidth_mhz, sel.sinr_db_x10);
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let best = sle_phy::mcs_select_with_thresholds(
+                    sel.min_kbps, sel.bandwidth_mhz, sel.sinr_db_x10,
+                    &s.phy.sinr_thresholds,
+                );
                 sel.selected_mcs = best;
                 sel.effective_kbps = sle_phy::data_rate_kbps(best, sel.bandwidth_mhz)
                     .unwrap_or(0);
+                drop(ss);
                 write_user_struct(arg, &sel)?;
                 Ok(0)
             }
@@ -4758,6 +4790,24 @@ impl MiscDevice for SparkLinkCtl {
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.phy.set_bandwidth(cmd.bandwidth_mhz)?;
                 let _ = s.controller.set_bandwidth(cmd.bandwidth_mhz);
+                Ok(0)
+            }
+            SL_IOCTL_PHY_GET_SINR => {
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let out = SleSinrThresholds {
+                    thresholds: s.phy.sinr_thresholds,
+                    _pad: [0; 2],
+                };
+                drop(ss);
+                write_user_struct(arg, &out)?;
+                Ok(0)
+            }
+            SL_IOCTL_PHY_SET_SINR => {
+                let cmd: SleSinrThresholds = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.phy.sinr_thresholds = cmd.thresholds;
                 Ok(0)
             }
             SL_IOCTL_SET_ROLE => {

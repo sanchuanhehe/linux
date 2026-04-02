@@ -150,6 +150,8 @@
 #define SL_IOCTL_PHY_MCS_SELECT  _IOWR(SL_MAGIC, 0x93, struct sle_phy_mcs_select)
 #define SL_IOCTL_PHY_HOP_NEXT   _IOR(SL_MAGIC, 0x94, struct sle_phy_hop_info)
 #define SL_IOCTL_PHY_SET_BW      _IOW(SL_MAGIC, 0x95, struct sle_phy_bw_cmd)
+#define SL_IOCTL_PHY_GET_SINR   _IOR(SL_MAGIC, 0x96, struct sle_sinr_thresholds)
+#define SL_IOCTL_PHY_SET_SINR   _IOW(SL_MAGIC, 0x97, struct sle_sinr_thresholds)
 
 /* Role management */
 #define SL_IOCTL_SET_ROLE        _IOW(SL_MAGIC, 0xA0, uint8_t)
@@ -641,6 +643,11 @@ struct sle_phy_hop_info {
 struct sle_phy_bw_cmd {
 	uint8_t  bandwidth_mhz;
 	uint8_t  _reserved[3];
+} __attribute__((packed));
+
+struct sle_sinr_thresholds {
+	int16_t  thresholds[13];
+	uint8_t  _pad[2];
 } __attribute__((packed));
 
 /* ------------------------------------------------------------------ */
@@ -8050,6 +8057,49 @@ static void test_phy_extreme_params(int fd)
 	ioctl(fd, SL_IOCTL_PHY_SET_BW, &bw_cmd);
 	txp.tx_power_dbm = 10;
 	ioctl(fd, SL_IOCTL_PHY_SET_TXPOWER, &txp);
+
+	/* SINR thresholds: get default */
+	struct sle_sinr_thresholds sinr;
+	memset(&sinr, 0, sizeof(sinr));
+	ret = ioctl(fd, SL_IOCTL_PHY_GET_SINR, &sinr);
+	if (ret == 0 && sinr.thresholds[0] == -20 && sinr.thresholds[4] == 50) {
+		printf("  OK:   SINR get default: mcs0=%d mcs4=%d\n",
+		       sinr.thresholds[0], sinr.thresholds[4]);
+	} else {
+		printf("  FAIL: SINR get default ret=%d t0=%d t4=%d\n",
+		       ret, sinr.thresholds[0], sinr.thresholds[4]);
+	}
+
+	/* SINR thresholds: set custom */
+	sinr.thresholds[4] = 30;  /* lower MCS4 threshold */
+	ret = ioctl(fd, SL_IOCTL_PHY_SET_SINR, &sinr);
+	check("SINR set custom", ret);
+
+	/* Verify custom threshold persists */
+	memset(&sinr, 0, sizeof(sinr));
+	ret = ioctl(fd, SL_IOCTL_PHY_GET_SINR, &sinr);
+	if (ret == 0 && sinr.thresholds[4] == 30) {
+		printf("  OK:   SINR custom persisted: mcs4=%d\n", sinr.thresholds[4]);
+	} else {
+		printf("  FAIL: SINR custom not persisted: t4=%d\n", sinr.thresholds[4]);
+	}
+
+	/* Verify MCS select uses custom thresholds */
+	sel.min_kbps = 0;
+	sel.bandwidth_mhz = 1;
+	sel.sinr_db_x10 = 35;  /* between 30 and 50 — should now select MCS4 with custom */
+	ret = ioctl(fd, SL_IOCTL_PHY_MCS_SELECT, &sel);
+	if (ret == 0 && sel.selected_mcs >= 4) {
+		printf("  OK:   MCS select with custom SINR: mcs=%u (sinr=35, threshold=30)\n",
+		       sel.selected_mcs);
+	} else {
+		printf("  FAIL: MCS select with custom SINR: mcs=%u expected>=4\n",
+		       sel.selected_mcs);
+	}
+
+	/* Restore default SINR thresholds */
+	sinr.thresholds[4] = 50;
+	ioctl(fd, SL_IOCTL_PHY_SET_SINR, &sinr);
 }
 
 static void test_genetlink(void)

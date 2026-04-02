@@ -193,7 +193,8 @@ struct sle_conn_info {
 	uint16_t data_mps;
 	uint16_t svc_mtu;
 	uint8_t  data_mode;
-	uint8_t  _reserved[3];
+	uint8_t  ssap_info_exchanged;
+	uint16_t ssap_mtu;
 } __attribute__((packed));
 
 struct sle_conn_data {
@@ -6055,6 +6056,215 @@ static void test_dli_reset_behavior(int fd)
 }
 
 /* ------------------------------------------------------------------ *
+ * test_ssap_air_interface — SSAP PDU processing over transport      *
+ *                                                                    *
+ * Verifies that SSAP PDUs injected with TCID 0x0A prefix are       *
+ * routed to SsapSession::process_incoming() and that responses      *
+ * and side effects are generated correctly.                         *
+ * ------------------------------------------------------------------ */
+static void test_ssap_air_interface(int fd)
+{
+	test_header("SSAP air interface transport");
+
+	int ret;
+	int ok_count = 0;
+	int fail_count = 0;
+
+	/* Step 1: Register demo SSAP service (device info) */
+	ret = ioctl(fd, SL_IOCTL_SSAP_REGISTER_SVC);
+	check("SSAP register service (demo)", ret);
+
+	/* Step 2: Create a connection */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xBB;
+	cp.peer_addr[1] = 0xBB;
+	cp.peer_addr[5] = 0x01;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT returned %d\n", ret);
+		fail_count++;
+		return;
+	}
+	uint16_t handle = (uint16_t)ret;
+	ok_count++;
+
+	/* Step 3: Accept connection */
+	struct sle_inject_conn_resp resp;
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = handle;
+	resp.response_type = 0;
+	resp.bandwidth_mhz = 1;
+	resp.mcs_index = 4;
+	resp.supervision_timeout = 100;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+	check("INJECT_CONN_RESP", ret);
+
+	/* Step 4: Inject ExchangeInfoReq SSAP PDU via INJECT_CONN_DATA
+	 * Wire format: [TCID=0x0A] [opcode=0x02] [MTU LE16=100,0]
+	 */
+	struct sle_conn_data inj;
+	memset(&inj, 0, sizeof(inj));
+	inj.handle = handle;
+	inj.data[0] = 0x0A;  /* TCID: SERVICE_MGMT */
+	inj.data[1] = 0x02;  /* opcode: ExchangeInfoReq */
+	inj.data[2] = 100;   /* MTU low byte */
+	inj.data[3] = 0;     /* MTU high byte */
+	inj.length = 4;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
+	check("INJECT ExchangeInfoReq (TCID 0x0A)", ret);
+
+	/* Step 5: Verify SSAP session state via CONN_INFO */
+	struct sle_conn_info info;
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	check("CONN_INFO (post ExchangeInfo)", ret);
+
+	if (ret == 0) {
+		if (info.ssap_info_exchanged == 1) {
+			printf("  OK:   ssap_info_exchanged=1\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: ssap_info_exchanged=%u, expected 1\n",
+			       info.ssap_info_exchanged);
+			fail_count++;
+		}
+		if (info.ssap_mtu == 100) {
+			printf("  OK:   ssap_mtu=%u (min of 100 and 247)\n",
+			       info.ssap_mtu);
+			ok_count++;
+		} else {
+			printf("  FAIL: ssap_mtu=%u, expected 100\n",
+			       info.ssap_mtu);
+			fail_count++;
+		}
+	}
+
+	/* Step 6: Register a dedicated test service with a writable property
+	 * to avoid handle collisions from prior test registrations.
+	 */
+	struct ssap_add_service test_svc;
+	memset(&test_svc, 0, sizeof(test_svc));
+	test_svc.uuid16 = 0xFFA0;
+	test_svc.primary = 1;
+	ret = ioctl(fd, SL_IOCTL_SSAP_ADD_SVC, &test_svc);
+	if (ret < 0) {
+		printf("  FAIL: SSAP_ADD_SVC for air test: %s\n",
+		       strerror(errno));
+		fail_count++;
+		goto cleanup;
+	}
+
+	struct ssap_add_property test_prop;
+	memset(&test_prop, 0, sizeof(test_prop));
+	test_prop.uuid16 = 0xFFA1;
+	test_prop.ops = 0x07;  /* READ | WRITE_NO_RSP | WRITE_WITH_RSP */
+	test_prop.value[0] = 0x00;
+	test_prop.value_len = 1;
+	ret = ioctl(fd, SL_IOCTL_SSAP_ADD_PROP, &test_prop);
+	if (ret < 0) {
+		printf("  FAIL: SSAP_ADD_PROP for air test: %s\n",
+		       strerror(errno));
+		fail_count++;
+		goto cleanup;
+	}
+	uint16_t writable_handle = test_prop.handle;
+	printf("  OK:   registered test property handle=0x%04x\n",
+	       writable_handle);
+	ok_count++;
+
+	/* Step 7: Inject WriteReq to the test property via TCID 0x0A
+	 * Wire format: [TCID=0x0A] [opcode=0x0D] [handle LE16] [value]
+	 */
+	memset(&inj, 0, sizeof(inj));
+	inj.handle = handle;
+	inj.data[0] = 0x0A;  /* TCID: SERVICE_MGMT */
+	inj.data[1] = 0x0D;  /* opcode: WriteReq */
+	inj.data[2] = writable_handle & 0xFF;
+	inj.data[3] = (writable_handle >> 8) & 0xFF;
+	inj.data[4] = 0xAA;  /* new value */
+	inj.length = 5;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
+	check("INJECT WriteReq (TCID 0x0A)", ret);
+
+	/* Step 8: Verify property value changed via SSAP_READ ioctl */
+	struct ssap_read_write rw;
+	memset(&rw, 0, sizeof(rw));
+	rw.handle = writable_handle;
+	ret = ioctl(fd, SL_IOCTL_SSAP_READ, &rw);
+	if (ret == 0 && rw.length >= 1 && rw.data[0] == 0xAA) {
+		printf("  OK:   WriteReq via air changed property to 0xAA\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: property read after WriteReq: ret=%d len=%u val=0x%02x\n",
+		       ret, rw.length, rw.data[0]);
+		fail_count++;
+	}
+
+	/* Step 9: Inject FindStructureReq for entire handle range
+	 * Wire format: [TCID=0x0A] [opcode=0x04] [start LE16] [end LE16]
+	 */
+	memset(&inj, 0, sizeof(inj));
+	inj.handle = handle;
+	inj.data[0] = 0x0A;  /* TCID: SERVICE_MGMT */
+	inj.data[1] = 0x04;  /* opcode: FindStructureReq */
+	inj.data[2] = 0x00;  /* start handle low */
+	inj.data[3] = 0x00;  /* start handle high */
+	inj.data[4] = 0xFF;  /* end handle low */
+	inj.data[5] = 0xFF;  /* end handle high */
+	inj.length = 6;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
+	check("INJECT FindStructureReq (TCID 0x0A)", ret);
+	/* FindStructureRsp generated and sent to controller —
+	 * we verify by confirming no crash and checking service count.
+	 */
+	struct ssap_summary ssap_info;
+	memset(&ssap_info, 0, sizeof(ssap_info));
+	ret = ioctl(fd, SL_IOCTL_SSAP_INFO, &ssap_info);
+	if (ret == 0 && ssap_info.service_count >= 1) {
+		printf("  OK:   FindStructureReq processed (%u services)\n",
+		       ssap_info.service_count);
+		ok_count++;
+	} else {
+		printf("  FAIL: SSAP_INFO post FindStructure: ret=%d svc=%u\n",
+		       ret, ssap_info.service_count);
+		fail_count++;
+	}
+
+	/* Step 10: Inject regular data (non-SSAP) — should go to rx_queue */
+	memset(&inj, 0, sizeof(inj));
+	inj.handle = handle;
+	const char *user_msg = "hello-over-air";
+	inj.length = strlen(user_msg);
+	memcpy(inj.data, user_msg, inj.length);
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
+	check("INJECT regular data", ret);
+
+	struct sle_conn_data recv_buf;
+	memset(&recv_buf, 0, sizeof(recv_buf));
+	recv_buf.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &recv_buf);
+	if (ret == 0 && recv_buf.length == strlen(user_msg) &&
+	    memcmp(recv_buf.data, user_msg, recv_buf.length) == 0) {
+		printf("  OK:   regular data routed to rx_queue\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: regular data recv: ret=%d len=%u\n",
+		       ret, recv_buf.length);
+		fail_count++;
+	}
+
+cleanup:
+	/* Clean up: disconnect */
+	;
+	uint16_t disc_handle = handle;
+	ioctl(fd, SL_IOCTL_DISCONNECT, &disc_handle);
+
+	printf("  SSAP air interface: %d OK, %d FAIL\n", ok_count, fail_count);
+}
+
+/* ------------------------------------------------------------------ *
  * test_ssap_capacity_stress — SSAP service/property limits          *
  *                                                                    *
  * Registers services until the subsystem refuses, verifying that    *
@@ -6381,6 +6591,7 @@ int main(void)
 	test_conn_list_accuracy(fd);
 	test_dli_reset_behavior(fd);
 	test_ssap_capacity_stress(fd);
+	test_ssap_air_interface(fd);
 	test_phy_extreme_params(fd);
 	test_genetlink();
 

@@ -813,7 +813,10 @@ pub struct SleConnInfo {
     pub svc_mtu: u16,
     /// Data channel transport mode (0=unreliable, 1=reliable).
     pub data_mode: u8,
-    _reserved: [u8; 3],
+    /// SSAP ExchangeInfo completed flag (1=yes, 0=no).
+    pub ssap_info_exchanged: u8,
+    /// SSAP session negotiated MTU (0 if no session bound).
+    pub ssap_mtu: u16,
 }
 
 // SAFETY: SleConnInfo is repr(C) with only primitive fields.
@@ -2235,10 +2238,59 @@ fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent
             genl_bridge::notify_event(0x02, 0, addr);
         }
         sle_dli::SleEvent::DataReceived { handle, data } => {
-            let seq = shared.conn.info(*handle)
-                .map(|e| e.seq.rx_seq)
-                .unwrap_or(0);
-            let _ = shared.conn.receive_data(*handle, data.as_slice(), seq);
+            let raw = data.as_slice();
+            if raw.is_empty() {
+                // Empty payload, nothing to route.
+            } else if raw[0] as u16 == sle_conn::tcid::SERVICE_MGMT && raw.len() > 1 {
+                // SSAP PDU on service management channel (TCID 0x0A).
+                let pdu_data = &raw[1..];
+                let mut resp_buf = [0u8; sle_ssap::SSAP_PDU_MAX];
+                let resp_len = shared.conn.process_ssap_pdu(
+                    *handle, pdu_data, &mut shared.ssap, &mut resp_buf,
+                ).unwrap_or(0);
+                // Send response PDU back with TCID prefix.
+                if resp_len > 0 {
+                    let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                    tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                    tx_buf[1..1 + resp_len].copy_from_slice(&resp_buf[..resp_len]);
+                    let _ = shared.controller.send_data(*handle, &tx_buf[..1 + resp_len]);
+                }
+                // Drain pending notifications/indications triggered by the PDU.
+                loop {
+                    match shared.ssap.dequeue_notification() {
+                        Some(n) => {
+                            let pdu = if n.indication {
+                                sle_ssap::SsapPdu::ValueInd { handle: n.handle, data: n.data }
+                            } else {
+                                sle_ssap::SsapPdu::ValueNtf { handle: n.handle, data: n.data }
+                            };
+                            let mut ntf_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                            ntf_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                            if let Ok(pdu_len) = pdu.encode(&mut ntf_buf[1..]) {
+                                if pdu_len > 0 {
+                                    let _ = shared.controller.send_data(
+                                        *handle, &ntf_buf[..1 + pdu_len],
+                                    );
+                                }
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            } else {
+                // User data — strip TCID prefix if present, enqueue to rx_queue.
+                let payload = if raw[0] as u16 == sle_conn::tcid::DEFAULT_DATA
+                    && raw.len() > 1
+                {
+                    &raw[1..]
+                } else {
+                    raw
+                };
+                let seq = shared.conn.info(*handle)
+                    .map(|e| e.seq.rx_seq)
+                    .unwrap_or(0);
+                let _ = shared.conn.receive_data(*handle, payload, seq);
+            }
         }
         _ => {}
     }
@@ -3164,6 +3216,10 @@ impl MiscDevice for SparkLinkCtl {
                 info.data_mps = entry.channels.data.mps;
                 info.data_mode = entry.channels.data.mode as u8;
                 info.svc_mtu = entry.channels.svc_mgmt.mtu;
+                if let Some(session) = &entry.ssap_session {
+                    info.ssap_mtu = session.mtu;
+                    info.ssap_info_exchanged = if session.info_exchanged { 1 } else { 0 };
+                }
                 drop(ss);
                 write_user_struct(arg, &info)?;
                 Ok(0)
@@ -3176,7 +3232,11 @@ impl MiscDevice for SparkLinkCtl {
                     let s = ss.as_mut().ok_or(ENODEV)?;
                     let handle = s.conn.resolve_handle(cd.handle)?;
                     let sent = s.conn.send(handle, &cd.data[..len])?;
-                    let _ = s.controller.send_data(cd.handle, &cd.data[..len]);
+                    // Prepend TCID for the default unicast data channel.
+                    let mut tx_buf = [0u8; 1 + CONN_DATA_MAX];
+                    tx_buf[0] = sle_conn::tcid::DEFAULT_DATA as u8;
+                    tx_buf[1..1 + len].copy_from_slice(&cd.data[..len]);
+                    let _ = s.controller.send_data(cd.handle, &tx_buf[..1 + len]);
                     sent
                 };
                 Ok(sent as isize)
@@ -3232,17 +3292,78 @@ impl MiscDevice for SparkLinkCtl {
             SL_IOCTL_INJECT_CONN_DATA => {
                 let cd: SleConnData = read_user_struct(arg)?;
                 let len = (cd.length as usize).min(CONN_DATA_MAX);
+                let raw = &cd.data[..len];
                 {
                     let mut ss = SUBSYSTEM.lock();
                     let s = ss.as_mut().ok_or(ENODEV)?;
                     let handle = s.conn.resolve_handle(cd.handle)?;
-                    let seq = {
-                        let entry = s.conn.info(handle)?;
-                        entry.seq.rx_seq
-                    };
-                    s.conn.receive_data(handle, &cd.data[..len], seq)?;
+                    if !raw.is_empty()
+                        && raw[0] as u16 == sle_conn::tcid::SERVICE_MGMT
+                        && raw.len() > 1
+                    {
+                        // SSAP PDU injection — route through SSAP processing.
+                        let pdu_data = &raw[1..];
+                        let mut resp_buf = [0u8; sle_ssap::SSAP_PDU_MAX];
+                        let resp_len = s.conn.process_ssap_pdu(
+                            handle, pdu_data, &mut s.ssap, &mut resp_buf,
+                        ).unwrap_or(0);
+                        if resp_len > 0 {
+                            let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                            tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                            tx_buf[1..1 + resp_len]
+                                .copy_from_slice(&resp_buf[..resp_len]);
+                            let _ = s.controller.send_data(
+                                handle, &tx_buf[..1 + resp_len],
+                            );
+                        }
+                        // Drain notifications triggered by the write.
+                        loop {
+                            match s.ssap.dequeue_notification() {
+                                Some(n) => {
+                                    let pdu = if n.indication {
+                                        sle_ssap::SsapPdu::ValueInd {
+                                            handle: n.handle, data: n.data,
+                                        }
+                                    } else {
+                                        sle_ssap::SsapPdu::ValueNtf {
+                                            handle: n.handle, data: n.data,
+                                        }
+                                    };
+                                    let mut ntf_buf =
+                                        [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                                    ntf_buf[0] =
+                                        sle_conn::tcid::SERVICE_MGMT as u8;
+                                    if let Ok(pdu_len) =
+                                        pdu.encode(&mut ntf_buf[1..])
+                                    {
+                                        if pdu_len > 0 {
+                                            let _ = s.controller.send_data(
+                                                handle,
+                                                &ntf_buf[..1 + pdu_len],
+                                            );
+                                        }
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                    } else {
+                        // Regular data injection — strip TCID if present.
+                        let payload = if !raw.is_empty()
+                            && raw[0] as u16 == sle_conn::tcid::DEFAULT_DATA
+                            && raw.len() > 1
+                        {
+                            &raw[1..]
+                        } else {
+                            raw
+                        };
+                        let seq = {
+                            let entry = s.conn.info(handle)?;
+                            entry.seq.rx_seq
+                        };
+                        s.conn.receive_data(handle, payload, seq)?;
+                    }
                 }
-                // Use cd.handle (unresolved) for the event since handle is local
                 Self::broadcast_event(
                     me.as_ref(),
                     sle_event::SleWireEvent::data_received(cd.handle, len as u16),

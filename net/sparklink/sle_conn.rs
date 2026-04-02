@@ -981,4 +981,31 @@ impl ConnManager {
             Ok(handle)
         }
     }
+
+    /// Process a received SSAP PDU on a connection's service management channel.
+    ///
+    /// Routes the raw PDU through the per-connection SSAP session, which
+    /// handles service discovery, property read/write, and notifications.
+    /// Returns the response PDU length written to `resp_buf` (0 if none).
+    pub fn process_ssap_pdu(
+        &mut self,
+        handle: u16,
+        pdu_data: &[u8],
+        ssap: &mut super::sle_ssap::SsapInner,
+        resp_buf: &mut [u8],
+    ) -> Result<usize> {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
+            return Err(EPIPE);
+        }
+        let session = entry.ssap_session.as_mut().ok_or(ENODEV)?;
+        session.process_incoming(ssap, pdu_data, resp_buf)
+    }
+
+    /// Query SSAP session state for a connection.
+    /// Returns (mtu, info_exchanged) on success.
+    pub fn ssap_session_info(&self, handle: u16) -> Option<(u16, bool)> {
+        let entry = self.find(handle).ok()?;
+        entry.ssap_session.as_ref().map(|s| (s.mtu, s.info_exchanged))
+    }
 }

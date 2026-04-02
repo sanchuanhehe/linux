@@ -52,6 +52,7 @@
 
 #define SL_IOCTL_INJECT_ADV      _IOW(SL_MAGIC, 0x20, struct sle_inject_adv)
 #define SL_IOCTL_SCAN_RESULT_COUNT _IO(SL_MAGIC, 0x21)
+#define SL_IOCTL_INJECT_RAW_ADV  _IOW(SL_MAGIC, 0x22, struct sle_inject_raw_adv)
 
 /* Connection management */
 #define SL_IOCTL_CONNECT         _IOW(SL_MAGIC, 0x30, struct sle_connect_params)
@@ -162,6 +163,13 @@ struct sle_inject_adv {
 	uint8_t  name[32];
 	uint8_t  name_len;
 	uint8_t  _reserved[7];
+} __attribute__((packed));
+
+struct sle_inject_raw_adv {
+	int8_t   rssi;
+	uint8_t  _pad;
+	uint16_t pdu_len;
+	uint8_t  pdu_data[264];
 } __attribute__((packed));
 
 struct sle_connect_params {
@@ -363,6 +371,7 @@ struct sle_subsys_stats {
 	uint8_t  power_state;
 	uint8_t  _pad2[3];
 	uint32_t power_transitions;
+	uint32_t crc_errors;
 } __attribute__((packed));
 
 /* Event wire format — must match SleWireEvent in sle_event.rs */
@@ -6635,6 +6644,207 @@ cleanup:
 }
 
 /* ------------------------------------------------------------------ *
+ * test_crc12_verification — CRC-12 receive-side verification        *
+ *                                                                    *
+ * Constructs raw advertising PDUs with valid and invalid CRC-12,    *
+ * exercises INJECT_RAW_ADV to verify CRC checking and error         *
+ * counting.                                                         *
+ * ------------------------------------------------------------------ */
+
+/* CRC-12 lookup table — polynomial 0x0D25, LSB-first */
+static const uint16_t crc12_table[256] = {
+    0x000, 0xA54, 0xEE3, 0x4B7, 0x78D, 0xDD9, 0x96E, 0x33A,
+    0xF1A, 0x54E, 0x1F9, 0xBAD, 0x897, 0x2C3, 0x674, 0xC20,
+    0x47F, 0xE2B, 0xA9C, 0x0C8, 0x3F2, 0x9A6, 0xD11, 0x745,
+    0xB65, 0x131, 0x586, 0xFD2, 0xCE8, 0x6BC, 0x20B, 0x85F,
+    0x8FE, 0x2AA, 0x61D, 0xC49, 0xF73, 0x527, 0x190, 0xBC4,
+    0x7E4, 0xDB0, 0x907, 0x353, 0x069, 0xA3D, 0xE8A, 0x4DE,
+    0xC81, 0x6D5, 0x262, 0x836, 0xB0C, 0x158, 0x5EF, 0xFBB,
+    0x39B, 0x9CF, 0xD78, 0x72C, 0x416, 0xE42, 0xAF5, 0x0A1,
+    0xBB7, 0x1E3, 0x554, 0xF00, 0xC3A, 0x66E, 0x2D9, 0x88D,
+    0x4AD, 0xEF9, 0xA4E, 0x01A, 0x320, 0x974, 0xDC3, 0x797,
+    0xFC8, 0x59C, 0x12B, 0xB7F, 0x845, 0x211, 0x6A6, 0xCF2,
+    0x0D2, 0xA86, 0xE31, 0x465, 0x75F, 0xD0B, 0x9BC, 0x3E8,
+    0x349, 0x91D, 0xDAA, 0x7FE, 0x4C4, 0xE90, 0xA27, 0x073,
+    0xC53, 0x607, 0x2B0, 0x8E4, 0xBDE, 0x18A, 0x53D, 0xF69,
+    0x736, 0xD62, 0x9D5, 0x381, 0x0BB, 0xAEF, 0xE58, 0x40C,
+    0x82C, 0x278, 0x6CF, 0xC9B, 0xFA1, 0x5F5, 0x142, 0xB16,
+    0xD25, 0x771, 0x3C6, 0x992, 0xAA8, 0x0FC, 0x44B, 0xE1F,
+    0x23F, 0x86B, 0xCDC, 0x688, 0x5B2, 0xFE6, 0xB51, 0x105,
+    0x95A, 0x30E, 0x7B9, 0xDED, 0xED7, 0x483, 0x034, 0xA60,
+    0x640, 0xC14, 0x8A3, 0x2F7, 0x1CD, 0xB99, 0xF2E, 0x57A,
+    0x5DB, 0xF8F, 0xB38, 0x16C, 0x256, 0x802, 0xCB5, 0x6E1,
+    0xAC1, 0x095, 0x422, 0xE76, 0xD4C, 0x718, 0x3AF, 0x9FB,
+    0x1A4, 0xBF0, 0xF47, 0x513, 0x629, 0xC7D, 0x8CA, 0x29E,
+    0xEBE, 0x4EA, 0x05D, 0xA09, 0x933, 0x367, 0x7D0, 0xD84,
+    0x692, 0xCC6, 0x871, 0x225, 0x11F, 0xB4B, 0xFFC, 0x5A8,
+    0x988, 0x3DC, 0x76B, 0xD3F, 0xE05, 0x451, 0x0E6, 0xAB2,
+    0x2ED, 0x8B9, 0xC0E, 0x65A, 0x560, 0xF34, 0xB83, 0x1D7,
+    0xDF7, 0x7A3, 0x314, 0x940, 0xA7A, 0x02E, 0x499, 0xECD,
+    0xE6C, 0x438, 0x08F, 0xADB, 0x9E1, 0x3B5, 0x702, 0xD56,
+    0x176, 0xB22, 0xF95, 0x5C1, 0x6FB, 0xCAF, 0x818, 0x24C,
+    0xA13, 0x047, 0x4F0, 0xEA4, 0xD9E, 0x7CA, 0x37D, 0x929,
+    0x509, 0xF5D, 0xBEA, 0x1BE, 0x284, 0x8D0, 0xC67, 0x633,
+};
+
+static uint16_t test_crc12(uint16_t seed, const uint8_t *data, size_t len)
+{
+	uint16_t crc = seed & 0x0FFF;
+	for (size_t i = 0; i < len; i++) {
+		uint8_t idx = (uint8_t)(crc ^ data[i]);
+		crc = (crc >> 8) ^ crc12_table[idx];
+	}
+	return crc & 0x0FFF;
+}
+
+/* Build a raw advertising PDU in buf[].
+ *   broadcast_type=0 (AccessibleScannable), packet_type=0 (BasicAdv)
+ *   link_quality=0, data_length=payload_len
+ * Returns total PDU length (header + data + CRC).
+ */
+static size_t build_raw_adv_pdu(uint8_t *buf, const uint8_t *payload,
+				uint8_t payload_len, int corrupt_crc)
+{
+	/* Encode header: 4 bytes LE */
+	uint32_t w = 0;
+	w |= (uint32_t)(payload_len & 0xFF) << 20;
+	buf[0] = (uint8_t)(w);
+	buf[1] = (uint8_t)(w >> 8);
+	buf[2] = (uint8_t)(w >> 16);
+	buf[3] = (uint8_t)(w >> 24);
+
+	memcpy(buf + 4, payload, payload_len);
+
+	uint16_t crc = test_crc12(0x0A62, payload, payload_len);
+	if (corrupt_crc)
+		crc ^= 0x0001;
+	buf[4 + payload_len] = (uint8_t)(crc);
+	buf[4 + payload_len + 1] = (uint8_t)(crc >> 8);
+
+	return 4 + payload_len + 2;
+}
+
+static void test_crc12_verification(int fd)
+{
+	test_header("CRC-12 receive-side verification");
+
+	int ok_count = 0, fail_count = 0;
+	int ret;
+	struct sle_subsys_stats ss;
+	struct sle_inject_raw_adv raw;
+
+	/* Start scanning so process_adv_pdu accepts PDUs */
+	struct sle_scan_params sp;
+	memset(&sp, 0, sizeof(sp));
+	sp.window_ms = 100;
+	sp.interval_ms = 200;
+	sp.filter_discovery_level = 0;
+	ret = ioctl(fd, SL_IOCTL_START_SCAN, &sp);
+	if (ret < 0) {
+		printf("  FAIL: START_SCAN failed: %s\n", strerror(errno));
+		return;
+	}
+
+	/* Read initial CRC error count */
+	memset(&ss, 0, sizeof(ss));
+	ret = ioctl(fd, SL_IOCTL_SUBSYS_STATS, &ss);
+	uint32_t initial_crc_errors = 0;
+	if (ret == 0)
+		initial_crc_errors = ss.crc_errors;
+
+	/* Step 1: Inject raw ADV PDU with valid CRC — should succeed */
+	uint8_t payload[] = { 0x01, 0x01, 0x02 }; /* DiscoveryLevel TLV */
+	memset(&raw, 0, sizeof(raw));
+	raw.rssi = -40;
+	raw.pdu_len = (uint16_t)build_raw_adv_pdu(raw.pdu_data, payload,
+						    sizeof(payload), 0);
+	ret = ioctl(fd, SL_IOCTL_INJECT_RAW_ADV, &raw);
+	if (ret == 0) {
+		printf("  OK:   raw ADV with valid CRC accepted\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: raw ADV with valid CRC rejected: %s\n",
+		       strerror(errno));
+		fail_count++;
+	}
+
+	/* Step 2: Inject raw ADV PDU with corrupted CRC — should fail with EILSEQ */
+	memset(&raw, 0, sizeof(raw));
+	raw.rssi = -40;
+	raw.pdu_len = (uint16_t)build_raw_adv_pdu(raw.pdu_data, payload,
+						    sizeof(payload), 1);
+	ret = ioctl(fd, SL_IOCTL_INJECT_RAW_ADV, &raw);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   raw ADV with bad CRC rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EINVAL for bad CRC, got ret=%d errno=%d\n",
+		       ret, errno);
+		fail_count++;
+	}
+
+	/* Step 3: CRC error counter incremented */
+	memset(&ss, 0, sizeof(ss));
+	ret = ioctl(fd, SL_IOCTL_SUBSYS_STATS, &ss);
+	if (ret == 0 && ss.crc_errors >= initial_crc_errors + 1) {
+		printf("  OK:   crc_errors incremented: %u -> %u\n",
+		       initial_crc_errors, ss.crc_errors);
+		ok_count++;
+	} else {
+		printf("  FAIL: crc_errors not incremented (initial=%u, now=%u)\n",
+		       initial_crc_errors, ret == 0 ? ss.crc_errors : 0);
+		fail_count++;
+	}
+
+	/* Step 4: Inject another bad CRC and verify counter increments again */
+	uint8_t payload2[] = { 0x01, 0x01, 0x03, 0x02, 0x02, 0x07, 0x00 };
+	memset(&raw, 0, sizeof(raw));
+	raw.rssi = -55;
+	raw.pdu_len = (uint16_t)build_raw_adv_pdu(raw.pdu_data, payload2,
+						    sizeof(payload2), 1);
+	ret = ioctl(fd, SL_IOCTL_INJECT_RAW_ADV, &raw);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   second bad CRC also rejected\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: second bad CRC not rejected\n");
+		fail_count++;
+	}
+
+	memset(&ss, 0, sizeof(ss));
+	ret = ioctl(fd, SL_IOCTL_SUBSYS_STATS, &ss);
+	if (ret == 0 && ss.crc_errors >= initial_crc_errors + 2) {
+		printf("  OK:   crc_errors=%u after two bad PDUs\n", ss.crc_errors);
+		ok_count++;
+	} else {
+		printf("  FAIL: crc_errors=%u expected >=%u\n",
+		       ret == 0 ? ss.crc_errors : 0, initial_crc_errors + 2);
+		fail_count++;
+	}
+
+	/* Step 5: Valid CRC does not increment error counter */
+	uint32_t before = ss.crc_errors;
+	memset(&raw, 0, sizeof(raw));
+	raw.rssi = -30;
+	raw.pdu_len = (uint16_t)build_raw_adv_pdu(raw.pdu_data, payload2,
+						    sizeof(payload2), 0);
+	ret = ioctl(fd, SL_IOCTL_INJECT_RAW_ADV, &raw);
+	memset(&ss, 0, sizeof(ss));
+	ioctl(fd, SL_IOCTL_SUBSYS_STATS, &ss);
+	if (ret == 0 && ss.crc_errors == before) {
+		printf("  OK:   valid CRC does not increment error counter\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: crc_errors changed on valid PDU (%u -> %u)\n",
+		       before, ss.crc_errors);
+		fail_count++;
+	}
+
+	ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+	printf("  CRC-12 verification: %d OK, %d FAIL\n", ok_count, fail_count);
+}
+
+/* ------------------------------------------------------------------ *
  * test_ssap_capacity_stress — SSAP service/property limits          *
  *                                                                    *
  * Registers services until the subsystem refuses, verifying that    *
@@ -6964,6 +7174,7 @@ int main(void)
 	test_ssap_air_interface(fd);
 	test_credit_flow_control(fd);
 	test_supervision_timeout(fd);
+	test_crc12_verification(fd);
 	test_phy_extreme_params(fd);
 	test_genetlink();
 

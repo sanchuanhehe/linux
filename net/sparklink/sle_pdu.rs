@@ -12,7 +12,20 @@
 
 #![allow(dead_code, unreachable_pub)]
 
+use core::sync::atomic::{AtomicU32, Ordering};
 use kernel::prelude::*;
+
+// ---------------------------------------------------------------------------
+// CRC error counter
+// ---------------------------------------------------------------------------
+
+/// Global counter for CRC-12 verification failures.
+static CRC_ERRORS: AtomicU32 = AtomicU32::new(0);
+
+/// Return the current CRC error count.
+pub fn crc_error_count() -> u32 {
+    CRC_ERRORS.load(Ordering::Relaxed)
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -512,6 +525,11 @@ impl AdvPdu {
         // Verify CRC
         let expected = crc12(crc12_adv_seed(), &data[..data_len]);
         if crc != expected {
+            CRC_ERRORS.fetch_add(1, Ordering::Relaxed);
+            pr_debug!(
+                "sparklink: adv PDU CRC-12 mismatch: received {:#05x}, expected {:#05x} (len={})\n",
+                crc, expected, data_len
+            );
             return None;
         }
         Some(Self {

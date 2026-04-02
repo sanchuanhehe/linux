@@ -424,6 +424,11 @@ const SL_IOCTL_INJECT_ADV: u32 = _IOW::<SleInjectAdv>(SL_MAGIC, 0x20);
 /// Get the current scan result count.
 const SL_IOCTL_SCAN_RESULT_COUNT: u32 = _IO(SL_MAGIC, 0x21);
 
+/// Inject a raw advertising PDU (header + data + CRC-12) for CRC
+/// verification testing. The PDU goes through `AdvPdu::deserialize()`
+/// and is rejected with EINVAL if CRC-12 does not match.
+const SL_IOCTL_INJECT_RAW_ADV: u32 = _IOW::<SleInjectRawAdv>(SL_MAGIC, 0x22);
+
 // --- Connection management ioctls ---
 
 /// Initiate an SLE connection to a peer device.
@@ -730,6 +735,36 @@ impl Default for SleInjectAdv {
 
 // SAFETY: SleInjectAdv is repr(C) with only primitive fields, all bit patterns valid.
 unsafe impl FromBytes for SleInjectAdv {}
+
+/// Raw advertising PDU for CRC-12 verification testing.
+///
+/// Wire format: [header 4B][data NB][CRC-12 2B], total up to 264 bytes.
+/// The RSSI field is external metadata, not part of the PDU.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleInjectRawAdv {
+    /// RSSI to associate with this PDU.
+    pub rssi: i8,
+    _pad: u8,
+    /// Number of valid bytes in `pdu_data` (header + data + CRC).
+    pub pdu_len: u16,
+    /// Raw PDU bytes.
+    pub pdu_data: [u8; 264],
+}
+
+impl Default for SleInjectRawAdv {
+    fn default() -> Self {
+        Self {
+            rssi: -50,
+            _pad: 0,
+            pdu_len: 0,
+            pdu_data: [0u8; 264],
+        }
+    }
+}
+
+// SAFETY: SleInjectRawAdv is repr(C) with only primitive fields.
+unsafe impl FromBytes for SleInjectRawAdv {}
 
 // ---------------------------------------------------------------------------
 // Connection management userspace data structures
@@ -1337,6 +1372,8 @@ pub struct SleSubsysStats {
     _pad: [u8; 3],
     /// Power state transitions.
     pub power_transitions: u32,
+    /// CRC-12 verification failures (advertising PDUs).
+    pub crc_errors: u32,
 }
 
 // SAFETY: SleSubsysStats is repr(C) with only primitive fields.
@@ -3189,6 +3226,21 @@ impl MiscDevice for SparkLinkCtl {
                 );
                 Ok(0)
             }
+            SL_IOCTL_INJECT_RAW_ADV => {
+                let inject: SleInjectRawAdv = read_user_struct(arg)?;
+                let len = inject.pdu_len as usize;
+                if len < 6 || len > 264 {
+                    return Err(EINVAL);
+                }
+                let pdu = sle_pdu::AdvPdu::deserialize(&inject.pdu_data[..len])
+                    .ok_or(EINVAL)?;
+                {
+                    let mut ss = SUBSYSTEM.lock();
+                    let s = ss.as_mut().ok_or(ENODEV)?;
+                    s.adv_scan.process_adv_pdu(&pdu, inject.rssi)?;
+                }
+                Ok(0)
+            }
             SL_IOCTL_SCAN_RESULT_COUNT => {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
@@ -3949,6 +4001,7 @@ impl MiscDevice for SparkLinkCtl {
                     power_state: s.power.state as u8,
                     _pad: [0; 3],
                     power_transitions: s.power.stats.transitions,
+                    crc_errors: sle_pdu::crc_error_count(),
                 };
                 drop(ss);
                 write_user_struct(arg, &stats)?;

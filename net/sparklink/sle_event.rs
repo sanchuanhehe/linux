@@ -56,6 +56,94 @@ pub enum SleEventType {
     DataBufOverflow = 0x0D,
     /// Remote peer requests connection parameter change.
     PeerConnParamReq = 0x0E,
+
+    // --- HIGH priority (TXS-10003-2025 §9.1.7, §9.1.8, §9.1.11) ---
+    /// TX power change report (§9.1.7).
+    PowerChangeReport = 0x0F,
+    /// Number of successfully transmitted packets (§9.1.8).
+    NumCompletedPackets = 0x10,
+    /// Link encryption parameter request (§9.1.11).
+    EncryptionParamReq = 0x11,
+
+    // --- MEDIUM — Peer Info (§9.1.13, §9.1.15–§9.1.16, §9.1.20–§9.1.21) ---
+    /// Controller control signaling data (§9.1.13).
+    ControllerSignalData = 0x12,
+    /// Read peer features complete (§9.1.15).
+    ReadPeerFeatures = 0x13,
+    /// Read peer version info complete (§9.1.16).
+    ReadPeerVersion = 0x14,
+    /// Read peer TX power complete (§9.1.20).
+    ReadPeerPower = 0x15,
+    /// Inquiry (scan) request report (§9.1.21).
+    InquiryRequestReport = 0x16,
+
+    // --- MEDIUM — Pairing (§9.1.22–§9.1.32) ---
+    /// Pairing request from remote peer (§9.1.22).
+    PairRequest = 0x17,
+    /// Pairing information exchange request (§9.1.23).
+    PairInfoExchangeReq = 0x18,
+    /// Pairing information report (§9.1.24).
+    PairInfoReport = 0x19,
+    /// Pairing option report (§9.1.25).
+    PairOptionReport = 0x1A,
+    /// Peer public key report (§9.1.26).
+    PeerPublicKeyReport = 0x1B,
+    /// Pairing extended data report (§9.1.27).
+    PairExtDataReport = 0x1C,
+    /// Keypress notification (§9.1.28).
+    KeypressNotification = 0x1D,
+    /// Pairing random number report (§9.1.29).
+    PairRandomReport = 0x1E,
+    /// Pairing confirm code report (§9.1.30).
+    PairConfirmReport = 0x1F,
+    /// DH key check report (§9.1.31).
+    DHKeyCheckReport = 0x20,
+    /// Pairing failure report (§9.1.32).
+    PairFailureReport = 0x21,
+
+    // --- LOW — Narrowband Measurement (§9.1.33–§9.1.39) ---
+    /// Narrowband frequency-hopping measurement info (§9.1.33).
+    NarrowbandMeasInfo = 0x22,
+    /// Narrowband measurement state change (§9.1.34).
+    NarrowbandMeasStateChange = 0x23,
+    /// Narrowband measurement parameter report (§9.1.35).
+    NarrowbandMeasParamReport = 0x24,
+    /// Local narrowband measurement capabilities (§9.1.36).
+    LocalNarrowbandMeasCap = 0x25,
+    /// Peer narrowband measurement capabilities (§9.1.37).
+    PeerNarrowbandMeasCap = 0x26,
+    /// Measurement state change (§9.1.38).
+    MeasStateChange = 0x27,
+    /// Measurement quantity report (§9.1.39).
+    MeasQuantityReport = 0x28,
+
+    // --- LOW — SLB (§9.1.40–§9.1.45) ---
+    /// SLB advertising report (§9.1.40).
+    SlbAdvReport = 0x29,
+    /// SLB connection established (§9.1.41).
+    SlbConnComplete = 0x2A,
+    /// SLB unicast logical channel established (§9.1.42).
+    SlbUcastChannelComplete = 0x2B,
+    /// SLB unicast logical channel updated (§9.1.43).
+    SlbUcastChannelUpdate = 0x2C,
+    /// SLB logical channel deleted (§9.1.44).
+    SlbChannelDelete = 0x2D,
+    /// SLB logical channel completed packets count (§9.1.45).
+    SlbNumCompletedPackets = 0x2E,
+
+    // --- LOW — Sync Link (§9.1.46–§9.1.51) ---
+    /// Time synchronization status update (§9.1.46).
+    TimeSyncStatusUpdate = 0x2F,
+    /// Time synchronization request from controller (§9.1.47).
+    TimeSyncRequest = 0x30,
+    /// Synchronous unicast link setup request (§9.1.48).
+    SyncUcastSetupRequest = 0x31,
+    /// Synchronous unicast link setup complete (§9.1.49).
+    SyncUcastSetupComplete = 0x32,
+    /// Synchronous multicast link setup request (§9.1.50).
+    SyncMcastSetupRequest = 0x33,
+    /// Synchronous multicast link setup complete (§9.1.51).
+    SyncMcastSetupComplete = 0x34,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +326,390 @@ pub struct PeerConnParamReqEvent {
 }
 
 // ---------------------------------------------------------------------------
+// New event payload structs (TXS-10003-2025 §9.1.7–§9.1.51)
+// ---------------------------------------------------------------------------
+
+/// TX power change report event (§9.1.7).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PowerChangeReportEvent {
+    pub handle: u16,
+    pub reason: u8,
+    pub frame_type: u8,
+    pub bandwidth: u8,
+    pub pilot_density: u8,
+    pub tx_power: i8,
+    pub power_level: u8,
+    pub offset: i8,
+    pub _pad: u8,
+}
+
+/// Number of completed packets event (§9.1.8).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NumCompletedPacketsEvent {
+    pub handle: u16,
+    pub num_completed: u8,
+    pub _pad: u8,
+}
+
+/// Encryption parameter request event (§9.1.11).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct EncryptionParamReqEvent {
+    pub handle: u16,
+    pub _pad: [u8; 2],
+}
+
+/// Controller signaling data event (§9.1.13).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ControllerSignalDataEvent {
+    pub handle: u16,
+    pub signal_id: u16,
+    pub data_len: u8,
+    pub _pad: u8,
+    pub data: [u8; 32],
+}
+
+/// Read peer features complete event (§9.1.15).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ReadPeerFeaturesEvent {
+    pub handle: u16,
+    pub status: u8,
+    pub _pad: u8,
+    pub features: [u8; 10],
+}
+
+/// Read peer version complete event (§9.1.16).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ReadPeerVersionEvent {
+    pub handle: u16,
+    pub manufacturer: u16,
+    pub subversion: u16,
+    pub status: u8,
+    pub version: u8,
+}
+
+/// Read peer TX power event (§9.1.20).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ReadPeerPowerEvent {
+    pub handle: u16,
+    pub status: u8,
+    pub frame_type: u8,
+    pub bandwidth: u8,
+    pub pilot_density: u8,
+    pub tx_power: i8,
+    pub power_level: u8,
+}
+
+/// Inquiry request report event (§9.1.21).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct InquiryRequestReportEvent {
+    pub addr: [u8; 6],
+    pub addr_type: u8,
+    pub adv_handle: u8,
+    pub rssi: i8,
+    pub data_len: u8,
+    pub _pad: [u8; 2],
+}
+
+/// Pairing request event (§9.1.22).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PairRequestEvent {
+    pub handle: u16,
+    pub auth_req: u8,
+    pub _pad: u8,
+}
+
+/// Pairing info exchange / report event (§9.1.23, §9.1.24).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PairInfoEvent {
+    pub handle: u16,
+    pub io_cap: u8,
+    pub oob_flag: u8,
+    pub auth_req: u8,
+    pub max_key_len: u8,
+    pub sec_dist: u8,
+    pub psk_ind: u8,
+    pub crypto_cap: [u8; 4],
+}
+
+/// Pairing option report event (§9.1.25).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PairOptionReportEvent {
+    pub handle: u16,
+    pub key_len: u8,
+    pub auth_method: u8,
+    pub crypto_alg: [u8; 4],
+    pub public_key: [u8; 32],
+}
+
+/// Peer public key report event (§9.1.26).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PeerPublicKeyReportEvent {
+    pub handle: u16,
+    pub _pad: [u8; 2],
+    pub public_key: [u8; 32],
+}
+
+/// Pairing extended data report event (§9.1.27).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PairExtDataReportEvent {
+    pub handle: u16,
+    pub _pad: [u8; 2],
+    pub ext_key_data: [u8; 36],
+}
+
+/// Keypress notification event (§9.1.28).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct KeypressNotificationEvent {
+    pub handle: u16,
+    pub _pad: [u8; 2],
+    pub action: [u8; 4],
+}
+
+/// Pairing random number report event (§9.1.29).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PairRandomReportEvent {
+    pub handle: u16,
+    pub _pad: [u8; 2],
+    pub random: [u8; 16],
+}
+
+/// Pairing confirm code report event (§9.1.30).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PairConfirmReportEvent {
+    pub handle: u16,
+    pub _pad: [u8; 2],
+    pub confirm: [u8; 16],
+}
+
+/// DH key check report event (§9.1.31).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct DHKeyCheckReportEvent {
+    pub handle: u16,
+    pub _pad: [u8; 2],
+    pub dhkey_check: [u8; 16],
+}
+
+/// Pairing failure report event (§9.1.32).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PairFailureReportEvent {
+    pub handle: u16,
+    pub reason: u8,
+    pub _pad: u8,
+}
+
+/// Narrowband measurement info event (§9.1.33).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NarrowbandMeasInfoEvent {
+    pub handle: u16,
+    pub meas_type: u16,
+    pub status: u8,
+    pub config_index: u8,
+    pub _pad: [u8; 2],
+}
+
+/// Narrowband measurement state change event (§9.1.34).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NarrowbandMeasStateChangeEvent {
+    pub status: u8,
+    pub config_index: u8,
+    pub meas_state: u8,
+    pub _pad: u8,
+}
+
+/// Narrowband measurement parameter report event (§9.1.35).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NarrowbandMeasParamReportEvent {
+    pub handle: u16,
+    pub status: u8,
+    pub config_index: u8,
+}
+
+/// Local narrowband measurement capabilities event (§9.1.36).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct LocalNarrowbandMeasCapEvent {
+    pub status: u8,
+    pub antenna_count: u8,
+    pub signal_cap: [u8; 4],
+    pub report_cap: [u8; 4],
+}
+
+/// Peer narrowband measurement capabilities event (§9.1.37).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PeerNarrowbandMeasCapEvent {
+    pub handle: u16,
+    pub status: u8,
+    pub antenna_count: u8,
+    pub signal_cap: [u8; 4],
+    pub report_cap: [u8; 4],
+}
+
+/// Measurement state change event (§9.1.38).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct MeasStateChangeEvent {
+    pub source: u16,
+    pub status: u8,
+    pub instance_handle: u8,
+    pub instance_state: u8,
+    pub _pad: [u8; 3],
+}
+
+/// Measurement quantity report event (§9.1.39).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct MeasQuantityReportEvent {
+    pub source: u16,
+    pub meas_source: u16,
+    pub seq: u16,
+    pub instance_handle: u8,
+    pub meas_count: u8,
+}
+
+/// SLB advertising report event (§9.1.40).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlbAdvReportEvent {
+    pub mac_addr: [u8; 6],
+    pub channel: u16,
+    pub bandwidth: u8,
+    pub rssi: i8,
+    pub data_len: u8,
+    pub _pad: u8,
+}
+
+/// SLB connection complete event (§9.1.41).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlbConnCompleteEvent {
+    pub handle: u16,
+    pub status: u8,
+    pub _pad: u8,
+    pub peer_addr: [u8; 6],
+    pub _pad2: [u8; 2],
+}
+
+/// SLB unicast channel complete event (§9.1.42).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlbUcastChannelCompleteEvent {
+    pub channel_handle: u16,
+    pub conn_handle: u16,
+    pub max_pkt_len: u16,
+    pub max_pkt_count: u16,
+    pub status: u8,
+    pub _pad: u8,
+}
+
+/// SLB unicast channel update event (§9.1.43).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlbUcastChannelUpdateEvent {
+    pub channel_handle: u16,
+    pub max_pkt_len: u16,
+    pub max_pkt_count: u16,
+    pub status: u8,
+    pub _pad: u8,
+}
+
+/// SLB channel delete event (§9.1.44).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlbChannelDeleteEvent {
+    pub channel_handle: u16,
+    pub status: u8,
+    pub _pad: u8,
+}
+
+/// SLB completed packets event (§9.1.45).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SlbNumCompletedPacketsEvent {
+    pub channel_handle: u16,
+    pub num_completed: u8,
+    pub _pad: u8,
+}
+
+/// Time sync status update event (§9.1.46).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TimeSyncStatusUpdateEvent {
+    pub accuracy: u32,
+    pub sync_status: u8,
+    pub clock_source: u8,
+    pub _pad: [u8; 2],
+}
+
+/// Time sync request event (§9.1.47).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TimeSyncRequestEvent {
+    pub time_seq: u32,
+    pub send_time: [u8; 8],
+}
+
+/// Sync unicast setup request event (§9.1.48).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SyncUcastSetupRequestEvent {
+    pub async_handle: u16,
+    pub sync_handle: u16,
+    pub event_group_set_id: u8,
+    pub event_group_id: u8,
+    pub _pad: [u8; 2],
+}
+
+/// Sync unicast setup complete event (§9.1.49).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SyncUcastSetupCompleteEvent {
+    pub async_handle: u16,
+    pub sync_handle: u16,
+    pub status: u8,
+    pub _pad: [u8; 3],
+}
+
+/// Sync multicast setup request event (§9.1.50).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SyncMcastSetupRequestEvent {
+    pub async_handle: u16,
+    pub sync_handle: u16,
+}
+
+/// Sync multicast setup complete event (§9.1.51).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SyncMcastSetupCompleteEvent {
+    pub async_handle: u16,
+    pub sync_handle: u16,
+    pub status: u8,
+    pub _pad: [u8; 3],
+}
+
+// ---------------------------------------------------------------------------
 // Wire format: [type: u8] [length: u8] [payload: ...] [pad to 4-byte align]
 // ---------------------------------------------------------------------------
 
@@ -295,6 +767,11 @@ impl SleWireEvent {
         };
         wire.payload[..copy_len].copy_from_slice(payload_bytes);
         wire
+    }
+
+    /// Build a wire event from a typed payload (public, for cross-module use).
+    pub fn from_payload_pub<T: Sized>(event_type: SleEventType, payload: &T) -> Self {
+        Self::from_payload(event_type, payload)
     }
 
     /// Build a connection state change wire event.
@@ -436,6 +913,50 @@ impl SleWireEvent {
         };
         Self::from_payload(SleEventType::PeerConnParamReq, &payload)
     }
+
+    /// Build a TX power change report wire event (§9.1.7).
+    pub fn power_change_report(
+        handle: u16,
+        reason: u8,
+        frame_type: u8,
+        bandwidth: u8,
+        pilot_density: u8,
+        tx_power: i8,
+        power_level: u8,
+        offset: i8,
+    ) -> Self {
+        let payload = PowerChangeReportEvent {
+            handle,
+            reason,
+            frame_type,
+            bandwidth,
+            pilot_density,
+            tx_power,
+            power_level,
+            offset,
+            _pad: 0,
+        };
+        Self::from_payload(SleEventType::PowerChangeReport, &payload)
+    }
+
+    /// Build a number-of-completed-packets wire event (§9.1.8).
+    pub fn num_completed_packets(handle: u16, num_completed: u8) -> Self {
+        let payload = NumCompletedPacketsEvent {
+            handle,
+            num_completed,
+            _pad: 0,
+        };
+        Self::from_payload(SleEventType::NumCompletedPackets, &payload)
+    }
+
+    /// Build an encryption parameter request wire event (§9.1.11).
+    pub fn encryption_param_req(handle: u16) -> Self {
+        let payload = EncryptionParamReqEvent {
+            handle,
+            _pad: [0u8; 2],
+        };
+        Self::from_payload(SleEventType::EncryptionParamReq, &payload)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -561,6 +1082,51 @@ impl EventQueue {
             _pad: [0u8; 3],
         };
         self.enqueue(SleEventType::HardwareError, &payload);
+    }
+
+    /// Enqueue a number-of-completed-packets event (§9.1.8).
+    pub fn push_num_completed_packets(&mut self, handle: u16, num_completed: u8) {
+        let payload = NumCompletedPacketsEvent {
+            handle,
+            num_completed,
+            _pad: 0,
+        };
+        self.enqueue(SleEventType::NumCompletedPackets, &payload);
+    }
+
+    /// Enqueue a TX power change report event (§9.1.7).
+    pub fn push_power_change_report(
+        &mut self,
+        handle: u16,
+        reason: u8,
+        frame_type: u8,
+        bandwidth: u8,
+        pilot_density: u8,
+        tx_power: i8,
+        power_level: u8,
+        offset: i8,
+    ) {
+        let payload = PowerChangeReportEvent {
+            handle,
+            reason,
+            frame_type,
+            bandwidth,
+            pilot_density,
+            tx_power,
+            power_level,
+            offset,
+            _pad: 0,
+        };
+        self.enqueue(SleEventType::PowerChangeReport, &payload);
+    }
+
+    /// Enqueue an encryption parameter request event (§9.1.11).
+    pub fn push_encryption_param_req(&mut self, handle: u16) {
+        let payload = EncryptionParamReqEvent {
+            handle,
+            _pad: [0u8; 2],
+        };
+        self.enqueue(SleEventType::EncryptionParamReq, &payload);
     }
 
     /// Dequeue the oldest event. Returns None if the queue is empty.

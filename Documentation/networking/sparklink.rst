@@ -1,8 +1,8 @@
 .. SPDX-License-Identifier: GPL-2.0
 
-========================
+=========================
 Linux SparkLink subsystem
-========================
+=========================
 
 SparkLink (NearLink) is a short-range wireless communication technology
 targeting smart terminals, smart home, automotive, and industrial
@@ -53,8 +53,8 @@ The subsystem is organized in a layered architecture:
     VirtualController    sle_uart (UART)    sle_spi (SPI)
        (loopback)        H4 framing        register-based
                               |                  |
-                         sle_usb (USB)           |
-                        hardware discovery       |
+                         sle_usb (USB)     sle_serdev (serial)
+                        hardware discovery  serdev framework
 
 Module descriptions:
 
@@ -66,7 +66,7 @@ Module descriptions:
 **sle_pdu** (``net/sparklink/sle_pdu.rs``)
   Frame codec implementing the PDU format defined in T/XS 10002-2025
   chapter 6, including Preamble, Access Address, PDU Header, Payload,
-  and CRC-24.
+  and CRC-12.
 
 **sle_adv** (``net/sparklink/sle_adv.rs``)
   Advertising and scanning state machine. Manages broadcast and scan
@@ -80,9 +80,9 @@ Module descriptions:
   sequence tracking, and per-connection data queues.
 
 **sle_crypto** (``net/sparklink/sle_crypto.rs``)
-  Pure Rust implementation of SM3 hash (GB/T 32905-2016), SM4 block
-  cipher (GB/T 32907-2016), HMAC-SM3, and SM4-CTR mode for key
-  derivation and data encryption.
+  Safe Rust wrapper for SparkLink cryptographic flows. Core SM3/SM4/
+  HMAC/CTR/ECB operations are delegated to Linux kernel crypto API
+  providers through ``sle_crypto_ffi.c``.
 
 **sle_security** (``net/sparklink/sle_security.rs``)
   Security state machine supporting JustWorks and PSK pairing methods.
@@ -157,6 +157,21 @@ Module descriptions:
 **sparklink_virtual** (``drivers/sparklink/sparklink_virtual.rs``)
   Virtual controller driver for testing without physical hardware.
 
+**sle_mgmt** (``net/sparklink/sle_mgmt.rs``)
+  Management plane command pending queue with timeout.  Tracks in-flight
+  DLI commands and resolves entries when CommandComplete/CommandStatus
+  events arrive; stale entries are expired based on a jiffies deadline.
+
+**sle_transport** (``net/sparklink/sle_transport.rs``)
+  Transport protocol registration and driver attach framework.  Provides
+  infrastructure for controller drivers to register transport protocols
+  and attach physical devices at probe time.
+
+**sle_fw** (``net/sparklink/sle_fw.rs``)
+  Firmware loading framework for SLE controllers.  Loads firmware from
+  ``/lib/firmware/`` via the kernel firmware API and sends it to the
+  controller in chunks via the USB bulk OUT endpoint.
+
 Source code layout
 ==================
 
@@ -170,7 +185,8 @@ Source code layout
     ├── sle_pdu.rs               # Frame codec
     ├── sle_adv.rs               # Advertising/scanning
     ├── sle_conn.rs              # Multi-connection manager
-    ├── sle_crypto.rs            # SM3/SM4 crypto
+    ├── sle_crypto.rs            # Crypto API Rust wrapper
+    ├── sle_crypto_ffi.c         # Kernel crypto API bridge (C FFI)
     ├── sle_security.rs          # Security/pairing
     ├── sle_ssap.rs              # Service access protocol
     ├── sle_power.rs             # Power management
@@ -181,7 +197,13 @@ Source code layout
     ├── sle_phy.rs               # PHY layer parameters
     ├── sle_uart.rs              # UART DLI transport
     ├── sle_spi.rs               # SPI DLI transport
-    └── sle_usb.rs               # USB transport + hardware discovery
+    ├── sle_usb.rs               # USB transport + hardware discovery
+    ├── sle_usb_ffi.c            # USB C FFI bridge
+    ├── sle_serdev.rs            # serdev transport
+    ├── sle_serdev_ffi.c         # serdev C FFI bridge
+    ├── sle_mgmt.rs              # Management plane command queue
+    ├── sle_transport.rs         # Transport registration framework
+    └── sle_fw.rs                # Firmware loading framework
 
     drivers/sparklink/
     ├── Kconfig
@@ -202,10 +224,16 @@ The following options must be enabled:
 
     CONFIG_RUST=y                  # Rust language support
     CONFIG_SPARKLINK=y             # SparkLink core protocol stack
+    CONFIG_SPARKLINK_SLE=y         # SLE air interface support (default y)
     CONFIG_SPARKLINK_GENL=y        # Generic Netlink control plane
+    CONFIG_SPARKLINK_DEBUGFS=y     # debugfs information nodes (default y)
     CONFIG_SPARKLINK_DRIVERS=y     # SparkLink driver framework
     CONFIG_SPARKLINK_VIRTUAL=y     # Virtual controller (testing)
     CONFIG_CONFIGFS_FS=y           # configfs filesystem (runtime config)
+
+The ``SPARKLINK`` menuconfig automatically selects required kernel
+crypto API modules (``CRYPTO_SM3_GENERIC``, ``CRYPTO_SM4_GENERIC``,
+``CRYPTO_ECB``, ``CRYPTO_CTR``, ``CRYPTO_HMAC``).
 
 Find these options in ``make menuconfig`` at::
 
@@ -230,7 +258,7 @@ The SparkLink subsystem exposes its control plane through ioctl on
 ``/dev/sparklink``. The ioctl magic number is ``'S'`` (0x53). All
 structure definitions are in ``net/sparklink/sparklink_core.rs``.
 
-Device management (0x01 -- 0x04)
+Device management (0x01 -- 0x06)
 --------------------------------
 
 .. list-table::
@@ -257,6 +285,14 @@ Device management (0x01 -- 0x04)
      - ``DEV_INFO``
      - Read (SciDevInfo)
      - Get device information (state, address, name)
+   * - 0x05
+     - ``DEV_SWITCH``
+     - Write (u16)
+     - Switch the active controller device by index (swap-on-switch)
+   * - 0x06
+     - ``DEV_LIST``
+     - Read (u16)
+     - List all registered device IDs (returns bitmask)
 
 Advertising and scanning (0x10 -- 0x13)
 ---------------------------------------
@@ -359,7 +395,7 @@ connection.
      - Read (SleConnList)
      - Return list of active connection handles (up to 8)
 
-Security (0x40 -- 0x46)
+Security (0x40 -- 0x48)
 -----------------------
 
 .. list-table::
@@ -388,15 +424,15 @@ Security (0x40 -- 0x46)
      - Enable data path encryption (requires Paired state)
    * - 0x44
      - ``SEC_SM3_TEST``
-     - Write/Read (SleHashTest)
+     - Write (SleHashTest)
      - Compute SM3 hash of input data
    * - 0x45
      - ``SEC_SM4_ENC_TEST``
-     - Write/Read (SleConnData)
+     - Write (SleConnData)
      - Encrypt data in-place with SM4-CTR
    * - 0x46
      - ``SEC_SM4_DEC_TEST``
-     - Write/Read (SleConnData)
+     - Write (SleConnData)
      - Decrypt data in-place with SM4-CTR
    * - 0x47
      - ``SEC_SM4_BLOCK_TEST``
@@ -548,7 +584,7 @@ PHY layer (0x90 -- 0x95)
      - Set MCS index (0--12) for modulation and coding rate selection
    * - 0x92
      - ``PHY_SET_TXPOWER``
-     - Write/Read (SlePhyTxPowerCmd)
+     - Write (SlePhyTxPowerCmd)
      - Set TX power in dBm (range: -20 to +10)
    * - 0x93
      - ``PHY_MCS_SELECT``
@@ -565,8 +601,8 @@ PHY layer (0x90 -- 0x95)
      - Write (SlePhyBwCmd)
      - Set channel bandwidth (1, 2, or 4 MHz)
 
-DLI controller info (0x80 -- 0x81)
-----------------------------------
+DLI controller (0x80 -- 0x86)
+-----------------------------
 
 .. list-table::
    :widths: 8 25 15 52
@@ -584,13 +620,33 @@ DLI controller info (0x80 -- 0x81)
      - ``USB_DEV_COUNT``
      - None (retval)
      - Return number of currently attached USB SLE controllers
+   * - 0x82
+     - ``DLI_POLL_EVENT``
+     - Read (SleDliEvent)
+     - Dequeue next pending event from the controller
+   * - 0x83
+     - ``DLI_RESET``
+     - None
+     - Reset the DLI controller to a known-good state
+   * - 0x84
+     - ``DLI_SEND_CMD``
+     - Write/Read (SleDliCmd)
+     - Send a DLI command to the controller (management plane)
+   * - 0x85
+     - ``MGMT_STATS``
+     - Read (SleMgmtStats)
+     - Get management plane pending queue statistics
+   * - 0x86
+     - ``SUBSYS_STATS``
+     - Read (SleSubsysStats)
+     - Get unified subsystem statistics (admin observability)
 
 ``SleDliInfo`` structure:
 
 .. code-block:: c
 
     struct sle_dli_info {
-        uint8_t  bus;               /* 0=Virtual, 1=UART, 2=USB, 3=SDIO */
+        uint8_t  bus;               /* 0=Virtual, 1=UART, 2=SPI, 3=SDIO, 4=USB, 5=MMIO */
         uint8_t  _pad[3];
         uint32_t firmware_version;  /* major.minor.patch packed */
         uint64_t features;          /* feature bitmask (TXS-10003-2025) */
@@ -599,6 +655,26 @@ DLI controller info (0x80 -- 0x81)
         uint8_t  name[32];          /* null-terminated controller name */
         uint8_t  _reserved[14];
     };
+
+Role management (0xA0 -- 0xA1)
+------------------------------
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0xA0
+     - ``SET_ROLE``
+     - Write (u8)
+     - Set local GT node role (0=T-Node, 1=G-Node)
+   * - 0xA1
+     - ``GET_ROLE``
+     - Read (u8)
+     - Get current local GT node role
 
 Event delivery via read()
 =========================
@@ -747,7 +823,7 @@ The standard defines five DLI packet types on the transport layer:
 For USB controllers, the transport maps to four endpoints:
 
 - EP0 (Control): DLI commands (Class request)
-- EP1 (Interrupt IN, 16B max): DLI events
+- EP1 (Interrupt IN, max packet size per descriptor): DLI events
 - EP2 (Bulk OUT): Async TX data
 - EP3 (Bulk IN): Async RX data
 
@@ -773,7 +849,7 @@ The built-in ``VirtualController`` implements this trait for loopback
 testing without physical hardware.
 
 Ioctl-to-DLI routing
----------------------
+--------------------
 
 The ioctl dispatcher in ``sparklink_core.rs`` routes all hardware-facing
 operations through the active ``SleController``. Each ``SparkLinkCtl``
@@ -857,6 +933,12 @@ pipeline without hardware.
 The ``DLI_RESET`` ioctl (0x83) resets the controller to a known-good
 state.
 
+The ``DLI_SEND_CMD`` ioctl (0x84) sends a raw DLI command to the
+controller, specified by opcode and parameter bytes.  The ioctl
+validates the opcode against the known DLI opcode set before queuing.
+On success the matching ``CommandComplete`` event can be retrieved via
+``DLI_POLL_EVENT``.
+
 USB transport module
 --------------------
 
@@ -864,7 +946,7 @@ The ``sle_usb.rs`` module implements DLI packet framing for
 USB-attached controllers and provides ``UsbController`` implementing
 the ``SleController`` trait.
 
-USB wire format for DLI command packets (sent on bulk OUT EP3):
+USB wire format for DLI command packets (sent on EP0, Class request):
 
 .. code-block:: none
 
@@ -886,10 +968,9 @@ Async unicast data header (bulk EP2/EP3):
     Bytes 3-4:    data_len (LE16, 9-bit effective)
     Bytes 5..N:   payload
 
-Currently the USB controller returns ``ENODEV`` on ``open()`` as no
-hardware drivers are registered. A separate ``sparklink_usb`` kernel
-module implementing ``usb::Driver`` will register the USB transport
-when hardware is available.
+USB transport support is integrated in ``sle_usb.rs`` and registered
+alongside the subsystem. Runtime behavior depends on the attached
+controller implementation (virtual model or physical device).
 
 USB hardware discovery
 ----------------------
@@ -1128,7 +1209,7 @@ MIMO mode negotiation uses a min-capability model: both sides report
 their maximum supported mode, and the lesser mode is selected.
 
 DLI parameter encoding
------------------------
+----------------------
 
 PHY parameters are encoded in a 7-byte format for DLI ReadPhyParam
 and SetPhyParam commands:
@@ -1240,6 +1321,32 @@ Commands
    * - ``SPARKLINK_CMD_GET_VERSION``
      - Returns the protocol stack version (``SPARKLINK_ATTR_PROTO_VERSION``)
        and the genetlink interface version (``SPARKLINK_ATTR_GENL_VERSION``).
+   * - ``SPARKLINK_CMD_SET_ROLE``
+     - Set the local GT node role (T-Node/G-Node) via
+       ``SPARKLINK_ATTR_GT_ROLE``.
+   * - ``SPARKLINK_CMD_GET_ROLE``
+     - Returns the current GT role via ``SPARKLINK_ATTR_GT_ROLE``.
+   * - ``SPARKLINK_CMD_GET_CONN_INFO``
+     - Returns connection information for the handle specified in
+       ``SPARKLINK_ATTR_HANDLE``, including state, role, bandwidth,
+       MCS index, and TX/RX byte counters.
+   * - ``SPARKLINK_CMD_GET_PM_INFO``
+     - Returns power management status via ``SPARKLINK_ATTR_PM_STATE``,
+       ``SPARKLINK_ATTR_FORCE_ACTIVE``, and ``SPARKLINK_ATTR_POWER_PCT``.
+   * - ``SPARKLINK_CMD_GET_DLI_INFO``
+     - Returns DLI controller information (bus type, firmware version,
+       feature bitmask, max connections, max MTU/MPS, transport modes,
+       measurement and security capabilities).
+   * - ``SPARKLINK_CMD_START_ADV``
+     - Start advertising with interval and discovery level from
+       ``SPARKLINK_ATTR_INTERVAL_MS`` and ``SPARKLINK_ATTR_DISCOVERY_LEVEL``.
+   * - ``SPARKLINK_CMD_STOP_ADV``
+     - Stop advertising.
+   * - ``SPARKLINK_CMD_START_SCAN``
+     - Start scanning with parameters from ``SPARKLINK_ATTR_WINDOW_MS``
+       and ``SPARKLINK_ATTR_INTERVAL_MS``.
+   * - ``SPARKLINK_CMD_STOP_SCAN``
+     - Stop scanning.
    * - ``SPARKLINK_CMD_EVENT``
      - Multicast event notification sent to the ``"events"`` group
        carrying ``SPARKLINK_ATTR_EVENT_TYPE``, optional
@@ -1252,6 +1359,16 @@ Multicast groups
 The ``"events"`` multicast group delivers async event notifications
 to subscribed userspace listeners (connection state changes,
 advertising reports, security events, etc.).
+
+Attributes
+----------
+
+The full attribute enumeration is defined in
+``include/uapi/linux/sparklink.h`` (``enum SPARKLINK_ATTR_*``).
+Key attribute groups include device info, addressing, connection
+parameters, advertising/scanning, security, SSAP service layer,
+power management, event delivery, DLI controller capabilities,
+and data channel configuration.
 
 Rust integration
 ----------------
@@ -1288,7 +1405,8 @@ sparklink_test
 
 Integration test program at
 ``tools/testing/selftests/sparklink/sparklink_test.c``.
-Covers all subsystem ioctl interfaces with 30 test cases:
+Covers all subsystem ioctl interfaces with a continuously expanded
+selftest matrix, including:
 
 - Device management: count, info, register
 - Advertising: start/stop, duplicate detection
@@ -1352,11 +1470,11 @@ The script:
 1. Builds ``sparklink_test`` as a static binary
 2. Creates a minimal initramfs with busybox and the test binary
 3. Boots the kernel in QEMU with KVM (if available)
-4. Waits for ``/dev/sparklink`` and runs all 28 test cases
+4. Waits for ``/dev/sparklink`` and runs the full test suite
 5. Parses console output for OK/FAIL/WARN counts and overall result
 
 sparklink_ctl
---------------
+-------------
 
 CLI control tool at ``tools/testing/selftests/sparklink/sparklink_ctl.c``.
 
@@ -1426,8 +1544,8 @@ Per T/XS 10002-2025 chapter 6, the SLE over-the-air PDU is:
 .. code-block:: none
 
     +----------+----------------+-----------+---------+---------+
-    | Preamble | Access Address | PDU Header| Payload | CRC-24  |
-    | (1-2 B)  |    (4 B)       |  (2 B)    | (var)   | (3 B)   |
+    | Preamble | Access Address | PDU Header| Payload | CRC-12  |
+    | (1-2 B)  |    (4 B)       |  (2 B)    | (var)   | (2 B)   |
     +----------+----------------+-----------+---------+---------+
 
     PDU Header fields:
@@ -1481,7 +1599,7 @@ The security layer uses Chinese national cryptographic algorithms:
 4. **Integrity** -- Link key fingerprint via SM3 hash
 
 Power management state machine
--------------------------------
+------------------------------
 
 .. code-block:: none
 
@@ -1515,34 +1633,31 @@ device twice. The handle ``0`` serves as a legacy shortcut that
 resolves to the first active connection.
 
 Limitations and future work
-============================
+===========================
 
 Current limitations:
 
-1. **No physical hardware driver** -- The USB, UART, and SPI transport
-   frameworks are in place with complete framing and protocol support,
-   but actual hardware I/O returns ``ENODEV`` until a physical controller
-   is available for integration testing.
+1. **No physical hardware validation** -- USB, UART, SPI, and serdev
+   transport frameworks are complete with full framing and protocol
+   support, and have been integration-tested with a custom QEMU
+   virtual SLE controller (``usb-sle-dli``). Actual silicon validation
+   awaits availability of conformant SLE radio hardware.
 
 2. **C bridge for genetlink** -- The Generic Netlink family is
    registered via a C bridge (``sparklink_genl.c``) because upstream
    Rust genetlink bindings are not yet available. When they mature,
    the bridge can be replaced with pure Rust registration.
 
-3. **Pure Rust crypto** -- SM3/SM4 are implemented in pure Rust
-   without kernel crypto API hardware acceleration.
-
-4. **configfs framework workaround** -- The configfs Rust framework
+3. **configfs framework workaround** -- The configfs Rust framework
    has a ``container_of`` address calculation issue for root group
    subsystems. Configuration parameters use module-level atomics
    instead of per-instance data as a workaround.
 
 Planned work:
 
-- USB bulk/interrupt I/O integration for physical SLE radio controllers
-- UART/SPI bus driver binding for embedded SLE radio modules
+- Physical SLE radio hardware bring-up and conformance testing
+- UART/SPI/serdev bus driver binding for embedded SLE radio modules
 - Pure Rust genetlink registration when upstream Rust bindings mature
-- Kernel crypto API integration for hardware-accelerated SM3/SM4
 
 Architecture design review
 ==========================
@@ -1556,10 +1671,14 @@ Module dependency graph
       ├── sle_dli.rs        SleController trait, opcodes, ControllerBackend
       │     ├── sle_uart.rs     UartController (H4 framing)
       │     ├── sle_spi.rs      SpiController (register I/O)
-      │     └── sle_usb.rs      UsbController (HID descriptor)
+      │     ├── sle_usb.rs      UsbController (USB bulk/interrupt)
+      │     │     └── sle_usb_ffi.c   USB driver C FFI bridge
+      │     └── sle_serdev.rs   SerdevController (serial device)
+      │           └── sle_serdev_ffi.c  serdev C FFI bridge
       ├── sle_adv.rs        AdvScanInner, PDU advertising/scanning
       ├── sle_conn.rs       ConnManager, DataRingBuffer, ARQ
-      ├── sle_crypto.rs     SM3/SM4 (pure Rust, no external deps)
+      ├── sle_crypto.rs     Rust wrapper over kernel crypto API
+      │     └── sle_crypto_ffi.c   SM3/SM4/HMAC C FFI bridge
       ├── sle_security.rs   SecurityInner, pairing state machine
       ├── sle_ssap.rs       Service framework (property/method/event)
       ├── sle_power.rs      PowerInner, PM state machine
@@ -1568,6 +1687,9 @@ Module dependency graph
       ├── sle_pdu.rs        PDU codec, CRC-12, advertising builder
       ├── sle_netlink.rs    TLV encoding for Generic Netlink
       ├── sle_configfs.rs   Runtime parameters via /sys/kernel/config/
+      ├── sle_mgmt.rs       Management plane, DLI command queue
+      ├── sle_transport.rs  Transport abstraction layer
+      ├── sle_fw.rs         Firmware version parsing
       └── sparklink_genl.c  C genetlink family (FFI bridge)
 
 Design decisions
@@ -1607,11 +1729,17 @@ backing store with fixed slot metadata (64 slots, 255 bytes per message
 max).  This avoids per-message heap allocation under high data
 throughput and prevents kernel memory fragmentation.
 
-**Pure-Rust cryptography.**
-SM3 and SM4 are implemented without external C libraries.  This
-eliminates a dependency chain on the kernel crypto subsystem and keeps
-the module self-contained.  Test vectors validate conformance to GB/T
-32905-2016 and GB/T 32907-2016.
+**Kernel crypto API delegation.**
+SM3 and SM4 operations are delegated to kernel crypto API providers
+(``CRYPTO_SM3_GENERIC``, ``CRYPTO_SM4_GENERIC``, ``CRYPTO_HMAC``,
+``CRYPTO_ECB``, ``CRYPTO_CTR``) through a C FFI bridge
+(``sle_crypto_ffi.c``).  ``sle_crypto.rs`` is a thin safe Rust wrapper
+that provides the typed interface (``Sm3::hash``, ``Sm4Ecb::encrypt``,
+``HmacSm3::mac``, etc.) without reimplementing cryptographic primitives.
+This keeps the module aligned with the kernel's audited crypto
+infrastructure and enables hardware acceleration on platforms that
+provide SM3/SM4 accelerators.  Test vectors validate conformance to
+GB/T 32905-2016 and GB/T 32907-2016.
 
 **Bounded resource limits.**
 Connections are capped at ``MAX_CONNECTIONS`` (default 8, overridable
@@ -1629,7 +1757,7 @@ Identified risks and mitigations
    configfs values.  Mitigation: awaiting upstream configfs API
    improvement; current usage is single-instance.
 
-2. **Event ring buffer size.**  The 8-slot ring in each controller
+2. **Event ring buffer size.**  The 32-slot ring in each controller
    backend can overflow under burst command traffic, silently dropping
    events.  For the virtual loopback test path this is acceptable.
    Real hardware drivers should implement flow control or larger
@@ -1641,11 +1769,12 @@ Identified risks and mitigations
    effect only on the next ``open()``.  This is intentional to avoid
    mid-session transport disruption.
 
-4. **SSAP service registration.**  Only the built-in Device Information
-   Service exists.  Dynamic service registration from userspace is not
-   yet implemented; it would require a new ioctl or Netlink command set.
-   The internal ``SsapInner`` struct supports multiple services but the
-   userspace API surface is not yet defined.
+4. **SSAP service handle namespace.**  Dynamically registered services
+   share the same handle namespace with the built-in Device Information
+   Service.  When services are removed and re-added, handle recycling
+   may confuse clients that cache stale handle values.  Mitigation:
+   clients should re-discover services after receiving a service-changed
+   event.
 
 Code statistics
 ---------------
@@ -1654,29 +1783,36 @@ Code statistics
 
     Component                  Lines
     ─────────────────────────  ─────
-    sparklink_core.rs           ~2270
-    sle_dli.rs                  ~1030
-    sle_ssap.rs                  ~870
-    sle_conn.rs                  ~710
-    sle_usb.rs                   ~670
+    sparklink_core.rs           ~3880
+    sle_dli.rs                  ~1360
+    sle_ssap.rs                 ~1410
+    sle_usb.rs                  ~1210
+    sle_usb_ffi.c               ~1010
+    sle_conn.rs                  ~980
+    sle_event.rs                 ~760
+    sle_serdev_ffi.c             ~600
     sle_phy.rs                   ~580
+    sle_serdev.rs                ~570
     sle_pdu.rs                   ~530
     sle_uart.rs                  ~520
-    sle_crypto.rs                ~480
-    sle_spi.rs                   ~450
-    sle_adv.rs                   ~380
-    sle_event.rs                 ~360
+    sle_spi.rs                   ~460
+    sle_adv.rs                   ~390
     sle_netlink.rs               ~360
-    sle_power.rs                 ~300
+    sle_transport.rs             ~350
+    sle_mgmt.rs                  ~340
+    sle_power.rs                 ~310
     sle_security.rs              ~280
-    sparklink_genl.c             ~260
-    sle_configfs.rs              ~220
+    sle_configfs.rs              ~230
+    sle_crypto_ffi.c             ~220
+    sle_crypto.rs                ~190
+    sle_fw.rs                    ~180
+    sparklink_genl.c             ~660
     ─────────────────────────  ─────
-    Kernel total                ~10270
-    Test + tools                ~2990
-    UAPI header                  ~263
-    Documentation               ~1690
-    Grand total                ~15213
+    Kernel total               ~16380
+    Test + tools                ~7130
+    UAPI header                  ~274
+    Documentation               ~1740
+    Grand total                ~25520
 
 References
 ==========

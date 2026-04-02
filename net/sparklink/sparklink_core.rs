@@ -14,35 +14,34 @@
 //!   - Transport: Async/sync data link management
 //!   - Security: SM2/SM3/SM4 pairing and encryption (future)
 
-mod sle_pdu;
 mod sle_adv;
+mod sle_configfs;
 mod sle_conn;
 mod sle_crypto;
-mod sle_security;
-mod sle_ssap;
-mod sle_power;
-mod sle_dli;
 mod sle_dev;
-mod sle_mgmt;
-mod sle_transport;
-mod sle_serdev;
+mod sle_dli;
 mod sle_event;
-mod sle_usb;
-mod sle_netlink;
-mod sle_configfs;
-mod sle_phy;
-mod sle_uart;
-mod sle_spi;
 mod sle_fw;
+mod sle_mgmt;
+mod sle_netlink;
+mod sle_pdu;
+mod sle_phy;
+mod sle_power;
+mod sle_security;
+mod sle_serdev;
+mod sle_spi;
+mod sle_ssap;
+mod sle_transport;
+mod sle_uart;
+mod sle_usb;
 
 use sle_dli::SleController;
 
+use kernel::configfs_attrs;
 use kernel::sync::atomic::Relaxed;
 use kernel::sync::Arc;
-use kernel::configfs_attrs;
 use kernel::{
-    bindings,
-    configfs,
+    bindings, configfs,
     debugfs::{Dir, File},
     device::Device,
     fs::{File as FsFile, Kiocb},
@@ -65,11 +64,13 @@ use kernel::{
 };
 
 use sle_adv::{AdvParams, AdvScanInner, ScanParams};
-use sle_conn::{AccessResponseType, ConnManager, ConnState, GtRole, NegotiatedParams, CONN_DATA_MAX};
-use sle_security::{SecurityInner, RpaManager, RalEntry};
-use sle_ssap::SsapInner;
-use sle_power::PowerInner;
+use sle_conn::{
+    AccessResponseType, ConnManager, ConnState, GtRole, NegotiatedParams, CONN_DATA_MAX,
+};
 use sle_event::EventQueue;
+use sle_power::PowerInner;
+use sle_security::{RalEntry, RpaManager, SecurityInner};
+use sle_ssap::SsapInner;
 
 // ---------------------------------------------------------------------------
 // Userspace read/write helpers for repr(C) ioctl structures
@@ -143,7 +144,11 @@ pub extern "C" fn sparklink_genl_set_role(role: u8) -> i32 {
     let mut ss = SUBSYSTEM.lock();
     match ss.as_mut() {
         Some(shared) => {
-            shared.local_role = if role == 1 { GtRole::GNode } else { GtRole::TNode };
+            shared.local_role = if role == 1 {
+                GtRole::GNode
+            } else {
+                GtRole::TNode
+            };
             0
         }
         None => -(bindings::ENODEV as i32),
@@ -244,7 +249,11 @@ pub unsafe extern "C" fn sparklink_genl_get_pm_info(out: *mut GenlPmInfo) -> i32
             // SAFETY: caller guarantees out is a valid, aligned pointer.
             let info = unsafe { &mut *out };
             info.state = shared.power.state as u8;
-            info.force_active = if shared.power.is_forced_active() { 1 } else { 0 };
+            info.force_active = if shared.power.is_forced_active() {
+                1
+            } else {
+                0
+            };
             info.power_pct = shared.power.estimated_power_pct();
             info._pad = 0;
             info.transitions = shared.power.stats.transitions;
@@ -343,7 +352,9 @@ mod genl_bridge {
     impl Drop for GenlGuard {
         fn drop(&mut self) {
             // SAFETY: sparklink_genl_unregister is defined in sparklink_genl.c
-            unsafe { sparklink_genl_unregister(); }
+            unsafe {
+                sparklink_genl_unregister();
+            }
         }
     }
 
@@ -351,14 +362,7 @@ mod genl_bridge {
     pub(crate) fn notify_event(event_type: u8, handle: u16, addr: &[u8; 6]) {
         // SAFETY: sparklink_genl_send_event is defined in sparklink_genl.c
         unsafe {
-            sparklink_genl_send_event(
-                event_type,
-                handle,
-                addr.as_ptr(),
-                6,
-                core::ptr::null(),
-                0,
-            );
+            sparklink_genl_send_event(event_type, handle, addr.as_ptr(), 6, core::ptr::null(), 0);
         }
     }
 }
@@ -1957,7 +1961,11 @@ unsafe impl FromBytes for SleSubsysStats {}
 fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
     let mut out = SleDliEvent::default();
     match ev {
-        sle_dli::SleEvent::CommandComplete { opcode, status, data } => {
+        sle_dli::SleEvent::CommandComplete {
+            opcode,
+            status,
+            data,
+        } => {
             out.event_type = 0x01;
             out.status = *status as u8;
             out.opcode = *opcode as u16;
@@ -1970,7 +1978,12 @@ fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
             out.status = *status as u8;
             out.opcode = *opcode as u16;
         }
-        sle_dli::SleEvent::AdvReport { addr, rssi, discovery_level, data } => {
+        sle_dli::SleEvent::AdvReport {
+            addr,
+            rssi,
+            discovery_level,
+            data,
+        } => {
             out.event_type = 0x03;
             out.addr = *addr;
             out.data[0] = *rssi as u8;
@@ -1979,7 +1992,11 @@ fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
             out.data_len = (len + 2) as u16;
             out.data[2..2 + len].copy_from_slice(&data[..len]);
         }
-        sle_dli::SleEvent::ConnComplete { handle, addr, status } => {
+        sle_dli::SleEvent::ConnComplete {
+            handle,
+            addr,
+            status,
+        } => {
             out.event_type = 0x04;
             out.handle = *handle;
             out.addr = *addr;
@@ -2020,14 +2037,23 @@ fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
             out.data[0] = *reason;
             out.data_len = 1;
         }
-        sle_dli::SleEvent::PhyUpdate { handle, mcs_index, bandwidth_mhz } => {
+        sle_dli::SleEvent::PhyUpdate {
+            handle,
+            mcs_index,
+            bandwidth_mhz,
+        } => {
             out.event_type = 0x0B;
             out.handle = *handle;
             out.data[0] = *mcs_index;
             out.data[1] = *bandwidth_mhz;
             out.data_len = 2;
         }
-        sle_dli::SleEvent::ConnParamUpdate { handle, interval, latency, timeout } => {
+        sle_dli::SleEvent::ConnParamUpdate {
+            handle,
+            interval,
+            latency,
+            timeout,
+        } => {
             out.event_type = 0x0C;
             out.handle = *handle;
             out.data[0] = (*interval & 0xFF) as u8;
@@ -2038,7 +2064,11 @@ fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
             out.data[5] = (*timeout >> 8) as u8;
             out.data_len = 6;
         }
-        sle_dli::SleEvent::DataLenChange { handle, max_tx_octets, max_rx_octets } => {
+        sle_dli::SleEvent::DataLenChange {
+            handle,
+            max_tx_octets,
+            max_rx_octets,
+        } => {
             out.event_type = 0x0D;
             out.handle = *handle;
             out.data[0] = (*max_tx_octets & 0xFF) as u8;
@@ -2052,7 +2082,13 @@ fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
             out.data[0] = *link_type;
             out.data_len = 1;
         }
-        sle_dli::SleEvent::PeerConnParamReq { handle, interval_min, interval_max, latency, timeout } => {
+        sle_dli::SleEvent::PeerConnParamReq {
+            handle,
+            interval_min,
+            interval_max,
+            latency,
+            timeout,
+        } => {
             out.event_type = 0x0F;
             out.handle = *handle;
             out.data[0] = (*interval_min & 0xFF) as u8;
@@ -2245,8 +2281,7 @@ kernel::sync::global_lock! {
 }
 
 /// Number of currently open file descriptors.
-static OPEN_FD_COUNT: kernel::sync::atomic::Atomic<u32> =
-    kernel::sync::atomic::Atomic::new(0);
+static OPEN_FD_COUNT: kernel::sync::atomic::Atomic<u32> = kernel::sync::atomic::Atomic::new(0);
 
 /// DLI event ring size (events consumed from controller by EventPump).
 const DLI_RING_SIZE: usize = 32;
@@ -2293,10 +2328,7 @@ impl PerDeviceState {
                 sle_dli::ControllerBackend::new_virtual(placeholder),
             ),
             conn: core::mem::replace(&mut ss.conn, ConnManager::new(placeholder)),
-            adv_scan: core::mem::replace(
-                &mut ss.adv_scan,
-                AdvScanInner::new(placeholder, b""),
-            ),
+            adv_scan: core::mem::replace(&mut ss.adv_scan, AdvScanInner::new(placeholder, b"")),
             security: core::mem::replace(&mut ss.security, SecurityInner::new()),
             ssap: core::mem::replace(&mut ss.ssap, SsapInner::new()),
             power: core::mem::replace(&mut ss.power, PowerInner::new()),
@@ -2425,11 +2457,7 @@ impl SubsystemShared {
     /// (or creates) the state for `new_id`.  All live field accessors
     /// (`self.controller`, `self.conn`, etc.) transparently refer to
     /// the new device after this call.
-    fn switch_active_device(
-        &mut self,
-        new_id: u16,
-        new_state: Option<PerDeviceState>,
-    ) -> Result {
+    fn switch_active_device(&mut self, new_id: u16, new_state: Option<PerDeviceState>) -> Result {
         if new_id as usize >= sle_dev::SLE_DEV_MAX {
             return Err(EINVAL);
         }
@@ -2495,7 +2523,11 @@ pub(crate) fn sle_attach_device(info: &sle_transport::SleAttachInfo) -> Result<u
         fw_version: info.fw_version,
         features: info.features,
         features_ext: info.features_ext,
-        max_pdu_payload: if info.max_pdu > 0 { info.max_pdu } else { default_pdu },
+        max_pdu_payload: if info.max_pdu > 0 {
+            info.max_pdu
+        } else {
+            default_pdu
+        },
         max_connections: if info.max_connections > 0 {
             info.max_connections
         } else {
@@ -2522,8 +2554,12 @@ pub(crate) fn sle_attach_device(info: &sle_transport::SleAttachInfo) -> Result<u
         "sparklink: device sle{} attached via {} [{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}]\n",
         dev_id,
         proto_name,
-        info.addr[0], info.addr[1], info.addr[2],
-        info.addr[3], info.addr[4], info.addr[5],
+        info.addr[0],
+        info.addr[1],
+        info.addr[2],
+        info.addr[3],
+        info.addr[4],
+        info.addr[5],
     );
 
     Ok(dev_id)
@@ -2691,7 +2727,11 @@ pub extern "C" fn sparklink_do_stop_adv() -> i32 {
 
 /// Start scanning (C FFI). Returns 0 on success, negative errno on failure.
 #[no_mangle]
-pub extern "C" fn sparklink_do_start_scan(window_ms: u32, interval_ms: u32, filter_level: u8) -> i32 {
+pub extern "C" fn sparklink_do_start_scan(
+    window_ms: u32,
+    interval_ms: u32,
+    filter_level: u8,
+) -> i32 {
     match do_start_scan(window_ms, interval_ms, filter_level) {
         Ok(v) => v,
         Err(e) => e.to_errno(),
@@ -2721,7 +2761,8 @@ pub(crate) fn sle_switch_controller_usb(dev_id: u16, addr: [u8; 6], fw_version: 
         if let Err(e) = ss.switch_active_device(dev_id, Some(new_state)) {
             pr_err!(
                 "sparklink: failed to switch to USB sle{}: {:?}\n",
-                dev_id, e
+                dev_id,
+                e
             );
             return;
         }
@@ -2729,15 +2770,13 @@ pub(crate) fn sle_switch_controller_usb(dev_id: u16, addr: [u8; 6], fw_version: 
         if let Err(e) = ss.controller.open() {
             pr_warn!(
                 "sparklink: controller open failed for sle{}: {:?}\n",
-                dev_id, e
+                dev_id,
+                e
             );
         }
         // Sync device model with real hardware info from probe.
         ss.dev_registry.update_hw_info(dev_id, addr, fw_version);
-        pr_info!(
-            "sparklink: controller switched to USB (sle{})\n",
-            dev_id
-        );
+        pr_info!("sparklink: controller switched to USB (sle{})\n", dev_id);
     }
 }
 
@@ -2776,10 +2815,7 @@ pub(crate) fn sle_switch_controller_serdev(dev_id: u16, addr: [u8; 6], fw_versio
         ss.active_dev_id = Some(dev_id);
         // Sync device model with real hardware info from probe.
         ss.dev_registry.update_hw_info(dev_id, addr, fw_version);
-        pr_info!(
-            "sparklink: controller switched to serdev (sle{})\n",
-            dev_id
-        );
+        pr_info!("sparklink: controller switched to serdev (sle{})\n", dev_id);
     }
 }
 
@@ -2839,43 +2875,59 @@ fn send_credit_grant(
 fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent) {
     // 1. Resolve pending management commands.
     match ev {
-        sle_dli::SleEvent::CommandComplete { opcode, status, data } => {
-            shared.cmd_pending.resolve(*opcode as u16, *status as u8, data.as_slice());
+        sle_dli::SleEvent::CommandComplete {
+            opcode,
+            status,
+            data,
+        } => {
+            shared
+                .cmd_pending
+                .resolve(*opcode as u16, *status as u8, data.as_slice());
         }
         sle_dli::SleEvent::CommandStatus { opcode, status } => {
-            shared.cmd_pending.resolve(*opcode as u16, *status as u8, &[]);
+            shared
+                .cmd_pending
+                .resolve(*opcode as u16, *status as u8, &[]);
         }
         _ => {}
     }
 
     // 2. Drive pending state machine transitions (DLI async confirmation).
     match ev {
-        sle_dli::SleEvent::CommandComplete { opcode, status, .. } => {
-            match opcode {
-                sle_dli::SleOpcode::EnableBroadcast => {
-                    if *status == sle_dli::SleStatus::Success {
-                        shared.adv_scan.confirm_advertising();
-                        if let Some(dev) = shared.active_dev_id.and_then(|id| shared.dev_registry.get(id)) {
-                            dev.set_flag(sle_dev::SLE_DEV_ADVERTISING);
-                        }
-                    } else {
-                        shared.adv_scan.abort_advertising();
+        sle_dli::SleEvent::CommandComplete { opcode, status, .. } => match opcode {
+            sle_dli::SleOpcode::EnableBroadcast => {
+                if *status == sle_dli::SleStatus::Success {
+                    shared.adv_scan.confirm_advertising();
+                    if let Some(dev) = shared
+                        .active_dev_id
+                        .and_then(|id| shared.dev_registry.get(id))
+                    {
+                        dev.set_flag(sle_dev::SLE_DEV_ADVERTISING);
                     }
+                } else {
+                    shared.adv_scan.abort_advertising();
                 }
-                sle_dli::SleOpcode::EnableScan => {
-                    if *status == sle_dli::SleStatus::Success {
-                        shared.adv_scan.confirm_scanning();
-                        if let Some(dev) = shared.active_dev_id.and_then(|id| shared.dev_registry.get(id)) {
-                            dev.set_flag(sle_dev::SLE_DEV_SCANNING);
-                        }
-                    } else {
-                        shared.adv_scan.abort_scanning();
-                    }
-                }
-                _ => {}
             }
-        }
-        sle_dli::SleEvent::ConnComplete { handle: evt_handle, addr, status } => {
+            sle_dli::SleOpcode::EnableScan => {
+                if *status == sle_dli::SleStatus::Success {
+                    shared.adv_scan.confirm_scanning();
+                    if let Some(dev) = shared
+                        .active_dev_id
+                        .and_then(|id| shared.dev_registry.get(id))
+                    {
+                        dev.set_flag(sle_dev::SLE_DEV_SCANNING);
+                    }
+                } else {
+                    shared.adv_scan.abort_scanning();
+                }
+            }
+            _ => {}
+        },
+        sle_dli::SleEvent::ConnComplete {
+            handle: evt_handle,
+            addr,
+            status,
+        } => {
             if *status == sle_dli::SleStatus::Success {
                 if shared.conn.confirm_connecting_by_addr(addr).is_none() {
                     // Incoming connection — no prior ConnectPending entry.
@@ -2888,14 +2940,24 @@ fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent
             }
         }
         sle_dli::SleEvent::Disconnected { handle, .. } => {
-            let peer_addr = shared.conn.info(*handle)
+            let peer_addr = shared
+                .conn
+                .info(*handle)
                 .map(|e| e.peer_addr)
                 .unwrap_or([0u8; 6]);
             shared.conn.confirm_disconnecting_by_handle(*handle);
             genl_bridge::notify_event(0x01, *handle, &peer_addr);
         }
-        sle_dli::SleEvent::AdvReport { addr, rssi, discovery_level, data } => {
-            let _ = shared.adv_scan.process_adv_report(addr, *rssi, *discovery_level, data.as_slice());
+        sle_dli::SleEvent::AdvReport {
+            addr,
+            rssi,
+            discovery_level,
+            data,
+        } => {
+            let _ =
+                shared
+                    .adv_scan
+                    .process_adv_report(addr, *rssi, *discovery_level, data.as_slice());
             genl_bridge::notify_event(0x02, 0, addr);
         }
         sle_dli::SleEvent::DataReceived { handle, data } => {
@@ -2914,48 +2976,59 @@ fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent
             } else if raw[0] as u16 == sle_conn::tcid::SERVICE_MGMT && raw.len() > 1 {
                 // SSAP PDU on service management channel (TCID 0x0A).
                 // Track RX credit for the reliable SMTC channel.
-                let needs_grant = shared.conn.consume_rx_credit(
-                    *handle, sle_conn::tcid::SERVICE_MGMT,
-                );
+                let needs_grant = shared
+                    .conn
+                    .consume_rx_credit(*handle, sle_conn::tcid::SERVICE_MGMT);
                 let pdu_data = &raw[1..];
                 let mut resp_buf = [0u8; sle_ssap::SSAP_PDU_MAX];
-                let resp_len = shared.conn.process_ssap_pdu(
-                    *handle, pdu_data, &mut shared.ssap, &mut resp_buf,
-                ).unwrap_or(0);
+                let resp_len = shared
+                    .conn
+                    .process_ssap_pdu(*handle, pdu_data, &mut shared.ssap, &mut resp_buf)
+                    .unwrap_or(0);
                 // Send response PDU back with TCID prefix, consuming TX credit.
                 if resp_len > 0 {
-                    if shared.conn.consume_tx_credit(
-                        *handle, sle_conn::tcid::SERVICE_MGMT,
-                    ).is_ok() {
+                    if shared
+                        .conn
+                        .consume_tx_credit(*handle, sle_conn::tcid::SERVICE_MGMT)
+                        .is_ok()
+                    {
                         let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
                         tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
                         tx_buf[1..1 + resp_len].copy_from_slice(&resp_buf[..resp_len]);
-                        let _ = shared.controller.send_data(
-                            *handle, &tx_buf[..1 + resp_len],
-                        );
+                        let _ = shared
+                            .controller
+                            .send_data(*handle, &tx_buf[..1 + resp_len]);
                     }
                 }
                 // Drain pending notifications/indications triggered by the PDU.
                 loop {
                     match shared.ssap.dequeue_notification() {
                         Some(n) => {
-                            if shared.conn.consume_tx_credit(
-                                *handle, sle_conn::tcid::SERVICE_MGMT,
-                            ).is_err() {
+                            if shared
+                                .conn
+                                .consume_tx_credit(*handle, sle_conn::tcid::SERVICE_MGMT)
+                                .is_err()
+                            {
                                 break; // No credits remaining for notifications.
                             }
                             let pdu = if n.indication {
-                                sle_ssap::SsapPdu::ValueInd { handle: n.handle, data: n.data }
+                                sle_ssap::SsapPdu::ValueInd {
+                                    handle: n.handle,
+                                    data: n.data,
+                                }
                             } else {
-                                sle_ssap::SsapPdu::ValueNtf { handle: n.handle, data: n.data }
+                                sle_ssap::SsapPdu::ValueNtf {
+                                    handle: n.handle,
+                                    data: n.data,
+                                }
                             };
                             let mut ntf_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
                             ntf_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
                             if let Ok(pdu_len) = pdu.encode(&mut ntf_buf[1..]) {
                                 if pdu_len > 0 {
-                                    let _ = shared.controller.send_data(
-                                        *handle, &ntf_buf[..1 + pdu_len],
-                                    );
+                                    let _ = shared
+                                        .controller
+                                        .send_data(*handle, &ntf_buf[..1 + pdu_len]);
                                 }
                             }
                         }
@@ -2964,9 +3037,10 @@ fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent
                 }
                 // Send credit grant if RX credits are low.
                 if needs_grant {
-                    if let Ok(granted) = shared.conn.grant_credits(
-                        *handle, sle_conn::tcid::SERVICE_MGMT,
-                    ) {
+                    if let Ok(granted) = shared
+                        .conn
+                        .grant_credits(*handle, sle_conn::tcid::SERVICE_MGMT)
+                    {
                         send_credit_grant(
                             &shared.controller,
                             *handle,
@@ -2977,20 +3051,16 @@ fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent
                 }
             } else {
                 // User data — strip TCID prefix if present, enqueue to rx_queue.
-                let tcid = if raw[0] as u16 == sle_conn::tcid::DEFAULT_DATA
-                    && raw.len() > 1
-                {
-                    let _ = shared.conn.consume_rx_credit(
-                        *handle, sle_conn::tcid::DEFAULT_DATA,
-                    );
+                let tcid = if raw[0] as u16 == sle_conn::tcid::DEFAULT_DATA && raw.len() > 1 {
+                    let _ = shared
+                        .conn
+                        .consume_rx_credit(*handle, sle_conn::tcid::DEFAULT_DATA);
                     sle_conn::tcid::DEFAULT_DATA
                 } else {
                     0 // Legacy data without TCID prefix.
                 };
                 let payload = if tcid != 0 { &raw[1..] } else { raw };
-                let seq = shared.conn.info(*handle)
-                    .map(|e| e.seq.rx_seq)
-                    .unwrap_or(0);
+                let seq = shared.conn.info(*handle).map(|e| e.seq.rx_seq).unwrap_or(0);
                 let _ = shared.conn.receive_data(*handle, payload, seq);
             }
         }
@@ -3027,17 +3097,18 @@ fn drain_controller_events(shared: &mut SubsystemShared) {
 
 impl EventPump {
     fn new() -> Result<Arc<Self>> {
-        Arc::pin_init(pin_init!(EventPump {
-            work <- new_delayed_work!("sparklink_event_pump"),
-        }), GFP_KERNEL)
+        Arc::pin_init(
+            pin_init!(EventPump {
+                work <- new_delayed_work!("sparklink_event_pump"),
+            }),
+            GFP_KERNEL,
+        )
     }
 
     /// Schedule the first pump cycle.
     fn start(self: &Arc<Self>) {
-        let _ = workqueue::system().enqueue_delayed(
-            self.clone(),
-            msecs_to_jiffies(EVENT_PUMP_INTERVAL_MS),
-        );
+        let _ = workqueue::system()
+            .enqueue_delayed(self.clone(), msecs_to_jiffies(EVENT_PUMP_INTERVAL_MS));
     }
 }
 
@@ -3101,24 +3172,21 @@ impl WorkItem for EventPump {
                 let timed_out = shared.conn.check_supervision_timeouts();
                 for &h in timed_out.iter() {
                     if let Ok(peer) = shared.conn.timeout_disconnect(h) {
-                        shared.broadcast.publish(
-                            sle_event::SleWireEvent::conn_state(
+                        shared
+                            .broadcast
+                            .publish(sle_event::SleWireEvent::conn_state(
                                 h,
                                 sle_conn::ConnState::Connected as u8,
                                 sle_conn::ConnState::Idle as u8,
                                 peer,
                                 0x08, // supervision timeout
-                            ),
-                        );
+                            ));
                     }
                 }
             }
         }
         // Re-arm the delayed work for the next cycle.
-        let _ = workqueue::system().enqueue_delayed(
-            this,
-            msecs_to_jiffies(EVENT_PUMP_INTERVAL_MS),
-        );
+        let _ = workqueue::system().enqueue_delayed(this, msecs_to_jiffies(EVENT_PUMP_INTERVAL_MS));
     }
 }
 
@@ -3149,17 +3217,18 @@ impl_has_delayed_work! {
 
 impl CommandWorker {
     fn new() -> Result<Arc<Self>> {
-        Arc::pin_init(pin_init!(CommandWorker {
-            work <- new_delayed_work!("sparklink_cmd_worker"),
-        }), GFP_KERNEL)
+        Arc::pin_init(
+            pin_init!(CommandWorker {
+                work <- new_delayed_work!("sparklink_cmd_worker"),
+            }),
+            GFP_KERNEL,
+        )
     }
 
     /// Schedule the command worker to run soon.
     fn kick(self: &Arc<Self>) {
-        let _ = workqueue::system().enqueue_delayed(
-            self.clone(),
-            msecs_to_jiffies(CMD_WORKER_INTERVAL_MS),
-        );
+        let _ = workqueue::system()
+            .enqueue_delayed(self.clone(), msecs_to_jiffies(CMD_WORKER_INTERVAL_MS));
     }
 }
 
@@ -3176,15 +3245,16 @@ impl WorkItem for CommandWorker {
                     match shared.cmd_queue.pop() {
                         Some(req) => {
                             let plen = req.param_len as usize;
-                            let result = shared.controller.send_command_raw(
-                                req.opcode,
-                                &req.params[..plen],
-                            );
+                            let result = shared
+                                .controller
+                                .send_command_raw(req.opcode, &req.params[..plen]);
                             if result.is_err() {
                                 // Immediately resolve the pending entry as
                                 // failed so it does not linger until timeout.
                                 shared.cmd_pending.resolve(
-                                    req.opcode, 0x03, &[], // HardwareFailure
+                                    req.opcode,
+                                    0x03,
+                                    &[], // HardwareFailure
                                 );
                             }
                             dispatched += 1;
@@ -3211,32 +3281,43 @@ impl WorkItem for CommandWorker {
 /// Convert a DLI SleEvent into a SleWireEvent for broadcast ring insertion.
 fn sle_dli_event_to_broadcast(ev: &sle_dli::SleEvent) -> sle_event::SleWireEvent {
     match ev {
-        sle_dli::SleEvent::CommandComplete { opcode, status, data } => {
-            sle_event::SleWireEvent::command_complete(
-                *opcode as u16,
-                *status as u8,
-                data.as_slice(),
-            )
-        }
+        sle_dli::SleEvent::CommandComplete {
+            opcode,
+            status,
+            data,
+        } => sle_event::SleWireEvent::command_complete(
+            *opcode as u16,
+            *status as u8,
+            data.as_slice(),
+        ),
         sle_dli::SleEvent::CommandStatus { opcode, status } => {
             sle_event::SleWireEvent::command_status(*opcode as u16, *status as u8)
         }
-        sle_dli::SleEvent::ConnComplete { handle, addr, status } => {
-            let new_state = if *status == sle_dli::SleStatus::Success { 2u8 } else { 0u8 };
+        sle_dli::SleEvent::ConnComplete {
+            handle,
+            addr,
+            status,
+        } => {
+            let new_state = if *status == sle_dli::SleStatus::Success {
+                2u8
+            } else {
+                0u8
+            };
             sle_event::SleWireEvent::conn_state(*handle, 1, new_state, *addr, *status as u8)
         }
         sle_dli::SleEvent::Disconnected { handle, reason } => {
             sle_event::SleWireEvent::conn_state(*handle, 2, 0, [0u8; 6], *reason)
         }
-        sle_dli::SleEvent::AdvReport { addr, rssi, discovery_level, data } => {
-            sle_event::SleWireEvent::adv_report(*addr, *rssi, *discovery_level, data.as_slice())
-        }
+        sle_dli::SleEvent::AdvReport {
+            addr,
+            rssi,
+            discovery_level,
+            data,
+        } => sle_event::SleWireEvent::adv_report(*addr, *rssi, *discovery_level, data.as_slice()),
         sle_dli::SleEvent::DataReceived { handle, data } => {
             sle_event::SleWireEvent::data_received(*handle, data.len() as u16)
         }
-        sle_dli::SleEvent::HardwareError { code } => {
-            sle_event::SleWireEvent::hardware_error(*code)
-        }
+        sle_dli::SleEvent::HardwareError { code } => sle_event::SleWireEvent::hardware_error(*code),
         sle_dli::SleEvent::EncryptionChanged { handle, enabled } => {
             // Map to SecurityChanged wire event.
             sle_event::SleWireEvent::conn_state(
@@ -3253,21 +3334,38 @@ fn sle_dli_event_to_broadcast(ev: &sle_dli::SleEvent) -> sle_event::SleWireEvent
         sle_dli::SleEvent::BroadcastEnd { reason } => {
             sle_event::SleWireEvent::broadcast_end(*reason)
         }
-        sle_dli::SleEvent::PhyUpdate { handle, mcs_index, bandwidth_mhz } => {
-            sle_event::SleWireEvent::phy_update(*handle, *mcs_index, *bandwidth_mhz)
-        }
-        sle_dli::SleEvent::ConnParamUpdate { handle, interval, latency, timeout } => {
-            sle_event::SleWireEvent::conn_param_update(*handle, *interval, *latency, *timeout)
-        }
-        sle_dli::SleEvent::DataLenChange { handle, max_tx_octets, max_rx_octets } => {
-            sle_event::SleWireEvent::data_len_change(*handle, *max_tx_octets, *max_rx_octets)
-        }
+        sle_dli::SleEvent::PhyUpdate {
+            handle,
+            mcs_index,
+            bandwidth_mhz,
+        } => sle_event::SleWireEvent::phy_update(*handle, *mcs_index, *bandwidth_mhz),
+        sle_dli::SleEvent::ConnParamUpdate {
+            handle,
+            interval,
+            latency,
+            timeout,
+        } => sle_event::SleWireEvent::conn_param_update(*handle, *interval, *latency, *timeout),
+        sle_dli::SleEvent::DataLenChange {
+            handle,
+            max_tx_octets,
+            max_rx_octets,
+        } => sle_event::SleWireEvent::data_len_change(*handle, *max_tx_octets, *max_rx_octets),
         sle_dli::SleEvent::DataBufOverflow { link_type } => {
             sle_event::SleWireEvent::data_buf_overflow(*link_type)
         }
-        sle_dli::SleEvent::PeerConnParamReq { handle, interval_min, interval_max, latency, timeout } => {
-            sle_event::SleWireEvent::peer_conn_param_req(*handle, *interval_min, *interval_max, *latency, *timeout)
-        }
+        sle_dli::SleEvent::PeerConnParamReq {
+            handle,
+            interval_min,
+            interval_max,
+            latency,
+            timeout,
+        } => sle_event::SleWireEvent::peer_conn_param_req(
+            *handle,
+            *interval_min,
+            *interval_max,
+            *latency,
+            *timeout,
+        ),
     }
 }
 
@@ -3358,9 +3456,7 @@ impl kernel::InPlaceModule for SparkLinkModule {
         // SAFETY: Called exactly once during module init.
         unsafe { sle_usb::init_usb_event_ring() };
 
-        let options = MiscDeviceOptions {
-            name: c"sparklink",
-        };
+        let options = MiscDeviceOptions { name: c"sparklink" };
 
         let debugfs = Dir::new(c"sparklink");
         let mgmt_dir = debugfs.subdir(c"mgmt");
@@ -3792,7 +3888,9 @@ impl MiscDevice for SparkLinkCtl {
                 } else {
                     info.state = SciState::Idle as u8;
                     info.bus = SciBus::Virtual as u8;
-                    info.addr = SleAddr { b: [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01] };
+                    info.addr = SleAddr {
+                        b: [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01],
+                    };
                     let name = b"sparklink-ctl";
                     info.name[..name.len()].copy_from_slice(name);
                 }
@@ -3802,7 +3900,10 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             SL_IOCTL_DEV_REGISTER => {
-                dev_info!(me.dev, "sparklink: DEV_REGISTER via ioctl (use module init for real registration)\n");
+                dev_info!(
+                    me.dev,
+                    "sparklink: DEV_REGISTER via ioctl (use module init for real registration)\n"
+                );
                 Ok(0)
             }
             SL_IOCTL_DEV_UNREGISTER => {
@@ -3832,12 +3933,10 @@ impl MiscDevice for SparkLinkCtl {
             // --- Extended advertising ---
             SL_IOCTL_EXT_ADV_CONFIGURE => {
                 let cfg: SleExtAdvConfig = read_user_struct(arg)?;
-                let primary_phy = sle_adv::ExtAdvPhy::from_raw(cfg.primary_phy)
-                    .ok_or(EINVAL)?;
-                let secondary_phy = sle_adv::ExtAdvPhy::from_raw(cfg.secondary_phy)
-                    .ok_or(EINVAL)?;
-                let bcast = sle_pdu::BroadcastType::from_raw(cfg.broadcast_type)
-                    .ok_or(EINVAL)?;
+                let primary_phy = sle_adv::ExtAdvPhy::from_raw(cfg.primary_phy).ok_or(EINVAL)?;
+                let secondary_phy =
+                    sle_adv::ExtAdvPhy::from_raw(cfg.secondary_phy).ok_or(EINVAL)?;
+                let bcast = sle_pdu::BroadcastType::from_raw(cfg.broadcast_type).ok_or(EINVAL)?;
                 let params = sle_adv::ExtAdvParams {
                     discovery_level: cfg.discovery_level,
                     interval_slots: u32::from(cfg.interval_ms) * 8, // ms to 125us slots
@@ -3971,8 +4070,7 @@ impl MiscDevice for SparkLinkCtl {
                 if len < 6 || len > 264 {
                     return Err(EINVAL);
                 }
-                let pdu = sle_pdu::AdvPdu::deserialize(&inject.pdu_data[..len])
-                    .ok_or(EINVAL)?;
+                let pdu = sle_pdu::AdvPdu::deserialize(&inject.pdu_data[..len]).ok_or(EINVAL)?;
                 {
                     let mut ss = SUBSYSTEM.lock();
                     let s = ss.as_mut().ok_or(ENODEV)?;
@@ -4041,7 +4139,11 @@ impl MiscDevice for SparkLinkCtl {
                             // If event hasn't arrived yet, force-confirm.
                             // The USB command succeeded so the controller
                             // already tore down the link.
-                            if s.conn.info(handle).map(|e| e.state == ConnState::DisconnectPending).unwrap_or(false) {
+                            if s.conn
+                                .info(handle)
+                                .map(|e| e.state == ConnState::DisconnectPending)
+                                .unwrap_or(false)
+                            {
                                 s.conn.confirm_disconnecting(handle);
                             }
                         }
@@ -4137,8 +4239,7 @@ impl MiscDevice for SparkLinkCtl {
             }
             SL_IOCTL_INJECT_CONN_RESP => {
                 let resp: SleInjectConnResp = read_user_struct(arg)?;
-                let resp_type = AccessResponseType::from_raw(resp.response_type)
-                    .ok_or(EINVAL)?;
+                let resp_type = AccessResponseType::from_raw(resp.response_type).ok_or(EINVAL)?;
                 let params = NegotiatedParams {
                     bandwidth_mhz: resp.bandwidth_mhz,
                     mcs_index: resp.mcs_index,
@@ -4153,7 +4254,11 @@ impl MiscDevice for SparkLinkCtl {
                     let result = s.conn.process_access_response(handle, resp_type, params);
                     // Apply per-connection MTU/MPS if specified.
                     if result.is_ok() && resp.data_mtu > 0 {
-                        let mps = if resp.data_mps > 0 { Some(resp.data_mps) } else { None };
+                        let mps = if resp.data_mps > 0 {
+                            Some(resp.data_mps)
+                        } else {
+                            None
+                        };
                         let _ = s.conn.set_data_mtu(handle, resp.data_mtu, mps);
                     }
                     (handle, peer_addr, result)
@@ -4168,7 +4273,13 @@ impl MiscDevice for SparkLinkCtl {
                     Err(_) => {
                         Self::broadcast_event(
                             me.as_ref(),
-                            sle_event::SleWireEvent::conn_state(handle, 1, 0, peer_addr, resp.response_type),
+                            sle_event::SleWireEvent::conn_state(
+                                handle,
+                                1,
+                                0,
+                                peer_addr,
+                                resp.response_type,
+                            ),
                         );
                     }
                 }
@@ -4196,57 +4307,54 @@ impl MiscDevice for SparkLinkCtl {
                         && raw.len() > 1
                     {
                         // SSAP PDU injection — route through SSAP processing.
-                        let needs_grant = s.conn.consume_rx_credit(
-                            handle, sle_conn::tcid::SERVICE_MGMT,
-                        );
+                        let needs_grant = s
+                            .conn
+                            .consume_rx_credit(handle, sle_conn::tcid::SERVICE_MGMT);
                         let pdu_data = &raw[1..];
                         let mut resp_buf = [0u8; sle_ssap::SSAP_PDU_MAX];
-                        let resp_len = s.conn.process_ssap_pdu(
-                            handle, pdu_data, &mut s.ssap, &mut resp_buf,
-                        ).unwrap_or(0);
+                        let resp_len = s
+                            .conn
+                            .process_ssap_pdu(handle, pdu_data, &mut s.ssap, &mut resp_buf)
+                            .unwrap_or(0);
                         if resp_len > 0 {
-                            if s.conn.consume_tx_credit(
-                                handle, sle_conn::tcid::SERVICE_MGMT,
-                            ).is_ok() {
+                            if s.conn
+                                .consume_tx_credit(handle, sle_conn::tcid::SERVICE_MGMT)
+                                .is_ok()
+                            {
                                 let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
                                 tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
-                                tx_buf[1..1 + resp_len]
-                                    .copy_from_slice(&resp_buf[..resp_len]);
-                                let _ = s.controller.send_data(
-                                    handle, &tx_buf[..1 + resp_len],
-                                );
+                                tx_buf[1..1 + resp_len].copy_from_slice(&resp_buf[..resp_len]);
+                                let _ = s.controller.send_data(handle, &tx_buf[..1 + resp_len]);
                             }
                         }
                         // Drain notifications triggered by the write.
                         loop {
                             match s.ssap.dequeue_notification() {
                                 Some(n) => {
-                                    if s.conn.consume_tx_credit(
-                                        handle, sle_conn::tcid::SERVICE_MGMT,
-                                    ).is_err() {
+                                    if s.conn
+                                        .consume_tx_credit(handle, sle_conn::tcid::SERVICE_MGMT)
+                                        .is_err()
+                                    {
                                         break;
                                     }
                                     let pdu = if n.indication {
                                         sle_ssap::SsapPdu::ValueInd {
-                                            handle: n.handle, data: n.data,
+                                            handle: n.handle,
+                                            data: n.data,
                                         }
                                     } else {
                                         sle_ssap::SsapPdu::ValueNtf {
-                                            handle: n.handle, data: n.data,
+                                            handle: n.handle,
+                                            data: n.data,
                                         }
                                     };
-                                    let mut ntf_buf =
-                                        [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
-                                    ntf_buf[0] =
-                                        sle_conn::tcid::SERVICE_MGMT as u8;
-                                    if let Ok(pdu_len) =
-                                        pdu.encode(&mut ntf_buf[1..])
-                                    {
+                                    let mut ntf_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                                    ntf_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                                    if let Ok(pdu_len) = pdu.encode(&mut ntf_buf[1..]) {
                                         if pdu_len > 0 {
-                                            let _ = s.controller.send_data(
-                                                handle,
-                                                &ntf_buf[..1 + pdu_len],
-                                            );
+                                            let _ = s
+                                                .controller
+                                                .send_data(handle, &ntf_buf[..1 + pdu_len]);
                                         }
                                     }
                                 }
@@ -4255,9 +4363,9 @@ impl MiscDevice for SparkLinkCtl {
                         }
                         // Send credit grant if RX credits are low.
                         if needs_grant {
-                            if let Ok(granted) = s.conn.grant_credits(
-                                handle, sle_conn::tcid::SERVICE_MGMT,
-                            ) {
+                            if let Ok(granted) =
+                                s.conn.grant_credits(handle, sle_conn::tcid::SERVICE_MGMT)
+                            {
                                 send_credit_grant(
                                     &s.controller,
                                     handle,
@@ -4272,9 +4380,9 @@ impl MiscDevice for SparkLinkCtl {
                             && raw[0] as u16 == sle_conn::tcid::DEFAULT_DATA
                             && raw.len() > 1
                         {
-                            let _ = s.conn.consume_rx_credit(
-                                handle, sle_conn::tcid::DEFAULT_DATA,
-                            );
+                            let _ = s
+                                .conn
+                                .consume_rx_credit(handle, sle_conn::tcid::DEFAULT_DATA);
                             &raw[1..]
                         } else {
                             raw
@@ -4319,7 +4427,11 @@ impl MiscDevice for SparkLinkCtl {
             }
             SL_IOCTL_SET_CONN_MTU => {
                 let params: SleConnMtuParams = read_user_struct(arg)?;
-                let mps = if params.mps > 0 { Some(params.mps) } else { None };
+                let mps = if params.mps > 0 {
+                    Some(params.mps)
+                } else {
+                    None
+                };
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 let handle = s.conn.resolve_handle(params.handle)?;
@@ -4333,7 +4445,11 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 let handle = s.conn.resolve_handle(params.handle)?;
-                let min_ch = if params.min_channels > 0 { params.min_channels } else { 2 };
+                let min_ch = if params.min_channels > 0 {
+                    params.min_channels
+                } else {
+                    2
+                };
                 s.conn.set_channel_map(handle, map, min_ch)?;
                 Ok(0)
             }
@@ -4368,8 +4484,14 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 let handle = s.conn.resolve_handle(params.handle)?;
-                let min_ch = if params.min_channels > 0 { params.min_channels } else { 2 };
-                let map = s.conn.classify_channels(handle, params.threshold_dbm, min_ch)?;
+                let min_ch = if params.min_channels > 0 {
+                    params.min_channels
+                } else {
+                    2
+                };
+                let map = s
+                    .conn
+                    .classify_channels(handle, params.threshold_dbm, min_ch)?;
                 drop(ss);
                 let out = SleAfhClassifyParams {
                     handle,
@@ -4404,7 +4526,8 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 let handle = s.conn.resolve_handle(rpt.handle)?;
-                s.conn.report_retx(handle, rpt.channel, rpt.retransmitted != 0)?;
+                s.conn
+                    .report_retx(handle, rpt.channel, rpt.retransmitted != 0)?;
                 Ok(0)
             }
             // --- Security management ---
@@ -4702,9 +4825,19 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 match cmd_data.target_state {
-                    0 => { s.power.resume(); Ok(0) }
-                    1 => { s.power.on_activity(); s.power.force_active(false); Ok(0) }
-                    3 => { s.power.suspend()?; Ok(0) }
+                    0 => {
+                        s.power.resume();
+                        Ok(0)
+                    }
+                    1 => {
+                        s.power.on_activity();
+                        s.power.force_active(false);
+                        Ok(0)
+                    }
+                    3 => {
+                        s.power.suspend()?;
+                        Ok(0)
+                    }
                     _ => Err(EINVAL),
                 }
             }
@@ -4772,10 +4905,9 @@ impl MiscDevice for SparkLinkCtl {
                 let count = cmd.link_count.min(8) as usize;
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
-                let created = s.conn.sync_ucast_create(
-                    cmd.group_id,
-                    &cmd.acl_handles[..count],
-                )?;
+                let created = s
+                    .conn
+                    .sync_ucast_create(cmd.group_id, &cmd.acl_handles[..count])?;
                 Ok(created as isize)
             }
             SL_IOCTL_SYNC_UCAST_REMOVE => {
@@ -4815,10 +4947,9 @@ impl MiscDevice for SparkLinkCtl {
                 let count = cmd.link_count.min(8) as usize;
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
-                let created = s.conn.sync_mcast_create(
-                    cmd.group_id,
-                    &cmd.acl_handles[..count],
-                )?;
+                let created = s
+                    .conn
+                    .sync_mcast_create(cmd.group_id, &cmd.acl_handles[..count])?;
                 Ok(created as isize)
             }
             SL_IOCTL_SYNC_MCAST_REMOVE => {
@@ -5010,9 +5141,7 @@ impl MiscDevice for SparkLinkCtl {
                 Ok(0)
             }
             // --- USB device discovery ---
-            SL_IOCTL_USB_DEV_COUNT => {
-                Ok(sle_usb::usb_device_count() as isize)
-            }
+            SL_IOCTL_USB_DEV_COUNT => Ok(sle_usb::usb_device_count() as isize),
             // --- PHY layer ---
             SL_IOCTL_PHY_INFO => {
                 let ss = SUBSYSTEM.lock();
@@ -5061,12 +5190,13 @@ impl MiscDevice for SparkLinkCtl {
                 let ss = SUBSYSTEM.lock();
                 let s = ss.as_ref().ok_or(ENODEV)?;
                 let best = sle_phy::mcs_select_with_thresholds(
-                    sel.min_kbps, sel.bandwidth_mhz, sel.sinr_db_x10,
+                    sel.min_kbps,
+                    sel.bandwidth_mhz,
+                    sel.sinr_db_x10,
                     &s.phy.sinr_thresholds,
                 );
                 sel.selected_mcs = best;
-                sel.effective_kbps = sle_phy::data_rate_kbps(best, sel.bandwidth_mhz)
-                    .unwrap_or(0);
+                sel.effective_kbps = sle_phy::data_rate_kbps(best, sel.bandwidth_mhz).unwrap_or(0);
                 drop(ss);
                 write_user_struct(arg, &sel)?;
                 Ok(0)
@@ -5121,7 +5251,10 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 if s.conn.active_handles().1 > 0 {
-                    dev_warn!(me.dev, "sparklink: cannot change role with active connections\n");
+                    dev_warn!(
+                        me.dev,
+                        "sparklink: cannot change role with active connections\n"
+                    );
                     return Err(EBUSY);
                 }
                 s.local_role = role;
@@ -5201,7 +5334,9 @@ impl SparkLinkCtl {
                 let new_pct = shared.power.estimated_power_pct();
                 pr_info!(
                     "sparklink: power mode changed to {} ({}% -> {}%)\n",
-                    configfs_mode, old_pct, new_pct
+                    configfs_mode,
+                    old_pct,
+                    new_pct
                 );
                 // Push a power changed event through per-fd EventQueue path
                 // instead of broadcast ring (avoid pub visibility issue).
@@ -5235,7 +5370,8 @@ impl SparkLinkCtl {
             let mut eq = me.events.lock();
             let (copied, new_seq) = shared.broadcast.drain_since(my_seq, &mut eq);
             if copied > 0 {
-                me.last_seq.store(new_seq, core::sync::atomic::Ordering::Relaxed);
+                me.last_seq
+                    .store(new_seq, core::sync::atomic::Ordering::Relaxed);
             }
         }
     }
@@ -5252,7 +5388,8 @@ impl SparkLinkCtl {
         // Also push directly to this fd so the caller gets immediate read.
         me.events.lock().push_raw(event);
         let new_seq = sle_event::BroadcastRing::current_seq();
-        me.last_seq.store(new_seq, core::sync::atomic::Ordering::Relaxed);
+        me.last_seq
+            .store(new_seq, core::sync::atomic::Ordering::Relaxed);
         me.event_poll.notify_all();
     }
 }

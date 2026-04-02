@@ -23,10 +23,10 @@ use kernel::prelude::*;
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Modulation {
-    Bpsk   = 0,
-    Qpsk   = 1,
-    Qam16  = 2,
-    Qam64  = 3,
+    Bpsk = 0,
+    Qpsk = 1,
+    Qam16 = 2,
+    Qam64 = 3,
     Qam256 = 4,
 }
 
@@ -34,10 +34,10 @@ impl Modulation {
     /// Number of bits per symbol for this modulation type.
     pub const fn bits_per_symbol(self) -> u8 {
         match self {
-            Self::Bpsk   => 1,
-            Self::Qpsk   => 2,
-            Self::Qam16  => 4,
-            Self::Qam64  => 6,
+            Self::Bpsk => 1,
+            Self::Qpsk => 2,
+            Self::Qam16 => 4,
+            Self::Qam64 => 6,
             Self::Qam256 => 8,
         }
     }
@@ -93,19 +93,97 @@ pub struct McsParams {
 /// MCS 0-6: single-carrier (GFSK/PSK/QAM)
 /// MCS 7-12: OFDM multi-carrier
 pub const MCS_TABLE: [McsParams; 13] = [
-    McsParams { index: 0,  modulation: Modulation::Bpsk,   code_rate: CodeRate::new(1, 4), data_rate_1m_kbps: 125,  ofdm: false },
-    McsParams { index: 1,  modulation: Modulation::Bpsk,   code_rate: CodeRate::new(1, 2), data_rate_1m_kbps: 250,  ofdm: false },
-    McsParams { index: 2,  modulation: Modulation::Bpsk,   code_rate: CodeRate::new(3, 4), data_rate_1m_kbps: 375,  ofdm: false },
-    McsParams { index: 3,  modulation: Modulation::Qpsk,   code_rate: CodeRate::new(1, 4), data_rate_1m_kbps: 250,  ofdm: false },
-    McsParams { index: 4,  modulation: Modulation::Qpsk,   code_rate: CodeRate::new(1, 2), data_rate_1m_kbps: 500,  ofdm: false },
-    McsParams { index: 5,  modulation: Modulation::Qpsk,   code_rate: CodeRate::new(3, 4), data_rate_1m_kbps: 750,  ofdm: false },
-    McsParams { index: 6,  modulation: Modulation::Qam16,  code_rate: CodeRate::new(1, 2), data_rate_1m_kbps: 1000, ofdm: false },
-    McsParams { index: 7,  modulation: Modulation::Qpsk,   code_rate: CodeRate::new(1, 2), data_rate_1m_kbps: 500,  ofdm: true  },
-    McsParams { index: 8,  modulation: Modulation::Qpsk,   code_rate: CodeRate::new(3, 4), data_rate_1m_kbps: 750,  ofdm: true  },
-    McsParams { index: 9,  modulation: Modulation::Qam16,  code_rate: CodeRate::new(1, 2), data_rate_1m_kbps: 1000, ofdm: true  },
-    McsParams { index: 10, modulation: Modulation::Qam16,  code_rate: CodeRate::new(3, 4), data_rate_1m_kbps: 1500, ofdm: true  },
-    McsParams { index: 11, modulation: Modulation::Qam64,  code_rate: CodeRate::new(3, 4), data_rate_1m_kbps: 2250, ofdm: true  },
-    McsParams { index: 12, modulation: Modulation::Qam256, code_rate: CodeRate::new(5, 6), data_rate_1m_kbps: 3333, ofdm: true  },
+    McsParams {
+        index: 0,
+        modulation: Modulation::Bpsk,
+        code_rate: CodeRate::new(1, 4),
+        data_rate_1m_kbps: 125,
+        ofdm: false,
+    },
+    McsParams {
+        index: 1,
+        modulation: Modulation::Bpsk,
+        code_rate: CodeRate::new(1, 2),
+        data_rate_1m_kbps: 250,
+        ofdm: false,
+    },
+    McsParams {
+        index: 2,
+        modulation: Modulation::Bpsk,
+        code_rate: CodeRate::new(3, 4),
+        data_rate_1m_kbps: 375,
+        ofdm: false,
+    },
+    McsParams {
+        index: 3,
+        modulation: Modulation::Qpsk,
+        code_rate: CodeRate::new(1, 4),
+        data_rate_1m_kbps: 250,
+        ofdm: false,
+    },
+    McsParams {
+        index: 4,
+        modulation: Modulation::Qpsk,
+        code_rate: CodeRate::new(1, 2),
+        data_rate_1m_kbps: 500,
+        ofdm: false,
+    },
+    McsParams {
+        index: 5,
+        modulation: Modulation::Qpsk,
+        code_rate: CodeRate::new(3, 4),
+        data_rate_1m_kbps: 750,
+        ofdm: false,
+    },
+    McsParams {
+        index: 6,
+        modulation: Modulation::Qam16,
+        code_rate: CodeRate::new(1, 2),
+        data_rate_1m_kbps: 1000,
+        ofdm: false,
+    },
+    McsParams {
+        index: 7,
+        modulation: Modulation::Qpsk,
+        code_rate: CodeRate::new(1, 2),
+        data_rate_1m_kbps: 500,
+        ofdm: true,
+    },
+    McsParams {
+        index: 8,
+        modulation: Modulation::Qpsk,
+        code_rate: CodeRate::new(3, 4),
+        data_rate_1m_kbps: 750,
+        ofdm: true,
+    },
+    McsParams {
+        index: 9,
+        modulation: Modulation::Qam16,
+        code_rate: CodeRate::new(1, 2),
+        data_rate_1m_kbps: 1000,
+        ofdm: true,
+    },
+    McsParams {
+        index: 10,
+        modulation: Modulation::Qam16,
+        code_rate: CodeRate::new(3, 4),
+        data_rate_1m_kbps: 1500,
+        ofdm: true,
+    },
+    McsParams {
+        index: 11,
+        modulation: Modulation::Qam64,
+        code_rate: CodeRate::new(3, 4),
+        data_rate_1m_kbps: 2250,
+        ofdm: true,
+    },
+    McsParams {
+        index: 12,
+        modulation: Modulation::Qam256,
+        code_rate: CodeRate::new(5, 6),
+        data_rate_1m_kbps: 3333,
+        ofdm: true,
+    },
 ];
 
 /// Look up MCS parameters by index. Returns `None` for invalid indices.
@@ -130,7 +208,12 @@ pub fn data_rate_kbps(mcs_index: u8, bandwidth_mhz: u8) -> Option<u32> {
 /// sinr_thresholds: approximate minimum SINR (dB, x10) required for
 /// each MCS index at BER=1e-5.
 pub fn mcs_select(min_kbps: u32, bandwidth_mhz: u8, sinr_db_x10: i16) -> u8 {
-    mcs_select_with_thresholds(min_kbps, bandwidth_mhz, sinr_db_x10, &DEFAULT_SINR_THRESHOLDS)
+    mcs_select_with_thresholds(
+        min_kbps,
+        bandwidth_mhz,
+        sinr_db_x10,
+        &DEFAULT_SINR_THRESHOLDS,
+    )
 }
 
 /// MCS selection with custom SINR thresholds.
@@ -181,12 +264,18 @@ impl ChannelMap {
         let mut map = [0xFFu8; 10];
         // Clear bit 79 (not a valid channel)
         map[9] &= 0x7F;
-        Self { map, used_count: NUM_CHANNELS }
+        Self {
+            map,
+            used_count: NUM_CHANNELS,
+        }
     }
 
     /// Create a channel map from a raw 10-byte bitmask.
     pub fn from_raw(raw: [u8; 10]) -> Self {
-        let mut s = Self { map: raw, used_count: 0 };
+        let mut s = Self {
+            map: raw,
+            used_count: 0,
+        };
         s.map[9] &= 0x7F; // mask off bit 79
         s.recount();
         s
@@ -205,7 +294,9 @@ impl ChannelMap {
 
     /// Check if a channel is marked as usable.
     pub fn is_used(&self, channel: u8) -> bool {
-        if channel >= NUM_CHANNELS { return false; }
+        if channel >= NUM_CHANNELS {
+            return false;
+        }
         let byte_idx = (channel / 8) as usize;
         let bit_idx = channel % 8;
         (self.map[byte_idx] >> bit_idx) & 1 != 0
@@ -213,7 +304,9 @@ impl ChannelMap {
 
     /// Mark a channel as used or unused.
     pub fn set_used(&mut self, channel: u8, used: bool) {
-        if channel >= NUM_CHANNELS { return; }
+        if channel >= NUM_CHANNELS {
+            return;
+        }
         let byte_idx = (channel / 8) as usize;
         let bit_idx = channel % 8;
         if used {
@@ -439,14 +532,14 @@ pub struct PhyConfig {
 /// Default SINR thresholds (dB x10) per MCS index at BER=1e-5.
 pub const DEFAULT_SINR_THRESHOLDS: [i16; 13] = [
     -20, // MCS 0: BPSK 1/4
-     10, // MCS 1: BPSK 3/8
-     40, // MCS 2: QPSK 1/4
-     20, // MCS 3: QPSK 3/8
-     50, // MCS 4: QPSK 1/2
-     80, // MCS 5: QPSK 5/8
+    10,  // MCS 1: BPSK 3/8
+    40,  // MCS 2: QPSK 1/4
+    20,  // MCS 3: QPSK 3/8
+    50,  // MCS 4: QPSK 1/2
+    80,  // MCS 5: QPSK 5/8
     100, // MCS 6: QPSK 3/4
-     60, // MCS 7: QPSK 7/8
-     90, // MCS 8: QPSK 1
+    60,  // MCS 7: QPSK 7/8
+    90,  // MCS 8: QPSK 1
     120, // MCS 9: 8PSK 5/8
     150, // MCS 10: 8PSK 3/4
     190, // MCS 11: 8PSK 7/8
@@ -469,8 +562,7 @@ impl PhyConfig {
 
     /// Compute the current effective data rate in kbps.
     pub fn effective_data_rate_kbps(&self) -> u32 {
-        let base = data_rate_kbps(self.mcs_index, self.bandwidth_mhz)
-            .unwrap_or(500);
+        let base = data_rate_kbps(self.mcs_index, self.bandwidth_mhz).unwrap_or(500);
         let mimo_factor = u32::from(self.antenna.mode.throughput_factor());
         base * mimo_factor / 100
     }

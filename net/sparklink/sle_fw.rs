@@ -36,20 +36,15 @@
 
 #![allow(dead_code)]
 
-use kernel::prelude::*;
 use kernel::firmware::Firmware;
+use kernel::prelude::*;
 
 // ---------------------------------------------------------------------------
 // FFI declarations — C-side firmware download
 // ---------------------------------------------------------------------------
 
 extern "C" {
-    fn sle_usb_dev_download_fw(
-        dev_id: i32,
-        data: *const u8,
-        size: i32,
-        chunk_size: i32,
-    ) -> i32;
+    fn sle_usb_dev_download_fw(dev_id: i32, data: *const u8, size: i32, chunk_size: i32) -> i32;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,9 +104,7 @@ pub(crate) fn load_usb_firmware(
     let fw = match Firmware::request(fw_name, dev) {
         Ok(fw) => fw,
         Err(e) => {
-            pr_info!(
-                "sparklink-fw: firmware not found, continuing without\n"
-            );
+            pr_info!("sparklink-fw: firmware not found, continuing without\n");
             return Err(e);
         }
     };

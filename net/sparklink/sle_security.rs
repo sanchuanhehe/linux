@@ -21,8 +21,8 @@
 
 #![allow(dead_code, unreachable_pub)]
 
+use crate::sle_crypto::{self, EcdhKeyPair, Sm3, Sm4Key, ECDH_KEY_SIZE, ECDH_PUB_SIZE};
 use kernel::prelude::*;
-use crate::sle_crypto::{self, Sm3, Sm4Key, EcdhKeyPair, ECDH_KEY_SIZE, ECDH_PUB_SIZE};
 
 // ---------------------------------------------------------------------------
 // Security levels (T/XS 10002-2025 section 9)
@@ -324,10 +324,7 @@ impl SecurityInner {
         let remote_kp = EcdhKeyPair::generate()?;
 
         // Compute shared secret (both sides yield the same value)
-        let dhkey = sle_crypto::ecdh_shared_secret(
-            &local_kp.private_key,
-            &remote_kp.public_key,
-        )?;
+        let dhkey = sle_crypto::ecdh_shared_secret(&local_kp.private_key, &remote_kp.public_key)?;
 
         // Derive link key: LK = HMAC-SM3(DHKey, "sparklink_just_works")[0..16]
         let lk_full = sle_crypto::hmac_sm3(&dhkey, b"sparklink_just_works");
@@ -375,10 +372,7 @@ impl SecurityInner {
         let local_kp = EcdhKeyPair::generate()?;
         let remote_kp = EcdhKeyPair::generate()?;
 
-        let dhkey = sle_crypto::ecdh_shared_secret(
-            &local_kp.private_key,
-            &remote_kp.public_key,
-        )?;
+        let dhkey = sle_crypto::ecdh_shared_secret(&local_kp.private_key, &remote_kp.public_key)?;
 
         // Derive 6-digit passkey: truncate(SM3(DHKey || "nc_passkey")) mod 1000000
         let mut pk_input = [0u8; ECDH_KEY_SIZE + 10];
@@ -396,9 +390,7 @@ impl SecurityInner {
         self.link_key = Some(lk);
 
         self.state = SecurityState::AwaitingConfirm;
-        pr_info!(
-            "sparklink: numeric comparison passkey generated, awaiting confirm\n"
-        );
+        pr_info!("sparklink: numeric comparison passkey generated, awaiting confirm\n");
         Ok(())
     }
 
@@ -458,10 +450,7 @@ impl SecurityInner {
         let local_kp = EcdhKeyPair::generate()?;
         let remote_kp = EcdhKeyPair::generate()?;
 
-        let dhkey = sle_crypto::ecdh_shared_secret(
-            &local_kp.private_key,
-            &remote_kp.public_key,
-        )?;
+        let dhkey = sle_crypto::ecdh_shared_secret(&local_kp.private_key, &remote_kp.public_key)?;
 
         // Derive expected 6-digit passkey
         let mut pk_input = [0u8; ECDH_KEY_SIZE + 16];
@@ -517,7 +506,10 @@ impl SecurityInner {
     /// to minimize memory footprint.
     pub fn set_oob_data(&mut self, data: &[u8]) {
         self.oob_hash = Some(Sm3::hash(data));
-        pr_info!("sparklink: OOB data configured ({} bytes, hashed)\n", data.len());
+        pr_info!(
+            "sparklink: OOB data configured ({} bytes, hashed)\n",
+            data.len()
+        );
     }
 
     /// Perform OOB pairing using pre-exchanged public key material.
@@ -535,10 +527,7 @@ impl SecurityInner {
         let local_kp = EcdhKeyPair::generate()?;
         let remote_kp = EcdhKeyPair::generate()?;
 
-        let dhkey = sle_crypto::ecdh_shared_secret(
-            &local_kp.private_key,
-            &remote_kp.public_key,
-        )?;
+        let dhkey = sle_crypto::ecdh_shared_secret(&local_kp.private_key, &remote_kp.public_key)?;
 
         // Mix OOB hash with ECDH shared secret:
         // LK = HMAC-SM3(DHKey, oob_hash)[0..16]
@@ -814,9 +803,7 @@ impl RpaManager {
             return Err(EBUSY);
         }
         for i in 0..(self.count as usize) {
-            if self.entries[i].peer_id_type == peer_id_type
-                && self.entries[i].peer_id == *peer_id
-            {
+            if self.entries[i].peer_id_type == peer_id_type && self.entries[i].peer_id == *peer_id {
                 // Swap-remove: replace with last entry
                 let last = (self.count - 1) as usize;
                 if i != last {
@@ -866,15 +853,9 @@ impl RpaManager {
     }
 
     /// Look up a peer and return its RPA (generated from peer IRK).
-    pub fn read_peer_rpa(
-        &self,
-        peer_id_type: u8,
-        peer_id: &[u8; 6],
-    ) -> Result<[u8; 6]> {
+    pub fn read_peer_rpa(&self, peer_id_type: u8, peer_id: &[u8; 6]) -> Result<[u8; 6]> {
         for i in 0..(self.count as usize) {
-            if self.entries[i].peer_id_type == peer_id_type
-                && self.entries[i].peer_id == *peer_id
-            {
+            if self.entries[i].peer_id_type == peer_id_type && self.entries[i].peer_id == *peer_id {
                 return Ok(Self::generate_rpa(&self.entries[i].peer_irk));
             }
         }
@@ -882,18 +863,13 @@ impl RpaManager {
     }
 
     /// Look up by local identity info and return local RPA.
-    pub fn read_local_rpa(
-        &self,
-        local_id_type: u8,
-        local_id: &[u8; 6],
-    ) -> Result<[u8; 6]> {
+    pub fn read_local_rpa(&self, local_id_type: u8, local_id: &[u8; 6]) -> Result<[u8; 6]> {
         // In the standard, local RPA is per-device. We look for the
         // first entry whose peer_id matches; in practice the local_irk
         // is the same across entries. For testing, we return the RPA
         // from the first matching or first entry.
         for i in 0..(self.count as usize) {
-            if self.entries[i].peer_id_type == local_id_type
-                && self.entries[i].peer_id == *local_id
+            if self.entries[i].peer_id_type == local_id_type && self.entries[i].peer_id == *local_id
             {
                 return Ok(Self::generate_rpa(&self.entries[i].local_irk));
             }

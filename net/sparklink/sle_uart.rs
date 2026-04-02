@@ -39,16 +39,15 @@
 
 #![allow(dead_code, unreachable_pub)]
 
-use kernel::prelude::*;
-use kernel::alloc::KVec;
 use core::cell::Cell;
 use core::cell::RefCell;
+use kernel::alloc::KVec;
+use kernel::prelude::*;
 
 use super::sle_dli::{
-    DliPacketType, SleBus, SleController, SleControllerInfo, SleEvent,
-    SleFeature, SleOpcode, SleStatus,
-    SLE_TRANSPORT_UNRELIABLE, SLE_TRANSPORT_RELIABLE,
-    SLE_MEAS_RSSI, SLE_SEC_AES_CCM, SLE_SEC_ECDH_P256,
+    DliPacketType, SleBus, SleController, SleControllerInfo, SleEvent, SleFeature, SleOpcode,
+    SleStatus, SLE_MEAS_RSSI, SLE_SEC_AES_CCM, SLE_SEC_ECDH_P256, SLE_TRANSPORT_RELIABLE,
+    SLE_TRANSPORT_UNRELIABLE,
 };
 
 // =========================================================================
@@ -110,15 +109,9 @@ enum RxState {
 /// Parsed DLI frame from the UART stream.
 pub enum UartFrame {
     /// Command frame (host to controller, but also used for parsing).
-    Command {
-        opcode: u16,
-        params: KVec<u8>,
-    },
+    Command { opcode: u16, params: KVec<u8> },
     /// Event frame from the controller.
-    Event {
-        event_code: u16,
-        params: KVec<u8>,
-    },
+    Event { event_code: u16, params: KVec<u8> },
     /// Data frame (async unicast, sync unicast, or multicast).
     Data {
         pkt_type: DliPacketType,
@@ -184,7 +177,11 @@ impl UartParser {
                 };
                 None
             }
-            RxState::ReadHeader { pkt_type, count, expected } => {
+            RxState::ReadHeader {
+                pkt_type,
+                count,
+                expected,
+            } => {
                 self.header[count] = byte;
                 let new_count = count + 1;
                 if new_count < expected {
@@ -197,12 +194,8 @@ impl UartParser {
                 }
                 // Header complete, determine payload length
                 let payload_len = match pkt_type {
-                    DliPacketType::Command | DliPacketType::Event => {
-                        self.header[2] as usize
-                    }
-                    _ => {
-                        u16::from_le_bytes([self.header[2], self.header[3]]) as usize
-                    }
+                    DliPacketType::Command | DliPacketType::Event => self.header[2] as usize,
+                    _ => u16::from_le_bytes([self.header[2], self.header[3]]) as usize,
                 };
                 if payload_len == 0 {
                     let frame = self.build_frame(pkt_type);
@@ -222,7 +215,11 @@ impl UartParser {
                 };
                 None
             }
-            RxState::ReadPayload { pkt_type, count, expected } => {
+            RxState::ReadPayload {
+                pkt_type,
+                count,
+                expected,
+            } => {
                 if self.payload.push(byte, GFP_KERNEL).is_err() {
                     // OOM: discard partial frame
                     self.reset();
@@ -275,7 +272,12 @@ impl UartParser {
                 let flags = (raw_handle >> 12) as u8;
                 let mut payload = KVec::new();
                 core::mem::swap(&mut payload, &mut self.payload);
-                Some(UartFrame::Data { pkt_type, handle, flags, payload })
+                Some(UartFrame::Data {
+                    pkt_type,
+                    handle,
+                    flags,
+                    payload,
+                })
             }
         }
     }
@@ -469,8 +471,11 @@ impl SleController for UartController {
             return Err(EBUSY);
         }
         self.opened.set(true);
-        pr_info!("sparklink-uart: open baud={} flow_ctrl={}\n",
-                 self.config.baud_rate, self.config.hw_flow_ctrl);
+        pr_info!(
+            "sparklink-uart: open baud={} flow_ctrl={}\n",
+            self.config.baud_rate,
+            self.config.hw_flow_ctrl
+        );
         Ok(())
     }
 
@@ -510,7 +515,8 @@ impl SleController for UartController {
             return None;
         }
         let ev = self.pending_events.borrow_mut()[head].take();
-        self.event_head.set((head + 1) % super::sle_dli::CTRL_EVENT_RING_SIZE);
+        self.event_head
+            .set((head + 1) % super::sle_dli::CTRL_EVENT_RING_SIZE);
         ev
     }
 

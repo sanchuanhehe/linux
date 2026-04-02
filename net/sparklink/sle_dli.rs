@@ -20,10 +20,10 @@
 
 #![allow(dead_code, unreachable_pub)]
 
-use kernel::prelude::*;
-use kernel::alloc::KVec;
 use core::cell::Cell;
 use core::cell::RefCell;
+use kernel::alloc::KVec;
+use kernel::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Controller backend event ring capacity
@@ -75,9 +75,7 @@ impl ControllerEventRing {
         if self.head == self.tail {
             return None;
         }
-        let (dev_id, ev) = core::mem::take(
-            &mut self.events[self.head],
-        );
+        let (dev_id, ev) = core::mem::take(&mut self.events[self.head]);
         self.head = (self.head + 1) % CTRL_EVENT_RING_SIZE;
         ev.map(|e| (dev_id, e))
     }
@@ -96,13 +94,13 @@ impl ControllerEventRing {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DliPacketType {
     /// Host-to-controller command.
-    Command       = 0xA1,
+    Command = 0xA1,
     /// Controller-to-host event.
-    Event         = 0xA2,
+    Event = 0xA2,
     /// Asynchronous unicast data.
-    AsyncUnicast  = 0xA3,
+    AsyncUnicast = 0xA3,
     /// Synchronous unicast data.
-    SyncUnicast   = 0xA4,
+    SyncUnicast = 0xA4,
     /// Asynchronous multicast data.
     AsyncMulticast = 0xA5,
 }
@@ -116,11 +114,11 @@ pub enum DliPacketType {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SleBus {
     Virtual = 0,
-    Uart    = 1,
-    Spi     = 2,
-    Sdio    = 3,
-    Usb     = 4,
-    Mmio    = 5,
+    Uart = 1,
+    Spi = 2,
+    Sdio = 3,
+    Usb = 4,
+    Mmio = 5,
 }
 
 /// Feature bits from the 10-byte (80-bit) feature set (T/XS 10003-2025 Table 9).
@@ -130,146 +128,146 @@ pub enum SleBus {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SleFeature {
     /// Bit 0: 加密
-    Encryption       = 1 << 0,
+    Encryption = 1 << 0,
     /// Bit 1: 数据长度更新
-    DataLenUpdate    = 1 << 1,
+    DataLenUpdate = 1 << 1,
     /// Bit 2: PING流程
-    Ping             = 1 << 2,
+    Ping = 1 << 2,
     /// Bit 3: 过滤策略
-    FilterPolicy     = 1 << 3,
+    FilterPolicy = 1 << 3,
     /// Bit 4: 隐私管理
-    Privacy          = 1 << 4,
+    Privacy = 1 << 4,
     /// Bit 5: 无线帧类型2
-    FrameType2       = 1 << 5,
+    FrameType2 = 1 << 5,
     /// Bit 6: 无线帧类型3
-    FrameType3       = 1 << 6,
+    FrameType3 = 1 << 6,
     /// Bit 7: 无线帧类型4
-    FrameType4       = 1 << 7,
+    FrameType4 = 1 << 7,
     /// Bit 8: 2M带宽
-    Bw2m             = 1 << 8,
+    Bw2m = 1 << 8,
     /// Bit 9: 4M带宽
-    Bw4m             = 1 << 9,
+    Bw4m = 1 << 9,
     /// Bit 10: 导频密度4:1
-    Pilot4to1        = 1 << 10,
+    Pilot4to1 = 1 << 10,
     /// Bit 11: 导频密度8:1
-    Pilot8to1        = 1 << 11,
+    Pilot8to1 = 1 << 11,
     /// Bit 12: 导频密度16:1
-    Pilot16to1       = 1 << 12,
+    Pilot16to1 = 1 << 12,
     /// Bit 13: CRC32类型
-    Crc32            = 1 << 13,
+    Crc32 = 1 << 13,
     /// Bit 14: MCS0
-    Mcs0             = 1 << 14,
+    Mcs0 = 1 << 14,
     /// Bit 15: MCS1
-    Mcs1             = 1 << 15,
+    Mcs1 = 1 << 15,
     /// Bit 16: MCS2
-    Mcs2             = 1 << 16,
+    Mcs2 = 1 << 16,
     /// Bit 17: MCS3
-    Mcs3             = 1 << 17,
+    Mcs3 = 1 << 17,
     /// Bit 18: MCS4
-    Mcs4             = 1 << 18,
+    Mcs4 = 1 << 18,
     /// Bit 19: MCS5
-    Mcs5             = 1 << 19,
+    Mcs5 = 1 << 19,
     /// Bit 20: MCS6
-    Mcs6             = 1 << 20,
+    Mcs6 = 1 << 20,
     /// Bit 21: MCS7
-    Mcs7             = 1 << 21,
+    Mcs7 = 1 << 21,
     /// Bit 22: MCS8
-    Mcs8             = 1 << 22,
+    Mcs8 = 1 << 22,
     /// Bit 23: MCS9
-    Mcs9             = 1 << 23,
+    Mcs9 = 1 << 23,
     /// Bit 24: MCS10
-    Mcs10            = 1 << 24,
+    Mcs10 = 1 << 24,
     /// Bit 25: MCS11
-    Mcs11            = 1 << 25,
+    Mcs11 = 1 << 25,
     /// Bit 26: MCS12
-    Mcs12            = 1 << 26,
+    Mcs12 = 1 << 26,
     /// Bit 27: 收发间隔25us
-    TxRxGap25us      = 1 << 27,
+    TxRxGap25us = 1 << 27,
     /// Bit 28: 收发间隔50us
-    TxRxGap50us      = 1 << 28,
+    TxRxGap50us = 1 << 28,
     /// Bit 29: 收发间隔75us
-    TxRxGap75us      = 1 << 29,
+    TxRxGap75us = 1 << 29,
     /// Bit 30: 收发间隔100us
-    TxRxGap100us     = 1 << 30,
+    TxRxGap100us = 1 << 30,
     /// Bit 31: 系统管理帧控制
-    SysMgmtFrame     = 1 << 31,
+    SysMgmtFrame = 1 << 31,
     /// Bit 32: 系统管理帧跳频算法
-    SysMgmtHopping   = 1 << 32,
+    SysMgmtHopping = 1 << 32,
     /// Bit 33: 最小可用信道流程
-    MinAvailChannel  = 1 << 33,
+    MinAvailChannel = 1 << 33,
     /// Bit 34: 睡眠时钟精度更新
     SleepClkAccuracy = 1 << 34,
     /// Bit 35: 远程公钥验证
-    RemotePkVerify   = 1 << 35,
+    RemotePkVerify = 1 << 35,
     /// Bit 36: 功率控制更新
-    PowerControl     = 1 << 36,
+    PowerControl = 1 << 36,
     /// Bit 37: 信道质量估计
-    ChannelQuality   = 1 << 37,
+    ChannelQuality = 1 << 37,
     /// Bit 38: 5GHz频段
-    Band5ghz         = 1 << 38,
+    Band5ghz = 1 << 38,
     /// Bit 39: 角色切换
-    RoleSwitch       = 1 << 39,
+    RoleSwitch = 1 << 39,
     /// Bit 40: 异步数据组播-G节点
-    AsyncDataMcastG  = 1 << 40,
+    AsyncDataMcastG = 1 << 40,
     /// Bit 41: 异步数据组播-T节点
-    AsyncDataMcastT  = 1 << 41,
+    AsyncDataMcastT = 1 << 41,
     /// Bit 42: 异步双向组播-G节点
-    AsyncBidiMcastG  = 1 << 42,
+    AsyncBidiMcastG = 1 << 42,
     /// Bit 43: 异步双向组播-T节点
-    AsyncBidiMcastT  = 1 << 43,
+    AsyncBidiMcastT = 1 << 43,
     /// Bit 44: 异步反馈组播-G节点
-    AsyncFbMcastG    = 1 << 44,
+    AsyncFbMcastG = 1 << 44,
     /// Bit 45: 异步反馈组播-T节点
-    AsyncFbMcastT    = 1 << 45,
+    AsyncFbMcastT = 1 << 45,
     /// Bit 46: 异步链接态广播-G节点
-    AsyncLinkBcastG  = 1 << 46,
+    AsyncLinkBcastG = 1 << 46,
     /// Bit 47: 异步链接态广播-T节点
-    AsyncLinkBcastT  = 1 << 47,
+    AsyncLinkBcastT = 1 << 47,
     /// Bit 48: 同步数据组播-G节点
-    SyncDataMcastG   = 1 << 48,
+    SyncDataMcastG = 1 << 48,
     /// Bit 49: 同步数据组播-T节点
-    SyncDataMcastT   = 1 << 49,
+    SyncDataMcastT = 1 << 49,
     /// Bit 50: 同步双向组播-G节点
-    SyncBidiMcastG   = 1 << 50,
+    SyncBidiMcastG = 1 << 50,
     /// Bit 51: 同步双向组播-T节点
-    SyncBidiMcastT   = 1 << 51,
+    SyncBidiMcastT = 1 << 51,
     /// Bit 52: 同步反馈组播-G节点
-    SyncFbMcastG     = 1 << 52,
+    SyncFbMcastG = 1 << 52,
     /// Bit 53: 同步反馈组播-T节点
-    SyncFbMcastT     = 1 << 53,
+    SyncFbMcastT = 1 << 53,
     /// Bit 54: 同步链接态广播-G节点
-    SyncLinkBcastG   = 1 << 54,
+    SyncLinkBcastG = 1 << 54,
     /// Bit 55: 同步链接态广播-T节点
-    SyncLinkBcastT   = 1 << 55,
+    SyncLinkBcastT = 1 << 55,
     /// Bit 56: 异步单播链路参数更新
-    AsyncUcastParamUpd  = 1 << 56,
+    AsyncUcastParamUpd = 1 << 56,
     /// Bit 57: 异步组播链路参数更新
-    AsyncMcastParamUpd  = 1 << 57,
+    AsyncMcastParamUpd = 1 << 57,
     /// Bit 58: 同步链路参数更新
-    SyncParamUpd     = 1 << 58,
+    SyncParamUpd = 1 << 58,
     /// Bit 59: 链接态广播链路参数更新
-    LinkBcastParamUpd   = 1 << 59,
+    LinkBcastParamUpd = 1 << 59,
     /// Bit 60: 先发后发TG模式
-    TgMode           = 1 << 60,
+    TgMode = 1 << 60,
     /// Bit 61: 128比特NTP时间
-    Ntp128           = 1 << 61,
+    Ntp128 = 1 << 61,
     /// Bit 62: 64比特NTP时间
-    Ntp64            = 1 << 62,
+    Ntp64 = 1 << 62,
     /// Bit 63: 32比特NTP时间
-    Ntp32            = 1u64 << 63,
+    Ntp32 = 1u64 << 63,
 }
 
 /// Extended feature bits 64-72 (T/XS 10003-2025 Table 9, continued).
 /// Stored in a separate `features_ext: u16` field.
-pub const SLE_FEAT_EXT_CBG_FB_TYPE3: u16   = 1 << 0;  // Bit 64
-pub const SLE_FEAT_EXT_CBG_FB_TYPE4: u16   = 1 << 1;  // Bit 65
-pub const SLE_FEAT_EXT_NB_RANGING: u16     = 1 << 2;  // Bit 66
-pub const SLE_FEAT_EXT_UWB_RANGING: u16    = 1 << 3;  // Bit 67
-pub const SLE_FEAT_EXT_UWB_SENSING: u16    = 1 << 4;  // Bit 68
-pub const SLE_FEAT_EXT_NB_SENSING: u16     = 1 << 5;  // Bit 69
-pub const SLE_FEAT_EXT_SYNC_UCAST_G: u16  = 1 << 6;  // Bit 70
-pub const SLE_FEAT_EXT_SYNC_UCAST_T: u16  = 1 << 7;  // Bit 71
-pub const SLE_FEAT_EXT_VERIFY_BCAST: u16   = 1 << 8;  // Bit 72
+pub const SLE_FEAT_EXT_CBG_FB_TYPE3: u16 = 1 << 0; // Bit 64
+pub const SLE_FEAT_EXT_CBG_FB_TYPE4: u16 = 1 << 1; // Bit 65
+pub const SLE_FEAT_EXT_NB_RANGING: u16 = 1 << 2; // Bit 66
+pub const SLE_FEAT_EXT_UWB_RANGING: u16 = 1 << 3; // Bit 67
+pub const SLE_FEAT_EXT_UWB_SENSING: u16 = 1 << 4; // Bit 68
+pub const SLE_FEAT_EXT_NB_SENSING: u16 = 1 << 5; // Bit 69
+pub const SLE_FEAT_EXT_SYNC_UCAST_G: u16 = 1 << 6; // Bit 70
+pub const SLE_FEAT_EXT_SYNC_UCAST_T: u16 = 1 << 7; // Bit 71
+pub const SLE_FEAT_EXT_VERIFY_BCAST: u16 = 1 << 8; // Bit 72
 
 /// Static information about a controller.
 pub struct SleControllerInfo {
@@ -357,25 +355,25 @@ impl SleControllerInfo {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DliOgf {
     /// Group 1: Basic commands (0x04xx) — reset, address, features.
-    Basic           = 0x01,
+    Basic = 0x01,
     /// Group 3: Broadcast / advertising (0x0Cxx).
-    Broadcast       = 0x03,
+    Broadcast = 0x03,
     /// Group 4: Scan (0x10xx).
-    Scan            = 0x04,
+    Scan = 0x04,
     /// Group 5: Connection (0x14xx).
-    Connection      = 0x05,
+    Connection = 0x05,
     /// Group 6: Link control / PHY (0x18xx).
-    LinkControl     = 0x06,
+    LinkControl = 0x06,
     /// Group 7: Security (0x1Cxx).
-    Security        = 0x07,
+    Security = 0x07,
     /// Group 8: Measurement (0x20xx).
-    Measurement     = 0x08,
+    Measurement = 0x08,
     /// Group 9: SLB logical channel (0x24xx).
-    SlbLogChannel   = 0x09,
+    SlbLogChannel = 0x09,
     /// Group 10: Sync link (0x28xx).
-    SyncLink        = 0x0A,
+    SyncLink = 0x0A,
     /// Group 62: Test / vendor (0xF8xx).
-    Test            = 0x3E,
+    Test = 0x3E,
 }
 
 /// Build a DLI opcode from OGF and OCF.
@@ -402,290 +400,290 @@ pub const fn dli_ocf(opcode: u16) -> u16 {
 pub enum SleOpcode {
     // --- Group 1: Basic (OGF=0x01, wire 0x04xx, section 8.1) ---
     /// 读控制器指令长度 (8.1.1)
-    ReadCmdLen           = 0x0401,
+    ReadCmdLen = 0x0401,
     /// 读控制器缓存 (8.1.2)
-    ReadCtrlBuffer       = 0x0402,
+    ReadCtrlBuffer = 0x0402,
     /// 读本地特性 (8.1.3)
-    ReadLocalFeatures    = 0x0403,
+    ReadLocalFeatures = 0x0403,
     /// 读本地版本信息 (8.1.4)
-    ReadLocalVersion     = 0x0404,
+    ReadLocalVersion = 0x0404,
     /// 设置媒体接入层唯一标识 (8.1.5)
-    SetMacAddr           = 0x0405,
+    SetMacAddr = 0x0405,
     /// 读媒体接入层标识 (8.1.6)
-    ReadMacAddr          = 0x0406,
+    ReadMacAddr = 0x0406,
     /// 设置媒体接入层非唯一标识 (8.1.7)
-    SetNonUniqueMac      = 0x0407,
+    SetNonUniqueMac = 0x0407,
     /// 控制器复位 (8.1.8)
-    Reset                = 0x0408,
+    Reset = 0x0408,
     /// 可用信道指示 (8.1.9)
-    AvailChannelInd      = 0x0409,
+    AvailChannelInd = 0x0409,
     /// 读白名单大小 (8.1.10)
-    ReadWhitelistSize    = 0x040A,
+    ReadWhitelistSize = 0x040A,
     /// 清空白名单 (8.1.11)
-    ClearWhitelist       = 0x040B,
+    ClearWhitelist = 0x040B,
     /// 添加白名单设备 (8.1.12)
-    AddWhitelist         = 0x040C,
+    AddWhitelist = 0x040C,
     /// 删除白名单设备 (8.1.13)
-    DeleteWhitelist      = 0x040D,
+    DeleteWhitelist = 0x040D,
     /// 设置SLB节点角色 (8.1.14)
-    SetSlbNodeRole       = 0x040E,
+    SetSlbNodeRole = 0x040E,
     /// 读SLB节点角色 (8.1.15)
-    ReadSlbNodeRole      = 0x040F,
+    ReadSlbNodeRole = 0x040F,
     /// 设置SLB工作信道 (8.1.16)
-    SetSlbWorkChannel    = 0x0410,
+    SetSlbWorkChannel = 0x0410,
     /// 读SLB工作信道 (8.1.17)
-    ReadSlbWorkChannel   = 0x0411,
+    ReadSlbWorkChannel = 0x0411,
     /// 读SLB控制器缓存 (8.1.18)
-    ReadSlbCtrlBuffer    = 0x0412,
+    ReadSlbCtrlBuffer = 0x0412,
     /// 配置FISA信道列表 (8.1.19)
-    ConfigFisaChannels   = 0x0413,
+    ConfigFisaChannels = 0x0413,
     /// 使能FISA (8.1.20)
-    EnableFisa           = 0x0414,
+    EnableFisa = 0x0414,
     /// 配置SLB同步信号 (8.1.21)
-    ConfigSlbSyncSignal  = 0x0415,
+    ConfigSlbSyncSignal = 0x0415,
     /// 读SLB同步信号配置 (8.1.22)
-    ReadSlbSyncSignal    = 0x0416,
+    ReadSlbSyncSignal = 0x0416,
     /// 读SLB本地功率 (8.1.23)
-    ReadSlbLocalPower    = 0x0417,
+    ReadSlbLocalPower = 0x0417,
     /// 使能SLB控制器 (8.1.24)
-    EnableSlbCtrl        = 0x0418,
+    EnableSlbCtrl = 0x0418,
     /// 指示时间同步状态 (8.1.25)
-    IndicateTimeSync     = 0x0419,
+    IndicateTimeSync = 0x0419,
     /// 时间同步请求 (8.1.26)
-    TimeSyncRequest      = 0x041A,
+    TimeSyncRequest = 0x041A,
     /// 时间同步响应 (8.1.27)
-    TimeSyncResponse     = 0x041B,
+    TimeSyncResponse = 0x041B,
     /// 添加白名单设备扩展 (8.1.28)
-    AddWhitelistExt      = 0x0420,
+    AddWhitelistExt = 0x0420,
 
     // --- Group 3: Broadcast (OGF=0x03, wire 0x0Cxx, section 8.2) ---
     /// 配置广播参数 (8.2.1)
-    SetBroadcastParam    = 0x0C02,
+    SetBroadcastParam = 0x0C02,
     /// 配置广播数据 (8.2.2)
-    SetBroadcastData     = 0x0C03,
+    SetBroadcastData = 0x0C03,
     /// 配置查询回复数据 (8.2.3)
-    SetBroadcastScanRsp  = 0x0C04,
+    SetBroadcastScanRsp = 0x0C04,
     /// 使能广播 (8.2.4)
-    EnableBroadcast      = 0x0C05,
+    EnableBroadcast = 0x0C05,
     /// 读最大广播数据长度 (8.2.5)
-    ReadMaxBcastDataLen  = 0x0C06,
+    ReadMaxBcastDataLen = 0x0C06,
     /// 读广播集合大小 (8.2.6)
-    ReadBcastSetSize     = 0x0C07,
+    ReadBcastSetSize = 0x0C07,
     /// 删除广播集合 (8.2.7)
-    DeleteBcastSet       = 0x0C08,
+    DeleteBcastSet = 0x0C08,
     /// 配置SLB通信域域名 (8.2.8)
-    ConfigSlbDomainName  = 0x0C09,
+    ConfigSlbDomainName = 0x0C09,
     /// 读SLB通信域域名 (8.2.9)
-    ReadSlbDomainName    = 0x0C0A,
+    ReadSlbDomainName = 0x0C0A,
     /// 配置SLB广播参数 (8.2.10)
-    ConfigSlbBcastParam  = 0x0C0B,
+    ConfigSlbBcastParam = 0x0C0B,
     /// 读SLB广播参数 (8.2.11)
-    ReadSlbBcastParam    = 0x0C0C,
+    ReadSlbBcastParam = 0x0C0C,
 
     // --- Group 4: Scan/Query (OGF=0x04, wire 0x10xx, section 8.3) ---
     /// 设置查询参数 (8.3.1)
-    SetScanParam         = 0x1001,
+    SetScanParam = 0x1001,
     /// 使能查询 (8.3.2)
-    EnableScan           = 0x1002,
+    EnableScan = 0x1002,
     /// 设置查询请求数据 (8.3.3)
-    SetScanReqData       = 0x1003,
+    SetScanReqData = 0x1003,
     /// 设置SLB查询参数 (8.3.4)
-    SetSlbScanParam      = 0x1004,
+    SetSlbScanParam = 0x1004,
 
     // --- Group 5: Connection (OGF=0x05, wire 0x14xx, section 8.4) ---
     /// 创建异步链路 (8.4.1)
-    CreateConnection     = 0x1401,
+    CreateConnection = 0x1401,
     /// 取消异步链路建立 (8.4.2)
-    CancelConnection     = 0x1402,
+    CancelConnection = 0x1402,
     /// 断开连接 (8.4.3)
-    Disconnect           = 0x1403,
+    Disconnect = 0x1403,
     /// SLB创建连接 (8.4.4)
-    SlbCreateConnection  = 0x1404,
+    SlbCreateConnection = 0x1404,
 
     // --- Group 6: Link control (OGF=0x06, wire 0x18xx, section 8.5) ---
     /// 读取对端特性 (8.5.1)
-    ReadFeatures         = 0x1801,
+    ReadFeatures = 0x1801,
     /// 读取对端版本信息 (8.5.2)
-    ReadVersion          = 0x1802,
+    ReadVersion = 0x1802,
     /// 设置数据长度 (8.5.3)
-    SetMaxDataLen        = 0x1804,
+    SetMaxDataLen = 0x1804,
     /// 读取物理层参数 (8.5.4)
-    ReadPhyParam         = 0x1805,
+    ReadPhyParam = 0x1805,
     /// 设置物理层参数 (8.5.5)
-    SetPhyParam          = 0x1806,
+    SetPhyParam = 0x1806,
     /// 连接参数更新 (8.5.6)
-    ConnParamUpdate      = 0x1807,
+    ConnParamUpdate = 0x1807,
     /// 设置对端连接参数更新请求的响应 (8.5.7)
-    ConnParamReqReply    = 0x1808,
+    ConnParamReqReply = 0x1808,
     /// 读取可用信道 (8.5.8)
-    ReadAvailChannels    = 0x1809,
+    ReadAvailChannels = 0x1809,
     /// 设置编码调制参数 (8.5.9)
-    SetCodingModulation  = 0x180A,
+    SetCodingModulation = 0x180A,
     /// 读取RSSI (8.5.10)
-    ReadRssi             = 0x180C,
+    ReadRssi = 0x180C,
     /// 设置本端功率 (8.5.11)
-    SetTxPower           = 0x180D,
+    SetTxPower = 0x180D,
     /// 读取本端功率 (8.5.12)
-    ReadTxPower          = 0x180E,
+    ReadTxPower = 0x180E,
     /// 读取对端功率 (8.5.13)
-    ReadPeerTxPower      = 0x180F,
+    ReadPeerTxPower = 0x180F,
     /// 功率变化报告配置 (8.5.14)
-    ConfigPowerReport    = 0x1810,
+    ConfigPowerReport = 0x1810,
     /// 设置控制器控制信令数据 (8.5.15)
-    SetCtrlSignalData    = 0x1812,
+    SetCtrlSignalData = 0x1812,
     /// 开启RSSI功率控制 (8.5.16)
-    EnableRssiPowerCtrl  = 0x1813,
+    EnableRssiPowerCtrl = 0x1813,
     /// 设置SLB编码调制参数 (8.5.17)
-    SetSlbCodingMod      = 0x1814,
+    SetSlbCodingMod = 0x1814,
     /// 读取SLB编码调制参数 (8.5.18)
-    ReadSlbCodingMod     = 0x1815,
+    ReadSlbCodingMod = 0x1815,
 
     // --- Group 7: Security (OGF=0x07, wire 0x1Cxx, section 8.6) ---
     /// 散列计算 (8.6.1)
-    HashCompute          = 0x1C01,
+    HashCompute = 0x1C01,
     /// 生成安全随机数 (8.6.2)
-    GenSecureRandom      = 0x1C02,
+    GenSecureRandom = 0x1C02,
     /// 启动链路加密 (8.6.3)
-    StartEncrypt         = 0x1C03,
+    StartEncrypt = 0x1C03,
     /// 请求配对 (8.6.4)
-    RequestPair          = 0x1C04,
+    RequestPair = 0x1C04,
     /// 回复链路加密参数请求 (8.6.5)
-    ReplyEncParamReq     = 0x1C05,
+    ReplyEncParamReq = 0x1C05,
     /// 拒绝链路加密参数请求 (8.6.6)
-    RejectEncParamReq    = 0x1C06,
+    RejectEncParamReq = 0x1C06,
     /// 读取本端加密算法 (8.6.7)
-    ReadLocalEncAlgo     = 0x1C07,
+    ReadLocalEncAlgo = 0x1C07,
     /// 启动配对 (8.6.8)
-    StartPairing         = 0x1C08,
+    StartPairing = 0x1C08,
     /// 配对信息交换回复 (8.6.9)
-    PairInfoExchange     = 0x1C09,
+    PairInfoExchange = 0x1C09,
     /// 配对选项确认 (8.6.10)
-    PairOptionConfirm    = 0x1C0A,
+    PairOptionConfirm = 0x1C0A,
     /// 配对选项接受 (8.6.11)
-    PairOptionAccept     = 0x1C0B,
+    PairOptionAccept = 0x1C0B,
     /// 配对扩展数据 (8.6.12)
-    PairExtData          = 0x1C0C,
+    PairExtData = 0x1C0C,
     /// 用户通行码按键 (8.6.13)
-    PairPasskey          = 0x1C0D,
+    PairPasskey = 0x1C0D,
     /// 配对随机数 (8.6.14)
-    PairRandom           = 0x1C0E,
+    PairRandom = 0x1C0E,
     /// 配对确认码 (8.6.15)
-    PairConfirm          = 0x1C0F,
+    PairConfirm = 0x1C0F,
     /// DHKey验证 (8.6.16)
-    DhkeyVerify          = 0x1C10,
+    DhkeyVerify = 0x1C10,
     /// 配对失败 (8.6.17)
-    PairFail             = 0x1C11,
+    PairFail = 0x1C11,
     /// 添加设备至RAL (8.6.18)
-    AddRalDevice         = 0x1C12,
+    AddRalDevice = 0x1C12,
     /// 从RAL删除设备 (8.6.19)
-    RemoveRalDevice      = 0x1C13,
+    RemoveRalDevice = 0x1C13,
     /// 清空RAL (8.6.20)
-    ClearRal             = 0x1C14,
+    ClearRal = 0x1C14,
     /// 读取RAL大小 (8.6.21)
-    ReadRalSize          = 0x1C15,
+    ReadRalSize = 0x1C15,
     /// 读对端可解析随机标识 (8.6.22)
-    ReadRemoteRpa        = 0x1C16,
+    ReadRemoteRpa = 0x1C16,
     /// 读本端可解析随机标识 (8.6.23)
-    ReadLocalRpa         = 0x1C17,
+    ReadLocalRpa = 0x1C17,
     /// 设置RPA使能 (8.6.24)
-    SetRpaEnable         = 0x1C18,
+    SetRpaEnable = 0x1C18,
     /// 设置RPA超时时间 (8.6.25)
-    SetRpaTimeout        = 0x1C19,
+    SetRpaTimeout = 0x1C19,
     /// 配置SLB认证PSK (8.6.26)
-    ConfigSlbAuthPsk     = 0x1C1A,
+    ConfigSlbAuthPsk = 0x1C1A,
     /// 删除SLB认证PSK (8.6.27)
-    DeleteSlbAuthPsk     = 0x1C1B,
+    DeleteSlbAuthPsk = 0x1C1B,
     /// 配置SLB认证口令 (8.6.28)
-    ConfigSlbAuthPwd     = 0x1C1C,
+    ConfigSlbAuthPwd = 0x1C1C,
     /// 删除SLB认证口令 (8.6.29)
-    DeleteSlbAuthPwd     = 0x1C1D,
+    DeleteSlbAuthPwd = 0x1C1D,
     /// 配置SLB密码算法 (8.6.30)
-    ConfigSlbCipherAlgo  = 0x1C1E,
+    ConfigSlbCipherAlgo = 0x1C1E,
     /// 读取SLB密码算法 (8.6.31)
-    ReadSlbCipherAlgo    = 0x1C1F,
+    ReadSlbCipherAlgo = 0x1C1F,
     /// 配置SLB安全关联数量 (8.6.32)
-    ConfigSlbSecAssoc    = 0x1C20,
+    ConfigSlbSecAssoc = 0x1C20,
     /// 读取SLB安全关联数量 (8.6.33)
-    ReadSlbSecAssoc      = 0x1C21,
+    ReadSlbSecAssoc = 0x1C21,
     /// 配置SLB安全绑定过期时间 (8.6.34)
-    ConfigSlbSecTimeout  = 0x1C22,
+    ConfigSlbSecTimeout = 0x1C22,
     /// 读取SLB安全绑定过期时间 (8.6.35)
-    ReadSlbSecTimeout    = 0x1C23,
+    ReadSlbSecTimeout = 0x1C23,
 
     // --- Group 8: Measurement (OGF=0x08, wire 0x20xx, section 8.7) ---
     /// 读取本地测量能力 (8.7.1)
-    ReadLocalMeasCap     = 0x2001,
+    ReadLocalMeasCap = 0x2001,
     /// 设置测量链路参数 (8.7.2)
-    SetMeasLinkParam     = 0x2003,
+    SetMeasLinkParam = 0x2003,
     /// 测量动作 (8.7.3)
-    MeasAction           = 0x2005,
+    MeasAction = 0x2005,
     /// 使能测量 (8.7.4)
-    EnableMeas           = 0x200B,
+    EnableMeas = 0x200B,
 
     // --- Group 9: SLB Logical Channel (OGF=0x09, wire 0x24xx, section 8.8) ---
     /// 创建SLB单播逻辑信道 (8.8.1)
-    SlbCreateLogChannel  = 0x2401,
+    SlbCreateLogChannel = 0x2401,
     /// 更新SLB单播逻辑信道 (8.8.2)
-    SlbUpdateLogChannel  = 0x2402,
+    SlbUpdateLogChannel = 0x2402,
     /// 删除SLB逻辑信道 (8.8.3)
-    SlbDeleteLogChannel  = 0x2403,
+    SlbDeleteLogChannel = 0x2403,
 
     // --- Group 10: Sync link (OGF=0x0A, wire 0x28xx, section 8.10) ---
     /// 同步单播链路配置 (8.10.1)
-    SyncUcastParam       = 0x2801,
+    SyncUcastParam = 0x2801,
     /// 同步单播链路创建 (8.10.3)
-    SyncUcastCreate      = 0x2803,
+    SyncUcastCreate = 0x2803,
     /// 同步单播链路移除 (8.10.4)
-    SyncUcastRemove      = 0x2804,
+    SyncUcastRemove = 0x2804,
     /// 接受同步单播建链 (8.10.5)
-    SyncUcastAccept      = 0x2805,
+    SyncUcastAccept = 0x2805,
     /// 拒绝同步单播建链 (8.10.6)
-    SyncUcastReject      = 0x2806,
+    SyncUcastReject = 0x2806,
     /// 设置同步组播参数 (8.10.7)
-    SyncMcastParam       = 0x2807,
+    SyncMcastParam = 0x2807,
     /// 设置同步组播链路信息 (8.10.8)
-    SyncMcastInfo        = 0x2808,
+    SyncMcastInfo = 0x2808,
     /// 创建同步组播链路 (8.10.9)
-    SyncMcastCreate      = 0x2809,
+    SyncMcastCreate = 0x2809,
     /// 同步组播链路信息移除 (8.10.10)
-    SyncMcastRemove      = 0x280A,
+    SyncMcastRemove = 0x280A,
     /// 接受同步组播链路建链 (8.10.11)
-    SyncMcastAccept      = 0x280B,
+    SyncMcastAccept = 0x280B,
     /// 拒绝同步组播链路建链 (8.10.12)
-    SyncMcastReject      = 0x280C,
+    SyncMcastReject = 0x280C,
     /// 同步链路数据路径配置 (8.10.13)
-    SyncDataPathConfig   = 0x280D,
+    SyncDataPathConfig = 0x280D,
     /// 同步链路数据路径删除 (8.10.14)
-    SyncDataPathRemove   = 0x280E,
+    SyncDataPathRemove = 0x280E,
 
     // --- Group 62: Test (OGF=0x3E, wire 0xF8xx, section 8.9) ---
     /// 测试模式使能 (8.9.1)
-    TestModeEnable       = 0xF801,
+    TestModeEnable = 0xF801,
     /// 测试接收 (8.9.2)
-    TestRx               = 0xF802,
+    TestRx = 0xF802,
     /// 测试发送 (8.9.3)
-    TestTx               = 0xF803,
+    TestTx = 0xF803,
     /// 测试接收结果 (8.9.4)
-    TestRxResult         = 0xF804,
+    TestRxResult = 0xF804,
 
     // --- Vendor extension (OGF=0x3F, wire 0xFCxx-0xFFFF) ---
     /// 厂商自定义指令基址
-    VendorBase           = 0xFC00,
+    VendorBase = 0xFC00,
 }
 
 /// Completion status for a command.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SleStatus {
-    Success             = 0x00,
-    UnknownCommand      = 0x01,
-    InvalidParameters   = 0x02,
-    HardwareFailure     = 0x03,
-    ResourceExhausted   = 0x04,
-    NotConnected        = 0x05,
-    AlreadyActive       = 0x06,
-    PermissionDenied    = 0x07,
-    Timeout             = 0x08,
+    Success = 0x00,
+    UnknownCommand = 0x01,
+    InvalidParameters = 0x02,
+    HardwareFailure = 0x03,
+    ResourceExhausted = 0x04,
+    NotConnected = 0x05,
+    AlreadyActive = 0x06,
+    PermissionDenied = 0x07,
+    Timeout = 0x08,
 }
 
 // ---------------------------------------------------------------------------
@@ -697,107 +695,107 @@ pub enum SleStatus {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DliEventCode {
     /// 指令执行状态 (9.1)
-    CmdStatus           = 0x0001,
+    CmdStatus = 0x0001,
     /// 指令执行完成 (9.2)
-    CmdComplete         = 0x0002,
+    CmdComplete = 0x0002,
     /// 数据长度变更 (9.3)
-    DataLenChange       = 0x0003,
+    DataLenChange = 0x0003,
     /// 广播终止 (9.4)
-    BroadcastEnd        = 0x0004,
+    BroadcastEnd = 0x0004,
     /// 连接断开完成 (9.5)
-    DisconnectDone      = 0x0005,
+    DisconnectDone = 0x0005,
     /// 对端连接参数请求 (9.6)
-    PeerConnParamReq    = 0x0007,
+    PeerConnParamReq = 0x0007,
     /// 功率变化上报 (9.7)
-    PowerChange         = 0x0008,
+    PowerChange = 0x0008,
     /// 成功发送的数据包数量 (9.8)
-    TxPktCount          = 0x0009,
+    TxPktCount = 0x0009,
     /// 硬件错误 (9.9)
-    HwError             = 0x000A,
+    HwError = 0x000A,
     /// 数据缓存溢出 (9.10)
-    DataBufOverflow     = 0x000B,
+    DataBufOverflow = 0x000B,
     /// 链路加密参数请求 (9.11)
-    EncParamReq         = 0x000E,
+    EncParamReq = 0x000E,
     /// 链路加密状态变更 (9.12)
-    EncStatusChange     = 0x0011,
+    EncStatusChange = 0x0011,
     /// 控制器控制信令数据 (9.13)
-    CtrlSignalData      = 0x0014,
+    CtrlSignalData = 0x0014,
     /// 异步链路建立完成 (9.14)
-    ConnEstablished     = 0x0015,
+    ConnEstablished = 0x0015,
     /// 读取对端特性 (9.15)
-    PeerFeatures        = 0x0016,
+    PeerFeatures = 0x0016,
     /// 读取对端版本信息 (9.16)
-    PeerVersion         = 0x0017,
+    PeerVersion = 0x0017,
     /// 物理层参数更新 (9.17)
-    PhyParamUpdate      = 0x0018,
+    PhyParamUpdate = 0x0018,
     /// 连接参数更新 (9.18)
-    ConnParamUpdate     = 0x0019,
+    ConnParamUpdate = 0x0019,
     /// 广播信息上报 (9.19)
-    BroadcastReport     = 0x001A,
+    BroadcastReport = 0x001A,
     /// 读取对端功率 (9.20)
-    ReadRemotePower     = 0x001B,
+    ReadRemotePower = 0x001B,
     /// 查询请求上报 (9.21)
-    ScanReport          = 0x001C,
+    ScanReport = 0x001C,
     /// 配对请求 (9.22)
-    PairRequest         = 0x001D,
+    PairRequest = 0x001D,
     /// 配对信息交换请求 (9.23)
-    PairInfoExchange    = 0x001E,
+    PairInfoExchange = 0x001E,
     /// 配对信息上报 (9.24)
-    PairInfoReport      = 0x001F,
+    PairInfoReport = 0x001F,
     /// 配对选项上报 (9.25)
-    PairOptionReport    = 0x0020,
+    PairOptionReport = 0x0020,
     /// 对端公钥上报 (9.26)
-    RemotePublicKey     = 0x0021,
+    RemotePublicKey = 0x0021,
     /// 配对扩展数据上报 (9.27)
-    PairExtDataReport   = 0x0022,
+    PairExtDataReport = 0x0022,
     /// 按键提示通知 (9.28)
-    PasskeyNotify       = 0x0023,
+    PasskeyNotify = 0x0023,
     /// 配对随机数上报 (9.29)
-    PairRandomReport    = 0x0024,
+    PairRandomReport = 0x0024,
     /// 配对确认码上报 (9.30)
-    PairConfirmReport   = 0x0025,
+    PairConfirmReport = 0x0025,
     /// DHkey验证码上报 (9.31)
-    DhkeyVerifyReport   = 0x0026,
+    DhkeyVerifyReport = 0x0026,
     /// 配对失败上报 (9.32)
-    PairFailReport      = 0x0027,
+    PairFailReport = 0x0027,
     /// 窄带跳频测量信息上报 (9.33)
-    NbfhMeasInfo        = 0x0028,
+    NbfhMeasInfo = 0x0028,
     /// 窄带跳频测量状态改变 (9.34)
     NbfhMeasStateChange = 0x0029,
     /// 窄带跳频测量参数上报 (9.35)
-    NbfhMeasParams      = 0x002A,
+    NbfhMeasParams = 0x002A,
     /// 本端窄带跳频测量能力上报 (9.36)
-    LocalNbfhMeasCap    = 0x002B,
+    LocalNbfhMeasCap = 0x002B,
     /// 对端窄带跳频测量能力上报 (9.37)
-    RemoteNbfhMeasCap   = 0x002C,
+    RemoteNbfhMeasCap = 0x002C,
     /// 测量状态变更 (9.38)
-    MeasStateChange     = 0x002D,
+    MeasStateChange = 0x002D,
     /// 测量量上报 (9.39)
-    MeasReport          = 0x002E,
+    MeasReport = 0x002E,
     /// SLB广播信息上报 (9.40)
-    SlbBroadcastReport  = 0x002F,
+    SlbBroadcastReport = 0x002F,
     /// SLB连接建立完成 (9.41)
-    SlbConnEstablished  = 0x0030,
+    SlbConnEstablished = 0x0030,
     /// SLB单播逻辑信道建立完成 (9.42)
-    SlbLogChannelDone   = 0x0031,
+    SlbLogChannelDone = 0x0031,
     /// SLB单播逻辑信道更新完成 (9.43)
     SlbLogChannelUpdate = 0x0032,
     /// SLB逻辑信道删除完成 (9.44)
     SlbLogChannelDelete = 0x0033,
     /// SLB逻辑信道成功发送数据包数量 (9.45)
-    SlbLogChannelTxPkt  = 0x0034,
+    SlbLogChannelTxPkt = 0x0034,
     /// 时间同步状态更新 (9.46)
-    TimeSyncUpdate      = 0x0035,
+    TimeSyncUpdate = 0x0035,
     /// 时间同步请求 (9.47)
-    TimeSyncRequest     = 0x0036,
+    TimeSyncRequest = 0x0036,
     /// 同步单播建链请求 (9.48)
-    SyncUcastRequest    = 0x0038,
+    SyncUcastRequest = 0x0038,
     /// 同步单播建链完成 (9.49)
-    SyncUcastDone       = 0x0039,
+    SyncUcastDone = 0x0039,
     /// 同步组播建链请求 (9.50)
-    SyncMcastRequest    = 0x003A,
+    SyncMcastRequest = 0x003A,
     /// 同步组播建链完成 (9.51)
-    SyncMcastDone       = 0x003B,
+    SyncMcastDone = 0x003B,
 }
 
 /// An event from the controller to the host.
@@ -827,33 +825,17 @@ pub enum SleEvent {
         status: SleStatus,
     },
     /// Data received on a connection.
-    DataReceived {
-        handle: u16,
-        data: KVec<u8>,
-    },
+    DataReceived { handle: u16, data: KVec<u8> },
     /// Connection lost.
-    Disconnected {
-        handle: u16,
-        reason: u8,
-    },
+    Disconnected { handle: u16, reason: u8 },
     /// Encryption status changed on a connection.
-    EncryptionChanged {
-        handle: u16,
-        enabled: bool,
-    },
+    EncryptionChanged { handle: u16, enabled: bool },
     /// Pairing request from a remote peer.
-    PairRequest {
-        addr: [u8; 6],
-        method: u8,
-    },
+    PairRequest { addr: [u8; 6], method: u8 },
     /// Controller hardware error.
-    HardwareError {
-        code: u8,
-    },
+    HardwareError { code: u8 },
     /// Broadcast / advertising terminated by the controller.
-    BroadcastEnd {
-        reason: u8,
-    },
+    BroadcastEnd { reason: u8 },
     /// PHY parameters updated on a connection.
     PhyUpdate {
         handle: u16,
@@ -874,9 +856,7 @@ pub enum SleEvent {
         max_rx_octets: u16,
     },
     /// Controller data buffer overflow.
-    DataBufOverflow {
-        link_type: u8,
-    },
+    DataBufOverflow { link_type: u8 },
     /// Remote peer requests connection parameter change.
     PeerConnParamReq {
         handle: u16,
@@ -1021,7 +1001,11 @@ impl SleController for VirtualController {
     }
 
     fn send_command(&self, opcode: SleOpcode, params: &[u8]) -> Result {
-        pr_debug!("sparklink-virtual: cmd {:?} (0x{:04x})\n", opcode, opcode as u16);
+        pr_debug!(
+            "sparklink-virtual: cmd {:?} (0x{:04x})\n",
+            opcode,
+            opcode as u16
+        );
         // Generate a CommandComplete event for loopback testing
         self.enqueue_event(SleEvent::CommandComplete {
             opcode,
@@ -1055,7 +1039,11 @@ impl SleController for VirtualController {
     }
 
     fn send_data(&self, handle: u16, data: &[u8]) -> Result {
-        pr_debug!("sparklink-virtual: data tx handle={} len={}\n", handle, data.len());
+        pr_debug!(
+            "sparklink-virtual: data tx handle={} len={}\n",
+            handle,
+            data.len()
+        );
         Ok(())
     }
 

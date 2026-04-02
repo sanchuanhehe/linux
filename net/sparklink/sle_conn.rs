@@ -307,7 +307,10 @@ impl DataRingBuffer {
         let tail = (self.head + self.count) % QUEUE_DEPTH;
         let off = (tail * CONN_DATA_MAX) as u32;
         self.storage[off as usize..off as usize + len].copy_from_slice(&data[..len]);
-        self.meta[tail] = SlotMeta { offset: off, length: len as u16 };
+        self.meta[tail] = SlotMeta {
+            offset: off,
+            length: len as u16,
+        };
         self.count += 1;
         Ok(())
     }
@@ -405,7 +408,7 @@ impl Default for AccessCapability {
             pilot: 0x02,          // 8:1 pilot
             schedule_slots: 0x10, // 125 us (bit 4)
             switch_delay: 2,
-            crc_type: 0x01,       // CRC24
+            crc_type: 0x01, // CRC24
         }
     }
 }
@@ -476,8 +479,8 @@ impl Default for NegotiatedParams {
     fn default() -> Self {
         Self {
             bandwidth_mhz: 1,
-            mcs_index: 4,           // QPSK 1/2
-            pilot_density: 1,       // 8:1
+            mcs_index: 4,     // QPSK 1/2
+            pilot_density: 1, // 8:1
             schedule_slot_us: 125,
             crc_type: 0,            // CRC24
             event_group_period: 40, // 40 * 125 us = 5 ms
@@ -877,7 +880,10 @@ impl ConnManager {
     /// Returns the assigned handle on success.
     pub fn connect(&mut self, peer_addr: [u8; 6], role: GtRole) -> Result<u16> {
         if self.connections.len() >= self.max_connections {
-            pr_err!("sparklink: max connections ({}) reached\n", self.max_connections);
+            pr_err!(
+                "sparklink: max connections ({}) reached\n",
+                self.max_connections
+            );
             return Err(EBUSY);
         }
         // Check for duplicate peer address among active connections
@@ -1036,7 +1042,11 @@ impl ConnManager {
             }
             other => {
                 entry.state = ConnState::Idle;
-                pr_warn!("sparklink: handle {} connection rejected: {:?}\n", handle, other);
+                pr_warn!(
+                    "sparklink: handle {} connection rejected: {:?}\n",
+                    handle,
+                    other
+                );
                 Err(EACCES)
             }
         }
@@ -1215,7 +1225,10 @@ impl ConnManager {
     /// Returns (mtu, info_exchanged) on success.
     pub fn ssap_session_info(&self, handle: u16) -> Option<(u16, bool)> {
         let entry = self.find(handle).ok()?;
-        entry.ssap_session.as_ref().map(|s| (s.mtu, s.info_exchanged))
+        entry
+            .ssap_session
+            .as_ref()
+            .map(|s| (s.mtu, s.info_exchanged))
     }
 
     /// Consume a TX credit on the specified channel before sending a PDU.
@@ -1232,7 +1245,8 @@ impl ConnManager {
             .ok()
             .map(|e| {
                 e.last_activity = jiffies_now();
-                e.channels.by_tcid_mut(tcid)
+                e.channels
+                    .by_tcid_mut(tcid)
                     .map(|ch| ch.consume_rx_credit())
                     .unwrap_or(false)
             })
@@ -1257,7 +1271,10 @@ impl ConnManager {
     /// Get credit state for a specific channel. Returns (tx_credits, rx_credits).
     pub fn channel_credits(&self, handle: u16, tcid: u16) -> Option<(u16, u16)> {
         let entry = self.find(handle).ok()?;
-        entry.channels.by_tcid(tcid).map(|ch| (ch.tx_credits, ch.rx_credits))
+        entry
+            .channels
+            .by_tcid(tcid)
+            .map(|ch| (ch.tx_credits, ch.rx_credits))
     }
 
     /// Set per-connection MTU for the data channel.
@@ -1560,11 +1577,7 @@ impl ConnManager {
     /// Create (activate) sync unicast links within a configured CIG per 8.10.3.
     ///
     /// Each link is bound to an existing async connection via `acl_handles`.
-    pub fn sync_ucast_create(
-        &mut self,
-        cig_id: u8,
-        acl_handles: &[u16],
-    ) -> Result<u8> {
+    pub fn sync_ucast_create(&mut self, cig_id: u8, acl_handles: &[u16]) -> Result<u8> {
         // Verify async connections exist.
         for &ah in acl_handles {
             let entry = self.find(ah)?;
@@ -1617,7 +1630,8 @@ impl ConnManager {
         if params.link_count == 0 || params.link_count as usize > MAX_SYNC_LINKS_PER_CIG {
             return Err(EINVAL);
         }
-        self.sync_links.retain(|l| !(l.cig_id == params.big_id && l.link_type == SyncLinkType::Multicast));
+        self.sync_links
+            .retain(|l| !(l.cig_id == params.big_id && l.link_type == SyncLinkType::Multicast));
 
         let mut handles = [0u16; MAX_SYNC_LINKS_PER_CIG];
         for i in 0..params.link_count as usize {
@@ -1654,11 +1668,7 @@ impl ConnManager {
     }
 
     /// Create (activate) sync multicast links per 8.10.9.
-    pub fn sync_mcast_create(
-        &mut self,
-        big_id: u8,
-        acl_handles: &[u16],
-    ) -> Result<u8> {
+    pub fn sync_mcast_create(&mut self, big_id: u8, acl_handles: &[u16]) -> Result<u8> {
         for &ah in acl_handles {
             let entry = self.find(ah)?;
             if entry.state != ConnState::Connected {

@@ -24,22 +24,28 @@ use kernel::prelude::*;
 extern "C" {
     fn sle_sm3_hash(data: *const u8, data_len: u32, digest: *mut u8) -> core::ffi::c_int;
     fn sle_hmac_sm3(
-        key: *const u8, key_len: u32,
-        data: *const u8, data_len: u32,
+        key: *const u8,
+        key_len: u32,
+        data: *const u8,
+        data_len: u32,
         digest: *mut u8,
     ) -> core::ffi::c_int;
     fn sle_sm4_ecb_crypt(
-        key: *const u8, input: *const u8, output: *mut u8, decrypt: core::ffi::c_int,
+        key: *const u8,
+        input: *const u8,
+        output: *mut u8,
+        decrypt: core::ffi::c_int,
     ) -> core::ffi::c_int;
     fn sle_sm4_ctr_crypt(
-        key: *const u8, iv: *mut u8,
-        data: *mut u8, data_len: u32,
+        key: *const u8,
+        iv: *mut u8,
+        data: *mut u8,
+        data_len: u32,
     ) -> core::ffi::c_int;
-    fn sle_ecdh_generate(
-        private_key: *mut u8, public_key: *mut u8,
-    ) -> core::ffi::c_int;
+    fn sle_ecdh_generate(private_key: *mut u8, public_key: *mut u8) -> core::ffi::c_int;
     fn sle_ecdh_shared_secret(
-        private_key: *const u8, remote_public_key: *const u8,
+        private_key: *const u8,
+        remote_public_key: *const u8,
         secret: *mut u8,
     ) -> core::ffi::c_int;
 }
@@ -103,9 +109,7 @@ impl Sm4Key {
         let mut output = [0u8; SM4_BLOCK_SIZE];
         // SAFETY: All three buffers are exactly SM4_BLOCK_SIZE/SM4_KEY_SIZE.
         unsafe {
-            let ret = sle_sm4_ecb_crypt(
-                self.key.as_ptr(), input.as_ptr(), output.as_mut_ptr(), 0,
-            );
+            let ret = sle_sm4_ecb_crypt(self.key.as_ptr(), input.as_ptr(), output.as_mut_ptr(), 0);
             if ret != 0 {
                 pr_err!("sparklink: SM4 encrypt_block failed: {}\n", ret);
             }
@@ -118,9 +122,7 @@ impl Sm4Key {
         let mut output = [0u8; SM4_BLOCK_SIZE];
         // SAFETY: All three buffers are exactly SM4_BLOCK_SIZE/SM4_KEY_SIZE.
         unsafe {
-            let ret = sle_sm4_ecb_crypt(
-                self.key.as_ptr(), input.as_ptr(), output.as_mut_ptr(), 1,
-            );
+            let ret = sle_sm4_ecb_crypt(self.key.as_ptr(), input.as_ptr(), output.as_mut_ptr(), 1);
             if ret != 0 {
                 pr_err!("sparklink: SM4 decrypt_block failed: {}\n", ret);
             }
@@ -141,8 +143,10 @@ pub fn hmac_sm3(key: &[u8], data: &[u8]) -> [u8; SM3_DIGEST_SIZE] {
     // are valid.
     unsafe {
         let ret = sle_hmac_sm3(
-            key.as_ptr(), key.len() as u32,
-            data.as_ptr(), data.len() as u32,
+            key.as_ptr(),
+            key.len() as u32,
+            data.as_ptr(),
+            data.len() as u32,
             digest.as_mut_ptr(),
         );
         if ret != 0 {
@@ -172,8 +176,10 @@ pub fn sm4_ctr(key: &Sm4Key, nonce: &[u8; 12], start_ctr: u32, data: &mut [u8]) 
     // length are consistent with the slice.
     unsafe {
         let ret = sle_sm4_ctr_crypt(
-            key.key.as_ptr(), iv.as_mut_ptr(),
-            data.as_mut_ptr(), data.len() as u32,
+            key.key.as_ptr(),
+            iv.as_mut_ptr(),
+            data.as_mut_ptr(),
+            data.len() as u32,
         );
         if ret != 0 {
             pr_err!("sparklink: sle_sm4_ctr_crypt failed: {}\n", ret);
@@ -226,12 +232,8 @@ impl EcdhKeyPair {
         // SAFETY: sle_ecdh_generate writes ECDH_KEY_SIZE bytes to
         // private_key and ECDH_PUB_SIZE bytes to public_key. Both
         // buffers are correctly sized.
-        let ret = unsafe {
-            sle_ecdh_generate(
-                kp.private_key.as_mut_ptr(),
-                kp.public_key.as_mut_ptr(),
-            )
-        };
+        let ret =
+            unsafe { sle_ecdh_generate(kp.private_key.as_mut_ptr(), kp.public_key.as_mut_ptr()) };
         if ret != 0 {
             pr_err!("sparklink: sle_ecdh_generate failed: {}\n", ret);
             return Err(EINVAL);

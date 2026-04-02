@@ -17,8 +17,8 @@
 //!   - Power state changes
 //!   - Hardware errors
 
-use kernel::prelude::*;
 use core::sync::atomic::{AtomicU64, Ordering};
+use kernel::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Event type codes
@@ -317,12 +317,7 @@ impl SleWireEvent {
     }
 
     /// Build an advertising report wire event.
-    pub fn adv_report(
-        addr: [u8; 6],
-        rssi: i8,
-        discovery_level: u8,
-        name: &[u8],
-    ) -> Self {
+    pub fn adv_report(addr: [u8; 6], rssi: i8, discovery_level: u8, name: &[u8]) -> Self {
         let mut evt = AdvReportEvent {
             addr,
             rssi,
@@ -519,13 +514,7 @@ impl EventQueue {
     }
 
     /// Enqueue an advertising report event.
-    pub fn push_adv_report(
-        &mut self,
-        addr: [u8; 6],
-        rssi: i8,
-        discovery_level: u8,
-        name: &[u8],
-    ) {
+    pub fn push_adv_report(&mut self, addr: [u8; 6], rssi: i8, discovery_level: u8, name: &[u8]) {
         let mut evt = AdvReportEvent {
             addr,
             rssi,

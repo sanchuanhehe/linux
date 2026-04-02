@@ -17,7 +17,7 @@ use kernel::page::PAGE_SIZE;
 use kernel::prelude::*;
 use kernel::sync::Mutex;
 
-use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 
 const VERSION_STR: &[u8] = b"0.3.0\n";
 

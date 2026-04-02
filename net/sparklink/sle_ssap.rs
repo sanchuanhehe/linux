@@ -500,28 +500,24 @@ impl SsapInner {
     }
 
     /// Add a descriptor to the last property of the last service.
-    pub fn add_descriptor(
-        &mut self,
-        dtype: DescriptorType,
-        data: &[u8],
-    ) -> Result {
+    pub fn add_descriptor(&mut self, dtype: DescriptorType, data: &[u8]) -> Result {
         let svc = self.services.last_mut().ok_or(ENODEV)?;
         let prop = svc.properties.last_mut().ok_or(ENODEV)?;
 
         let mut d = KVec::new();
         d.extend_from_slice(data, GFP_KERNEL)?;
 
-        let desc = Descriptor {
-            dtype,
-            data: d,
-        };
+        let desc = Descriptor { dtype, data: d };
         prop.descriptors.push(desc, GFP_KERNEL)?;
         Ok(())
     }
 
     /// Remove a service by its start handle.
     pub fn remove_service(&mut self, start_handle: u16) -> Result {
-        let idx = self.services.iter().position(|s| s.start_handle == start_handle);
+        let idx = self
+            .services
+            .iter()
+            .position(|s| s.start_handle == start_handle);
         match idx {
             Some(i) => {
                 let _ = self.services.remove(i);
@@ -668,12 +664,15 @@ impl SsapInner {
                     p.value.extend_from_slice(data, GFP_KERNEL)?;
 
                     do_notify = p.ops.contains(OpIndicator::NOTIFY) && (p.client_cfg & 0x01) != 0;
-                    do_indicate = p.ops.contains(OpIndicator::INDICATE) && (p.client_cfg & 0x02) != 0;
+                    do_indicate =
+                        p.ops.contains(OpIndicator::INDICATE) && (p.client_cfg & 0x02) != 0;
                     found = true;
                     break;
                 }
             }
-            if found { break; }
+            if found {
+                break;
+            }
         }
 
         if !found {
@@ -684,31 +683,51 @@ impl SsapInner {
         if do_notify {
             let mut nd = KVec::new();
             if nd.extend_from_slice(data, GFP_KERNEL).is_err() {
-                pr_warn!("sparklink: SSAP notification dropped (OOM) handle=0x{:04x}\n", handle);
-            } else if self.notifications.push(
-                PendingNotification {
-                    handle,
-                    indication: false,
-                    data: nd,
-                },
-                GFP_KERNEL,
-            ).is_err() {
-                pr_warn!("sparklink: SSAP notification queue full handle=0x{:04x}\n", handle);
+                pr_warn!(
+                    "sparklink: SSAP notification dropped (OOM) handle=0x{:04x}\n",
+                    handle
+                );
+            } else if self
+                .notifications
+                .push(
+                    PendingNotification {
+                        handle,
+                        indication: false,
+                        data: nd,
+                    },
+                    GFP_KERNEL,
+                )
+                .is_err()
+            {
+                pr_warn!(
+                    "sparklink: SSAP notification queue full handle=0x{:04x}\n",
+                    handle
+                );
             }
         }
         if do_indicate {
             let mut nd = KVec::new();
             if nd.extend_from_slice(data, GFP_KERNEL).is_err() {
-                pr_warn!("sparklink: SSAP indication dropped (OOM) handle=0x{:04x}\n", handle);
-            } else if self.notifications.push(
-                PendingNotification {
-                    handle,
-                    indication: true,
-                    data: nd,
-                },
-                GFP_KERNEL,
-            ).is_err() {
-                pr_warn!("sparklink: SSAP indication queue full handle=0x{:04x}\n", handle);
+                pr_warn!(
+                    "sparklink: SSAP indication dropped (OOM) handle=0x{:04x}\n",
+                    handle
+                );
+            } else if self
+                .notifications
+                .push(
+                    PendingNotification {
+                        handle,
+                        indication: true,
+                        data: nd,
+                    },
+                    GFP_KERNEL,
+                )
+                .is_err()
+            {
+                pr_warn!(
+                    "sparklink: SSAP indication queue full handle=0x{:04x}\n",
+                    handle
+                );
             }
         }
 
@@ -811,25 +830,20 @@ impl SsapInner {
 
         // Property: Device Name (readable)
         let name = b"SparkLink Virtual Device";
-        self.add_property(
-            SsapUuid::Uuid16(0x1001),
-            OpIndicator::READ,
-            name,
-        )?;
+        self.add_property(SsapUuid::Uuid16(0x1001), OpIndicator::READ, name)?;
 
         // Property: Firmware Version (readable)
         let fw = b"0.3.0";
-        self.add_property(
-            SsapUuid::Uuid16(0x1002),
-            OpIndicator::READ,
-            fw,
-        )?;
+        self.add_property(SsapUuid::Uuid16(0x1002), OpIndicator::READ, fw)?;
 
         // Property: Status (readable, writable, notifiable)
         let status: [u8; 1] = [0x00]; // idle
         let status_handle = self.add_property(
             SsapUuid::Uuid16(0x1003),
-            OpIndicator::READ | OpIndicator::WRITE_WITH_RSP | OpIndicator::NOTIFY | OpIndicator::CLIENT_CFG_WR,
+            OpIndicator::READ
+                | OpIndicator::WRITE_WITH_RSP
+                | OpIndicator::NOTIFY
+                | OpIndicator::CLIENT_CFG_WR,
             &status,
         )?;
 
@@ -838,8 +852,10 @@ impl SsapInner {
             DataType::Uint8 as u8, // type
             0x00,                  // decimal exponent
             0x00,                  // binary exponent
-            0x00, 0x00,            // unit UUID (none)
-            0x00, 0x00,            // description UUID (none)
+            0x00,
+            0x00, // unit UUID (none)
+            0x00,
+            0x00, // description UUID (none)
         ];
         self.add_descriptor(DescriptorType::PropertyFormat, &format)?;
 
@@ -869,9 +885,10 @@ impl SsapInner {
 
     /// Get total handle count (services + properties + methods + events).
     pub fn total_entries(&self) -> usize {
-        self.services.iter().map(|s| {
-            1 + s.properties.len() + s.methods.len() + s.events.len()
-        }).sum()
+        self.services
+            .iter()
+            .map(|s| 1 + s.properties.len() + s.methods.len() + s.events.len())
+            .sum()
     }
 }
 
@@ -912,10 +929,7 @@ pub enum SsapPdu {
     /// Exchange info response: server MTU.
     ExchangeInfoRsp { mtu: u16 },
     /// Find structure request: start/end handle range.
-    FindStructureReq {
-        start_handle: u16,
-        end_handle: u16,
-    },
+    FindStructureReq { start_handle: u16, end_handle: u16 },
     /// Find structure response: list of (handle, category, uuid) entries.
     FindStructureRsp { entries: KVec<EntryInfo> },
     /// Read request: attribute handle.
@@ -941,8 +955,14 @@ impl SsapPdu {
     /// Returns the number of bytes written, or ENOMEM/EINVAL on error.
     pub fn encode(&self, buf: &mut [u8]) -> Result<usize> {
         match self {
-            SsapPdu::ErrorRsp { req_opcode, handle, error } => {
-                if buf.len() < 4 { return Err(ENOMEM); }
+            SsapPdu::ErrorRsp {
+                req_opcode,
+                handle,
+                error,
+            } => {
+                if buf.len() < 4 {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::ErrorRsp as u8;
                 buf[1] = *req_opcode;
                 buf[2..4].copy_from_slice(&handle.to_le_bytes());
@@ -950,19 +970,28 @@ impl SsapPdu {
                 Ok(5)
             }
             SsapPdu::ExchangeInfoReq { mtu } => {
-                if buf.len() < 3 { return Err(ENOMEM); }
+                if buf.len() < 3 {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::ExchangeInfoReq as u8;
                 buf[1..3].copy_from_slice(&mtu.to_le_bytes());
                 Ok(3)
             }
             SsapPdu::ExchangeInfoRsp { mtu } => {
-                if buf.len() < 3 { return Err(ENOMEM); }
+                if buf.len() < 3 {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::ExchangeInfoRsp as u8;
                 buf[1..3].copy_from_slice(&mtu.to_le_bytes());
                 Ok(3)
             }
-            SsapPdu::FindStructureReq { start_handle, end_handle } => {
-                if buf.len() < 5 { return Err(ENOMEM); }
+            SsapPdu::FindStructureReq {
+                start_handle,
+                end_handle,
+            } => {
+                if buf.len() < 5 {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::FindStructureReq as u8;
                 buf[1..3].copy_from_slice(&start_handle.to_le_bytes());
                 buf[3..5].copy_from_slice(&end_handle.to_le_bytes());
@@ -971,10 +1000,19 @@ impl SsapPdu {
             SsapPdu::FindStructureRsp { entries } => {
                 // Each entry: handle(2) + category(1) + uuid_len(1) + uuid(2 or 16)
                 let hdr = 1;
-                let needed = hdr + entries.iter().map(|e| {
-                    4 + match e.uuid { SsapUuid::Uuid16(_) => 2, SsapUuid::Uuid128(_) => 16 }
-                }).sum::<usize>();
-                if buf.len() < needed { return Err(ENOMEM); }
+                let needed = hdr
+                    + entries
+                        .iter()
+                        .map(|e| {
+                            4 + match e.uuid {
+                                SsapUuid::Uuid16(_) => 2,
+                                SsapUuid::Uuid128(_) => 16,
+                            }
+                        })
+                        .sum::<usize>();
+                if buf.len() < needed {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::FindStructureRsp as u8;
                 let mut off = 1;
                 for e in entries.iter() {
@@ -996,53 +1034,69 @@ impl SsapPdu {
                 Ok(off)
             }
             SsapPdu::ReadReq { handle } => {
-                if buf.len() < 3 { return Err(ENOMEM); }
+                if buf.len() < 3 {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::ReadReq as u8;
                 buf[1..3].copy_from_slice(&handle.to_le_bytes());
                 Ok(3)
             }
             SsapPdu::ReadRsp { data } => {
-                if buf.len() < 1 + data.len() { return Err(ENOMEM); }
+                if buf.len() < 1 + data.len() {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::ReadRsp as u8;
                 buf[1..1 + data.len()].copy_from_slice(data);
                 Ok(1 + data.len())
             }
             SsapPdu::WriteCmd { handle, data } => {
-                if buf.len() < 3 + data.len() { return Err(ENOMEM); }
+                if buf.len() < 3 + data.len() {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::WriteCmd as u8;
                 buf[1..3].copy_from_slice(&handle.to_le_bytes());
                 buf[3..3 + data.len()].copy_from_slice(data);
                 Ok(3 + data.len())
             }
             SsapPdu::WriteReq { handle, data } => {
-                if buf.len() < 3 + data.len() { return Err(ENOMEM); }
+                if buf.len() < 3 + data.len() {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::WriteReq as u8;
                 buf[1..3].copy_from_slice(&handle.to_le_bytes());
                 buf[3..3 + data.len()].copy_from_slice(data);
                 Ok(3 + data.len())
             }
             SsapPdu::WriteRsp { handle } => {
-                if buf.len() < 3 { return Err(ENOMEM); }
+                if buf.len() < 3 {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::WriteRsp as u8;
                 buf[1..3].copy_from_slice(&handle.to_le_bytes());
                 Ok(3)
             }
             SsapPdu::ValueNtf { handle, data } => {
-                if buf.len() < 3 + data.len() { return Err(ENOMEM); }
+                if buf.len() < 3 + data.len() {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::ValueNtf as u8;
                 buf[1..3].copy_from_slice(&handle.to_le_bytes());
                 buf[3..3 + data.len()].copy_from_slice(data);
                 Ok(3 + data.len())
             }
             SsapPdu::ValueInd { handle, data } => {
-                if buf.len() < 3 + data.len() { return Err(ENOMEM); }
+                if buf.len() < 3 + data.len() {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::ValueInd as u8;
                 buf[1..3].copy_from_slice(&handle.to_le_bytes());
                 buf[3..3 + data.len()].copy_from_slice(data);
                 Ok(3 + data.len())
             }
             SsapPdu::ValueAck { handle } => {
-                if buf.len() < 3 { return Err(ENOMEM); }
+                if buf.len() < 3 {
+                    return Err(ENOMEM);
+                }
                 buf[0] = SsapMsgCode::ValueAck as u8;
                 buf[1..3].copy_from_slice(&handle.to_le_bytes());
                 Ok(3)
@@ -1061,7 +1115,9 @@ impl SsapPdu {
         match opcode {
             0x01 => {
                 // ErrorRsp: req_opcode(1) + handle(2) + error(1) = 4
-                if payload.len() < 4 { return Err(EINVAL); }
+                if payload.len() < 4 {
+                    return Err(EINVAL);
+                }
                 Ok(SsapPdu::ErrorRsp {
                     req_opcode: payload[0],
                     handle: u16::from_le_bytes([payload[1], payload[2]]),
@@ -1069,19 +1125,25 @@ impl SsapPdu {
                 })
             }
             0x02 => {
-                if payload.len() < 2 { return Err(EINVAL); }
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
                 Ok(SsapPdu::ExchangeInfoReq {
                     mtu: u16::from_le_bytes([payload[0], payload[1]]),
                 })
             }
             0x03 => {
-                if payload.len() < 2 { return Err(EINVAL); }
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
                 Ok(SsapPdu::ExchangeInfoRsp {
                     mtu: u16::from_le_bytes([payload[0], payload[1]]),
                 })
             }
             0x04 => {
-                if payload.len() < 4 { return Err(EINVAL); }
+                if payload.len() < 4 {
+                    return Err(EINVAL);
+                }
                 Ok(SsapPdu::FindStructureReq {
                     start_handle: u16::from_le_bytes([payload[0], payload[1]]),
                     end_handle: u16::from_le_bytes([payload[2], payload[3]]),
@@ -1095,7 +1157,9 @@ impl SsapPdu {
                     let category_raw = payload[off + 2];
                     let uuid_len = payload[off + 3] as usize;
                     off += 4;
-                    if off + uuid_len > payload.len() { break; }
+                    if off + uuid_len > payload.len() {
+                        break;
+                    }
                     let uuid = if uuid_len == 2 {
                         SsapUuid::Uuid16(u16::from_le_bytes([payload[off], payload[off + 1]]))
                     } else if uuid_len == 16 {
@@ -1119,15 +1183,27 @@ impl SsapPdu {
                         0x0B => EntryCategory::CustomMethod,
                         0x0C => EntryCategory::CustomEvent,
                         0x0D => EntryCategory::CustomServiceRef,
-                        _ => { off += uuid_len; continue; }
+                        _ => {
+                            off += uuid_len;
+                            continue;
+                        }
                     };
-                    let _ = entries.push(EntryInfo { handle, category, uuid }, GFP_KERNEL);
+                    let _ = entries.push(
+                        EntryInfo {
+                            handle,
+                            category,
+                            uuid,
+                        },
+                        GFP_KERNEL,
+                    );
                     off += uuid_len;
                 }
                 Ok(SsapPdu::FindStructureRsp { entries })
             }
             0x08 => {
-                if payload.len() < 2 { return Err(EINVAL); }
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
                 Ok(SsapPdu::ReadReq {
                     handle: u16::from_le_bytes([payload[0], payload[1]]),
                 })
@@ -1140,7 +1216,9 @@ impl SsapPdu {
                 Ok(SsapPdu::ReadRsp { data })
             }
             0x0C => {
-                if payload.len() < 2 { return Err(EINVAL); }
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
                 let handle = u16::from_le_bytes([payload[0], payload[1]]);
                 let mut data = KVec::new();
                 for &b in &payload[2..] {
@@ -1149,7 +1227,9 @@ impl SsapPdu {
                 Ok(SsapPdu::WriteCmd { handle, data })
             }
             0x0D => {
-                if payload.len() < 2 { return Err(EINVAL); }
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
                 let handle = u16::from_le_bytes([payload[0], payload[1]]);
                 let mut data = KVec::new();
                 for &b in &payload[2..] {
@@ -1158,13 +1238,17 @@ impl SsapPdu {
                 Ok(SsapPdu::WriteReq { handle, data })
             }
             0x0E => {
-                if payload.len() < 2 { return Err(EINVAL); }
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
                 Ok(SsapPdu::WriteRsp {
                     handle: u16::from_le_bytes([payload[0], payload[1]]),
                 })
             }
             0x0F => {
-                if payload.len() < 2 { return Err(EINVAL); }
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
                 let handle = u16::from_le_bytes([payload[0], payload[1]]);
                 let mut data = KVec::new();
                 for &b in &payload[2..] {
@@ -1173,7 +1257,9 @@ impl SsapPdu {
                 Ok(SsapPdu::ValueNtf { handle, data })
             }
             0x10 => {
-                if payload.len() < 2 { return Err(EINVAL); }
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
                 let handle = u16::from_le_bytes([payload[0], payload[1]]);
                 let mut data = KVec::new();
                 for &b in &payload[2..] {
@@ -1182,7 +1268,9 @@ impl SsapPdu {
                 Ok(SsapPdu::ValueInd { handle, data })
             }
             0x11 => {
-                if payload.len() < 2 { return Err(EINVAL); }
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
                 Ok(SsapPdu::ValueAck {
                     handle: u16::from_le_bytes([payload[0], payload[1]]),
                 })
@@ -1256,47 +1344,46 @@ impl SsapSession {
                 let rsp = SsapPdu::ExchangeInfoRsp { mtu: self.mtu };
                 rsp.encode(resp_buf)
             }
-            SsapPdu::FindStructureReq { start_handle, end_handle } => {
+            SsapPdu::FindStructureReq {
+                start_handle,
+                end_handle,
+            } => {
                 let entries = ssap.find_in_range(start_handle, end_handle);
                 let rsp = SsapPdu::FindStructureRsp { entries };
                 rsp.encode(resp_buf)
             }
-            SsapPdu::ReadReq { handle } => {
-                match ssap.read_property(handle) {
-                    Ok(data) => {
-                        let rsp = SsapPdu::ReadRsp { data };
-                        rsp.encode(resp_buf)
-                    }
-                    Err(_) => {
-                        let rsp = SsapPdu::ErrorRsp {
-                            req_opcode: SsapMsgCode::ReadReq as u8,
-                            handle,
-                            error: SsapError::PropertyNotFound,
-                        };
-                        rsp.encode(resp_buf)
-                    }
+            SsapPdu::ReadReq { handle } => match ssap.read_property(handle) {
+                Ok(data) => {
+                    let rsp = SsapPdu::ReadRsp { data };
+                    rsp.encode(resp_buf)
                 }
-            }
+                Err(_) => {
+                    let rsp = SsapPdu::ErrorRsp {
+                        req_opcode: SsapMsgCode::ReadReq as u8,
+                        handle,
+                        error: SsapError::PropertyNotFound,
+                    };
+                    rsp.encode(resp_buf)
+                }
+            },
             SsapPdu::WriteCmd { handle, data } => {
                 let _ = ssap.write_property(handle, &data);
                 Ok(0) // No response for WriteCmd
             }
-            SsapPdu::WriteReq { handle, data } => {
-                match ssap.write_property(handle, &data) {
-                    Ok(()) => {
-                        let rsp = SsapPdu::WriteRsp { handle };
-                        rsp.encode(resp_buf)
-                    }
-                    Err(_) => {
-                        let rsp = SsapPdu::ErrorRsp {
-                            req_opcode: SsapMsgCode::WriteReq as u8,
-                            handle,
-                            error: SsapError::WriteNotPermitted,
-                        };
-                        rsp.encode(resp_buf)
-                    }
+            SsapPdu::WriteReq { handle, data } => match ssap.write_property(handle, &data) {
+                Ok(()) => {
+                    let rsp = SsapPdu::WriteRsp { handle };
+                    rsp.encode(resp_buf)
                 }
-            }
+                Err(_) => {
+                    let rsp = SsapPdu::ErrorRsp {
+                        req_opcode: SsapMsgCode::WriteReq as u8,
+                        handle,
+                        error: SsapError::WriteNotPermitted,
+                    };
+                    rsp.encode(resp_buf)
+                }
+            },
             SsapPdu::ValueAck { handle: _ } => {
                 // Acknowledge received; no action needed in this minimal impl.
                 Ok(0)

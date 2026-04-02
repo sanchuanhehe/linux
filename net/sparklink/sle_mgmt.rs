@@ -58,8 +58,7 @@ pub(crate) const CMD_TIMEOUT_STATUS: u32 = CMD_RESOLVED_BIT | 0x100;
 impl CmdPendingEntry {
     /// Create a new pending entry.
     pub(crate) fn new(opcode: u16, seq: u32, timeout_ms: u32) -> Self {
-        let deadline = Self::jiffies_now()
-            .wrapping_add(msecs_to_jiffies(timeout_ms) as u64);
+        let deadline = Self::jiffies_now().wrapping_add(msecs_to_jiffies(timeout_ms) as u64);
         Self {
             opcode,
             seq,
@@ -174,11 +173,7 @@ impl CmdPendingQueue {
     }
 
     /// Submit a new command with a custom timeout.
-    pub(crate) fn submit_with_timeout(
-        &mut self,
-        opcode: u16,
-        timeout_ms: u32,
-    ) -> Result<u32> {
+    pub(crate) fn submit_with_timeout(&mut self, opcode: u16, timeout_ms: u32) -> Result<u32> {
         if self.pending_count as usize >= CMD_QUEUE_DEPTH {
             return Err(EBUSY);
         }
@@ -245,7 +240,10 @@ impl CmdPendingQueue {
 
     /// Look up a pending entry by sequence number.
     pub(crate) fn find_by_seq(&self, seq: u32) -> Option<&CmdPendingEntry> {
-        self.entries.iter().filter_map(|s| s.as_ref()).find(|e| e.seq == seq)
+        self.entries
+            .iter()
+            .filter_map(|s| s.as_ref())
+            .find(|e| e.seq == seq)
     }
 }
 

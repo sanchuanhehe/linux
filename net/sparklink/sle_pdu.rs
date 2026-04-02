@@ -538,7 +538,9 @@ impl AdvPdu {
             CRC_ERRORS.fetch_add(1, Ordering::Relaxed);
             pr_debug!(
                 "sparklink: adv PDU CRC-12 mismatch: received {:#05x}, expected {:#05x} (len={})\n",
-                crc, expected, data_len
+                crc,
+                expected,
+                data_len
             );
             return None;
         }

@@ -10,11 +10,9 @@
 
 #![allow(dead_code, unreachable_pub)]
 
-use kernel::prelude::*;
+use crate::sle_pdu::{AdvDataBuilder, AdvPdu, BroadcastType, PacketType, SLE_ADV_DATA_MAX};
 use kernel::alloc::KVec;
-use crate::sle_pdu::{
-    AdvDataBuilder, AdvPdu, BroadcastType, PacketType, SLE_ADV_DATA_MAX,
-};
+use kernel::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Advertising parameters
@@ -36,7 +34,7 @@ pub struct AdvParams {
 impl Default for AdvParams {
     fn default() -> Self {
         Self {
-            discovery_level: 1, // General discoverable
+            discovery_level: 1,  // General discoverable
             interval_slots: 800, // 100ms = 800 * 125us
             broadcast_type: BroadcastType::AccessibleScannable,
             tx_power: 0,
@@ -64,10 +62,10 @@ pub struct ScanParams {
 impl Default for ScanParams {
     fn default() -> Self {
         Self {
-            window_slots: 400, // 50ms
+            window_slots: 400,   // 50ms
             interval_slots: 800, // 100ms
-            filter_level: 0,   // accept all levels
-            active: false,     // passive scan
+            filter_level: 0,     // accept all levels
+            active: false,       // passive scan
         }
     }
 }
@@ -412,7 +410,10 @@ impl AdvScanInner {
             return Err(EBUSY);
         }
         self.state = AdvScanState::Idle;
-        pr_info!("sparklink: scanning stopped ({} results)\n", self.scan_results.len());
+        pr_info!(
+            "sparklink: scanning stopped ({} results)\n",
+            self.scan_results.len()
+        );
         Ok(())
     }
 
@@ -601,12 +602,7 @@ impl AdvScanInner {
     ///
     /// `duration_10ms`: advertising duration in 10ms units (0 = infinite).
     /// `max_events`: max advertising events before auto-disable (0 = unlimited).
-    pub fn ext_adv_enable_ex(
-        &mut self,
-        handle: u8,
-        duration_10ms: u16,
-        max_events: u8,
-    ) -> Result {
+    pub fn ext_adv_enable_ex(&mut self, handle: u8, duration_10ms: u16, max_events: u8) -> Result {
         let idx = handle as usize;
         if idx >= EXT_ADV_MAX_SETS {
             return Err(EINVAL);
@@ -718,8 +714,8 @@ impl AdvScanInner {
             set.events_sent += 1;
             set.tx_count += 1;
 
-            let duration_expired = set.duration_10ms > 0
-                && set.elapsed_ticks >= u32::from(set.duration_10ms);
+            let duration_expired =
+                set.duration_10ms > 0 && set.elapsed_ticks >= u32::from(set.duration_10ms);
             let events_exhausted =
                 set.max_events > 0 && set.events_sent >= u32::from(set.max_events);
 

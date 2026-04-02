@@ -40,14 +40,13 @@
 use kernel::prelude::*;
 
 use super::sle_dli::{
-    ControllerEventRing, SleBus, SleController, SleControllerInfo,
-    SleEvent, SleFeature, SleOpcode,
-    SLE_TRANSPORT_UNRELIABLE, SLE_TRANSPORT_RELIABLE,
-    SLE_MEAS_RSSI, SLE_SEC_AES_CCM, SLE_SEC_ECDH_P256,
+    ControllerEventRing, SleBus, SleController, SleControllerInfo, SleEvent, SleFeature, SleOpcode,
+    SLE_MEAS_RSSI, SLE_SEC_AES_CCM, SLE_SEC_ECDH_P256, SLE_TRANSPORT_RELIABLE,
+    SLE_TRANSPORT_UNRELIABLE,
 };
 use super::sle_transport::{SleAttachInfo, SleProtoId};
 use super::sle_uart::{UartFrame, UartParser, MAX_PAYLOAD_LEN};
-use super::sle_usb::{DliUsbEvent, event_to_sle};
+use super::sle_usb::{event_to_sle, DliUsbEvent};
 
 // =========================================================================
 // Serdev FFI — C wrapper functions from sle_serdev_ffi.c
@@ -74,25 +73,11 @@ extern "C" {
         len: i32,
         timeout_ms: i32,
     ) -> i32;
-    fn sle_serdev_write_buf(
-        sd: *mut SleSerdevDataOpaque,
-        data: *const u8,
-        len: i32,
-    ) -> i32;
+    fn sle_serdev_write_buf(sd: *mut SleSerdevDataOpaque, data: *const u8, len: i32) -> i32;
     fn sle_serdev_dev_register(dev_id: i32, sd: *mut SleSerdevDataOpaque) -> i32;
     fn sle_serdev_dev_unregister(dev_id: i32);
-    fn sle_serdev_dev_send_cmd(
-        dev_id: i32,
-        opcode: u16,
-        params: *const u8,
-        plen: i32,
-    ) -> i32;
-    fn sle_serdev_dev_send_data(
-        dev_id: i32,
-        handle: u16,
-        data: *const u8,
-        len: i32,
-    ) -> i32;
+    fn sle_serdev_dev_send_cmd(dev_id: i32, opcode: u16, params: *const u8, plen: i32) -> i32;
+    fn sle_serdev_dev_send_data(dev_id: i32, handle: u16, data: *const u8, len: i32) -> i32;
     fn sle_serdev_dev_send_cmd_sync(
         dev_id: i32,
         opcode: u16,
@@ -103,12 +88,7 @@ extern "C" {
     fn sle_serdev_dev_init_controller(dev_id: i32) -> i32;
     fn sle_serdev_dev_get_fw_version(dev_id: i32) -> u32;
     fn sle_serdev_dev_get_mac(dev_id: i32, mac: *mut u8) -> i32;
-    fn sle_serdev_dev_feed_event(
-        dev_id: i32,
-        event_code: u16,
-        params: *const u8,
-        plen: i32,
-    );
+    fn sle_serdev_dev_feed_event(dev_id: i32, event_code: u16, params: *const u8, plen: i32);
 }
 
 // =========================================================================
@@ -213,9 +193,7 @@ pub(crate) extern "C" fn sparklink_serdev_receive(
     }
     // SAFETY: data is non-null and len > 0, checked above; the C caller
     // guarantees the buffer is valid for len bytes.
-    let slice = unsafe {
-        core::slice::from_raw_parts(data, len as usize)
-    };
+    let slice = unsafe { core::slice::from_raw_parts(data, len as usize) };
     if let Some(ref mut state) = *SERDEV_PARSER.lock() {
         state.feed_rx(slice);
     }
@@ -223,9 +201,7 @@ pub(crate) extern "C" fn sparklink_serdev_receive(
 
 /// Called from C when the serial port becomes writable again.
 #[no_mangle]
-pub(crate) extern "C" fn sparklink_serdev_write_wakeup(
-    _ctx: *mut core::ffi::c_void,
-) {
+pub(crate) extern "C" fn sparklink_serdev_write_wakeup(_ctx: *mut core::ffi::c_void) {
     pr_debug!("sparklink-serdev: write wakeup\n");
 }
 
@@ -281,9 +257,7 @@ impl SleController for SerdevController {
         info.bus = SleBus::Uart;
         info.addr = self.addr;
         // SAFETY: dev_id is valid.
-        info.fw_version = unsafe {
-            sle_serdev_dev_get_fw_version(i32::from(self.dev_id))
-        };
+        info.fw_version = unsafe { sle_serdev_dev_get_fw_version(i32::from(self.dev_id)) };
         info.features = (SleFeature::Encryption as u64)
             | (SleFeature::Mcs4 as u64)
             | (SleFeature::Pilot8to1 as u64)
@@ -398,9 +372,8 @@ impl SleSerdevHandle {
     /// Write data, blocking until sent or timeout.
     pub(crate) fn write(&self, data: &[u8], timeout_ms: i32) -> Result<usize> {
         // SAFETY: self.inner is valid, data pointer and length are consistent.
-        let ret = unsafe {
-            sle_serdev_write(self.inner, data.as_ptr(), data.len() as i32, timeout_ms)
-        };
+        let ret =
+            unsafe { sle_serdev_write(self.inner, data.as_ptr(), data.len() as i32, timeout_ms) };
         if ret < 0 {
             Err(Error::from_errno(ret))
         } else {
@@ -411,9 +384,7 @@ impl SleSerdevHandle {
     /// Non-blocking write. Returns number of bytes accepted.
     pub(crate) fn write_buf(&self, data: &[u8]) -> Result<usize> {
         // SAFETY: self.inner is valid, data pointer and length are consistent.
-        let ret = unsafe {
-            sle_serdev_write_buf(self.inner, data.as_ptr(), data.len() as i32)
-        };
+        let ret = unsafe { sle_serdev_write_buf(self.inner, data.as_ptr(), data.len() as i32) };
         if ret < 0 {
             Err(Error::from_errno(ret))
         } else {
@@ -536,14 +507,18 @@ pub(crate) fn serdev_probe(
         let mut real_addr = addr;
         let mut mac_buf = [0u8; 6];
         // SAFETY: dev_id is valid, mac_buf is a valid 6-byte buffer.
-        if unsafe {
-            sle_serdev_dev_get_mac(i32::from(dev_id), mac_buf.as_mut_ptr())
-        } == 0 && mac_buf != [0u8; 6] {
+        if unsafe { sle_serdev_dev_get_mac(i32::from(dev_id), mac_buf.as_mut_ptr()) } == 0
+            && mac_buf != [0u8; 6]
+        {
             real_addr = mac_buf;
             pr_info!(
                 "sparklink-serdev: controller MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
-                real_addr[0], real_addr[1], real_addr[2],
-                real_addr[3], real_addr[4], real_addr[5]
+                real_addr[0],
+                real_addr[1],
+                real_addr[2],
+                real_addr[3],
+                real_addr[4],
+                real_addr[5]
             );
         }
         // SAFETY: dev_id is valid.

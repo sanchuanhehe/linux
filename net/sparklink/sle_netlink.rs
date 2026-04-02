@@ -21,8 +21,8 @@
 
 #![allow(dead_code, unreachable_pub)]
 
-use kernel::prelude::*;
 use kernel::alloc::KVec;
+use kernel::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Family identification
@@ -43,34 +43,34 @@ pub const MCGRP_EVENTS: &[u8] = b"events\0";
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NlCmd {
-    Unspec          = 0,
-    GetDevInfo      = 1,
-    DevRegister     = 2,
-    DevUnregister   = 3,
-    StartAdv        = 4,
-    StopAdv         = 5,
-    StartScan       = 6,
-    StopScan        = 7,
-    InjectAdv       = 8,
-    Connect         = 9,
-    Disconnect      = 10,
-    GetConnInfo     = 11,
-    ConnSend        = 12,
-    ConnRecv        = 13,
-    GetConnList     = 14,
-    SetPsk          = 15,
-    Pair            = 16,
-    GetSecInfo      = 17,
-    EncryptOn       = 18,
-    SsapRegister    = 19,
-    GetSsapInfo     = 20,
-    SsapRead        = 21,
-    SsapWrite       = 22,
-    GetPmInfo       = 23,
-    SetPmState      = 24,
-    SetPmInterval   = 25,
-    Event           = 26,
-    GetDliInfo      = 27,
+    Unspec = 0,
+    GetDevInfo = 1,
+    DevRegister = 2,
+    DevUnregister = 3,
+    StartAdv = 4,
+    StopAdv = 5,
+    StartScan = 6,
+    StopScan = 7,
+    InjectAdv = 8,
+    Connect = 9,
+    Disconnect = 10,
+    GetConnInfo = 11,
+    ConnSend = 12,
+    ConnRecv = 13,
+    GetConnList = 14,
+    SetPsk = 15,
+    Pair = 16,
+    GetSecInfo = 17,
+    EncryptOn = 18,
+    SsapRegister = 19,
+    GetSsapInfo = 20,
+    SsapRead = 21,
+    SsapWrite = 22,
+    GetPmInfo = 23,
+    SetPmState = 24,
+    SetPmInterval = 25,
+    Event = 26,
+    GetDliInfo = 27,
 }
 
 impl NlCmd {
@@ -86,64 +86,64 @@ impl NlCmd {
 #[repr(u16)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NlAttr {
-    Unspec          = 0,
+    Unspec = 0,
     // Device
-    DevIndex        = 1,
-    DevState        = 2,
-    DevName         = 3,
-    DevBus          = 4,
-    DevCount        = 5,
+    DevIndex = 1,
+    DevState = 2,
+    DevName = 3,
+    DevBus = 4,
+    DevCount = 5,
     // Address
-    Addr            = 6,
-    PeerAddr        = 7,
+    Addr = 6,
+    PeerAddr = 7,
     // Connection
-    Handle          = 8,
-    ConnState       = 9,
-    GtRole          = 10,
-    Bandwidth       = 11,
-    McsIndex        = 12,
-    TxBytes         = 13,
-    RxBytes         = 14,
-    Timeout10ms     = 15,
+    Handle = 8,
+    ConnState = 9,
+    GtRole = 10,
+    Bandwidth = 11,
+    McsIndex = 12,
+    TxBytes = 13,
+    RxBytes = 14,
+    Timeout10ms = 15,
     // Adv/scan
-    DiscoveryLevel  = 16,
-    IntervalMs      = 17,
-    WindowMs        = 18,
-    Rssi            = 19,
-    ScanResults     = 20,
+    DiscoveryLevel = 16,
+    IntervalMs = 17,
+    WindowMs = 18,
+    Rssi = 19,
+    ScanResults = 20,
     // Data
-    Data            = 21,
-    DataLen         = 22,
+    Data = 21,
+    DataLen = 22,
     // Security
-    Psk             = 23,
-    PairMethod      = 24,
-    SecState        = 25,
-    SecMode         = 26,
-    Encrypted       = 27,
-    KeyFingerprint  = 28,
+    Psk = 23,
+    PairMethod = 24,
+    SecState = 25,
+    SecMode = 26,
+    Encrypted = 27,
+    KeyFingerprint = 28,
     // SSAP
-    SvcCount        = 29,
-    PropCount       = 30,
-    PropHandle      = 31,
-    Mtu             = 32,
+    SvcCount = 29,
+    PropCount = 30,
+    PropHandle = 31,
+    Mtu = 32,
     // Power
-    PmState         = 33,
-    ForceActive     = 34,
-    PowerPct        = 35,
-    PmIntervalMin   = 36,
-    PmIntervalMax   = 37,
-    PmLatency       = 38,
+    PmState = 33,
+    ForceActive = 34,
+    PowerPct = 35,
+    PmIntervalMin = 36,
+    PmIntervalMax = 37,
+    PmLatency = 38,
     // Events
-    EventType       = 39,
-    EventPayload    = 40,
-    EventPending    = 41,
-    EventTotal      = 42,
-    EventDropped    = 43,
+    EventType = 39,
+    EventPayload = 40,
+    EventPending = 41,
+    EventTotal = 42,
+    EventDropped = 43,
     // DLI
-    DliBus          = 44,
-    DliFwVer        = 45,
-    DliFeatures     = 46,
-    DliMaxConn      = 47,
+    DliBus = 44,
+    DliFwVer = 45,
+    DliFeatures = 46,
+    DliMaxConn = 47,
 }
 
 impl NlAttr {
@@ -295,14 +295,9 @@ impl<'a> Iterator for NlAttrIter<'a> {
             return None;
         }
 
-        let nla_len = u16::from_le_bytes([
-            self.buf[self.offset],
-            self.buf[self.offset + 1],
-        ]) as usize;
-        let nla_type = u16::from_le_bytes([
-            self.buf[self.offset + 2],
-            self.buf[self.offset + 3],
-        ]);
+        let nla_len =
+            u16::from_le_bytes([self.buf[self.offset], self.buf[self.offset + 1]]) as usize;
+        let nla_type = u16::from_le_bytes([self.buf[self.offset + 2], self.buf[self.offset + 3]]);
 
         if nla_len < NLA_HDRLEN || self.offset + nla_len > self.buf.len() {
             return None;
@@ -340,8 +335,10 @@ pub fn attr_get_u16(attr: &ParsedAttr<'_>) -> Option<u16> {
 pub fn attr_get_u32(attr: &ParsedAttr<'_>) -> Option<u32> {
     if attr.payload.len() >= 4 {
         Some(u32::from_le_bytes([
-            attr.payload[0], attr.payload[1],
-            attr.payload[2], attr.payload[3],
+            attr.payload[0],
+            attr.payload[1],
+            attr.payload[2],
+            attr.payload[3],
         ]))
     } else {
         None
@@ -352,10 +349,14 @@ pub fn attr_get_u32(attr: &ParsedAttr<'_>) -> Option<u32> {
 pub fn attr_get_u64(attr: &ParsedAttr<'_>) -> Option<u64> {
     if attr.payload.len() >= 8 {
         Some(u64::from_le_bytes([
-            attr.payload[0], attr.payload[1],
-            attr.payload[2], attr.payload[3],
-            attr.payload[4], attr.payload[5],
-            attr.payload[6], attr.payload[7],
+            attr.payload[0],
+            attr.payload[1],
+            attr.payload[2],
+            attr.payload[3],
+            attr.payload[4],
+            attr.payload[5],
+            attr.payload[6],
+            attr.payload[7],
         ]))
     } else {
         None

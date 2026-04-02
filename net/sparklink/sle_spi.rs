@@ -41,15 +41,14 @@
 
 #![allow(dead_code, unreachable_pub)]
 
-use kernel::prelude::*;
-use kernel::alloc::KVec;
 use core::cell::Cell;
 use core::cell::RefCell;
+use kernel::alloc::KVec;
+use kernel::prelude::*;
 
 use super::sle_dli::{
-    DliPacketType, SleBus, SleController, SleControllerInfo, SleEvent,
-    SleFeature, SleOpcode, SleStatus,
-    SLE_TRANSPORT_UNRELIABLE, SLE_MEAS_RSSI, SLE_SEC_AES_CCM,
+    DliPacketType, SleBus, SleController, SleControllerInfo, SleEvent, SleFeature, SleOpcode,
+    SleStatus, SLE_MEAS_RSSI, SLE_SEC_AES_CCM, SLE_TRANSPORT_UNRELIABLE,
 };
 
 // =========================================================================
@@ -224,7 +223,12 @@ pub fn parse_spi_rx_frame(data: &[u8]) -> Option<SpiFrame> {
             for &b in &data[5..5 + data_len] {
                 let _ = payload.push(b, GFP_KERNEL);
             }
-            Some(SpiFrame::Data { pkt_type, handle, flags, payload })
+            Some(SpiFrame::Data {
+                pkt_type,
+                handle,
+                flags,
+                payload,
+            })
         }
     }
 }
@@ -232,10 +236,7 @@ pub fn parse_spi_rx_frame(data: &[u8]) -> Option<SpiFrame> {
 /// Parsed frame from the SPI RX FIFO.
 pub enum SpiFrame {
     /// Event frame from the controller.
-    Event {
-        event_code: u16,
-        params: KVec<u8>,
-    },
+    Event { event_code: u16, params: KVec<u8> },
     /// Data frame from the controller.
     Data {
         pkt_type: DliPacketType,
@@ -402,8 +403,11 @@ impl SleController for SpiController {
             return Err(EBUSY);
         }
         self.opened.set(true);
-        pr_info!("sparklink-spi: open freq={}Hz mode={}\n",
-                 self.config.freq_hz, self.config.mode);
+        pr_info!(
+            "sparklink-spi: open freq={}Hz mode={}\n",
+            self.config.freq_hz,
+            self.config.mode
+        );
         Ok(())
     }
 
@@ -415,13 +419,17 @@ impl SleController for SpiController {
     fn send_command(&self, opcode: SleOpcode, params: &[u8]) -> Result {
         let mut hdr_buf = [0u8; 8];
         let mut data_buf = [0u8; 260];
-        let (hdr_len, data_len) = self.prepare_command(
-            opcode as u16, params, &mut hdr_buf, &mut data_buf);
+        let (hdr_len, data_len) =
+            self.prepare_command(opcode as u16, params, &mut hdr_buf, &mut data_buf);
         if hdr_len == 0 {
             return Err(EINVAL);
         }
-        pr_debug!("sparklink-spi: cmd 0x{:04x} hdr={} data={}\n",
-                  opcode as u16, hdr_len, data_len);
+        pr_debug!(
+            "sparklink-spi: cmd 0x{:04x} hdr={} data={}\n",
+            opcode as u16,
+            hdr_len,
+            data_len
+        );
         self.enqueue_event(SleEvent::CommandComplete {
             opcode,
             status: SleStatus::Success,
@@ -433,13 +441,16 @@ impl SleController for SpiController {
     fn send_data(&self, handle: u16, data: &[u8]) -> Result {
         let mut hdr_buf = [0u8; 8];
         let mut data_buf = [0u8; 260];
-        let (hdr_len, data_len) = self.prepare_data(
-            handle, data, &mut hdr_buf, &mut data_buf);
+        let (hdr_len, data_len) = self.prepare_data(handle, data, &mut hdr_buf, &mut data_buf);
         if hdr_len == 0 {
             return Err(EINVAL);
         }
-        pr_debug!("sparklink-spi: data handle={} hdr={} payload={}\n",
-                  handle, hdr_len, data_len);
+        pr_debug!(
+            "sparklink-spi: data handle={} hdr={} payload={}\n",
+            handle,
+            hdr_len,
+            data_len
+        );
         Ok(())
     }
 
@@ -449,7 +460,8 @@ impl SleController for SpiController {
             return None;
         }
         let ev = self.pending_events.borrow_mut()[head].take();
-        self.event_head.set((head + 1) % super::sle_dli::CTRL_EVENT_RING_SIZE);
+        self.event_head
+            .set((head + 1) % super::sle_dli::CTRL_EVENT_RING_SIZE);
         ev
     }
 

@@ -12,8 +12,8 @@
 
 #![allow(dead_code)]
 
-use kernel::prelude::*;
 use core::sync::atomic::{AtomicU32, Ordering};
+use kernel::prelude::*;
 
 use crate::sle_dli::{SleBus, SleControllerInfo};
 
@@ -22,21 +22,21 @@ use crate::sle_dli::{SleBus, SleControllerInfo};
 // ---------------------------------------------------------------------------
 
 /// Device has been inserted into the global registry.
-pub(crate) const SLE_DEV_REGISTERED: u32    = 1 << 0;
+pub(crate) const SLE_DEV_REGISTERED: u32 = 1 << 0;
 /// Device is up and ready for operations.
-pub(crate) const SLE_DEV_UP: u32            = 1 << 1;
+pub(crate) const SLE_DEV_UP: u32 = 1 << 1;
 /// Device is performing initial setup / firmware handshake.
-pub(crate) const SLE_DEV_SETUP: u32         = 1 << 2;
+pub(crate) const SLE_DEV_SETUP: u32 = 1 << 2;
 /// Device is being torn down (unregister in progress).
 pub(crate) const SLE_DEV_UNREGISTERING: u32 = 1 << 3;
 /// Device is actively advertising.
-pub(crate) const SLE_DEV_ADVERTISING: u32   = 1 << 4;
+pub(crate) const SLE_DEV_ADVERTISING: u32 = 1 << 4;
 /// Device is actively scanning.
-pub(crate) const SLE_DEV_SCANNING: u32      = 1 << 5;
+pub(crate) const SLE_DEV_SCANNING: u32 = 1 << 5;
 /// Device has at least one active connection.
-pub(crate) const SLE_DEV_CONNECTED: u32     = 1 << 6;
+pub(crate) const SLE_DEV_CONNECTED: u32 = 1 << 6;
 /// Device radio is suspended (low-power state).
-pub(crate) const SLE_DEV_SUSPENDED: u32     = 1 << 7;
+pub(crate) const SLE_DEV_SUSPENDED: u32 = 1 << 7;
 
 // ---------------------------------------------------------------------------
 // Per-device statistics
@@ -139,7 +139,11 @@ impl SleDev {
 
     /// Device name as a byte slice (without trailing NUL bytes).
     pub(crate) fn name(&self) -> &[u8] {
-        let end = self.name.iter().position(|&b| b == 0).unwrap_or(SLE_DEV_NAME_LEN);
+        let end = self
+            .name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(SLE_DEV_NAME_LEN);
         &self.name[..end]
     }
 
@@ -201,7 +205,8 @@ impl SleDev {
     /// Mark setup as complete. Transitions from `SETUP` to `UP | REGISTERED`.
     pub(crate) fn setup_complete(&self) {
         self.flags.fetch_and(!SLE_DEV_SETUP, Ordering::AcqRel);
-        self.flags.fetch_or(SLE_DEV_UP | SLE_DEV_REGISTERED, Ordering::AcqRel);
+        self.flags
+            .fetch_or(SLE_DEV_UP | SLE_DEV_REGISTERED, Ordering::AcqRel);
     }
 
     /// Check whether the device is operational (UP and not UNREGISTERING/SUSPENDED).

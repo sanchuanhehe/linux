@@ -60,8 +60,8 @@ pub struct ConnInterval {
 impl Default for ConnInterval {
     fn default() -> Self {
         Self {
-            min_interval: 24,   // 30 ms
-            max_interval: 40,   // 50 ms
+            min_interval: 24,     // 30 ms
+            max_interval: 40,     // 50 ms
             current_interval: 32, // 40 ms
             latency: 0,
             supervision_timeout: 200, // 2 s
@@ -121,8 +121,8 @@ pub struct SniffParams {
 impl Default for SniffParams {
     fn default() -> Self {
         Self {
-            sniff_interval: 800,  // 1 s
-            sniff_window: 16,     // 20 ms
+            sniff_interval: 800, // 1 s
+            sniff_window: 16,    // 20 ms
             sniff_attempt: 4,
             sniff_timeout: 2,
         }
@@ -183,8 +183,8 @@ impl PowerInner {
             sniff: SniffParams::default(),
             force_active: false,
             idle_count: 0,
-            sniff_threshold: 50,   // enter sniff after ~50 idle events
-            idle_threshold: 200,   // enter idle after ~200 sniff intervals
+            sniff_threshold: 50, // enter sniff after ~50 idle events
+            idle_threshold: 200, // enter idle after ~200 sniff intervals
             stats: PowerStats::default(),
         }
     }

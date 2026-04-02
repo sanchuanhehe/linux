@@ -21,19 +21,18 @@
 
 #![allow(dead_code, unreachable_pub)]
 
-use kernel::prelude::*;
 use kernel::alloc::KVec;
 use kernel::device;
+use kernel::prelude::*;
 use kernel::usb;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::sle_dli::{
-    ControllerEventRing, DliPacketType, SleBus, SleController, SleControllerInfo,
-    SleEvent, SleFeature, SleOpcode, SleStatus,
-    SLE_TRANSPORT_UNRELIABLE, SLE_TRANSPORT_RELIABLE, SLE_TRANSPORT_FRAGMENTED,
-    SLE_MEAS_RSSI, SLE_MEAS_PATH_LOSS,
-    SLE_SEC_AES_CCM, SLE_SEC_ECDH_P256, SLE_SEC_SC,
+    ControllerEventRing, DliPacketType, SleBus, SleController, SleControllerInfo, SleEvent,
+    SleFeature, SleOpcode, SleStatus, SLE_MEAS_PATH_LOSS, SLE_MEAS_RSSI, SLE_SEC_AES_CCM,
+    SLE_SEC_ECDH_P256, SLE_SEC_SC, SLE_TRANSPORT_FRAGMENTED, SLE_TRANSPORT_RELIABLE,
+    SLE_TRANSPORT_UNRELIABLE,
 };
 use super::sle_transport::{SleAttachInfo, SleProtoId};
 
@@ -59,9 +58,7 @@ pub(crate) unsafe fn init_usb_event_ring() {
 
 /// Drain up to `max` tagged events from the global USB event ring.
 /// Returns a fixed-size array and the number of valid entries.
-pub(crate) fn drain_usb_events(
-    out: &mut [(Option<u16>, Option<SleEvent>)],
-) -> usize {
+pub(crate) fn drain_usb_events(out: &mut [(Option<u16>, Option<SleEvent>)]) -> usize {
     let max = out.len();
     let mut count = 0usize;
     if let Some(ref mut ring) = *USB_EVENT_RING.lock() {
@@ -134,18 +131,8 @@ extern "C" {
     // Per-device USB state table: high-level send functions
     fn sle_usb_dev_register(dev_id: i32, intf_ptr: *mut core::ffi::c_void) -> i32;
     fn sle_usb_dev_unregister(dev_id: i32);
-    fn sle_usb_dev_send_cmd(
-        dev_id: i32,
-        opcode: u16,
-        params: *const u8,
-        plen: i32,
-    ) -> i32;
-    fn sle_usb_dev_send_data(
-        dev_id: i32,
-        handle: u16,
-        data: *const u8,
-        len: i32,
-    ) -> i32;
+    fn sle_usb_dev_send_cmd(dev_id: i32, opcode: u16, params: *const u8, plen: i32) -> i32;
+    fn sle_usb_dev_send_data(dev_id: i32, handle: u16, data: *const u8, len: i32) -> i32;
     fn sle_usb_dev_start_evt(dev_id: i32) -> i32;
     fn sle_usb_dev_stop_evt(dev_id: i32);
     fn sle_usb_dev_init_controller(dev_id: i32) -> i32;
@@ -225,9 +212,7 @@ impl SleUrbCtx {
         rust_ctx: *mut core::ffi::c_void,
     ) -> Result {
         // SAFETY: inner/udev_ptr valid by caller contract.
-        let ret = unsafe {
-            sle_usb_submit_bulk_in(self.inner, udev_ptr, ep, rust_ctx)
-        };
+        let ret = unsafe { sle_usb_submit_bulk_in(self.inner, udev_ptr, ep, rust_ctx) };
         if ret < 0 {
             Err(Error::from_errno(ret))
         } else {
@@ -244,9 +229,7 @@ impl SleUrbCtx {
         interval: i32,
     ) -> Result {
         // SAFETY: inner/udev_ptr valid by caller contract.
-        let ret = unsafe {
-            sle_usb_submit_intr_in(self.inner, udev_ptr, ep, rust_ctx, interval)
-        };
+        let ret = unsafe { sle_usb_submit_intr_in(self.inner, udev_ptr, ep, rust_ctx, interval) };
         if ret < 0 {
             Err(Error::from_errno(ret))
         } else {
@@ -342,7 +325,11 @@ pub(crate) extern "C" fn sparklink_usb_complete(
     // Decode dev_id from context: ctx = (dev_id + 1), 0 means unknown
     let dev_id: Option<u16> = {
         let raw = _ctx as usize;
-        if raw > 0 { Some((raw - 1) as u16) } else { None }
+        if raw > 0 {
+            Some((raw - 1) as u16)
+        } else {
+            None
+        }
     };
 
     let len = length as usize;
@@ -359,13 +346,19 @@ pub(crate) extern "C" fn sparklink_usb_complete(
                     ring.push_tagged(dev_id, sle_evt);
                 }
             } else {
-                pr_debug!("sparklink-usb: unknown event code=0x{:04x} len={}\n",
-                         evt.event_code, len);
+                pr_debug!(
+                    "sparklink-usb: unknown event code=0x{:04x} len={}\n",
+                    evt.event_code,
+                    len
+                );
             }
         }
         Err(_) => {
-            pr_debug!("sparklink-usb: parse failed len={} first={:02x}\n",
-                     len, if len > 0 { slice[0] } else { 0 });
+            pr_debug!(
+                "sparklink-usb: parse failed len={} first={:02x}\n",
+                len,
+                if len > 0 { slice[0] } else { 0 }
+            );
         }
     }
 }
@@ -477,9 +470,8 @@ pub fn build_async_data_packet(
 
     buf.push(DliPacketType::AsyncUnicast as u8, GFP_KERNEL)?;
 
-    let link_id_seg: u16 = ((link_id & 0x0FFF) << 4)
-        | (u16::from(seg & 0x03) << 2)
-        | u16::from(priority);
+    let link_id_seg: u16 =
+        ((link_id & 0x0FFF) << 4) | (u16::from(seg & 0x03) << 2) | u16::from(priority);
     buf.push(link_id_seg as u8, GFP_KERNEL)?;
     buf.push((link_id_seg >> 8) as u8, GFP_KERNEL)?;
 
@@ -662,7 +654,12 @@ pub fn event_to_sle(evt: &DliUsbEvent) -> Option<SleEvent> {
                 let _ = data.push(b, GFP_KERNEL);
             }
             let discovery_level = extract_discovery_level(data.as_slice());
-            Some(SleEvent::AdvReport { addr, rssi, discovery_level, data })
+            Some(SleEvent::AdvReport {
+                addr,
+                rssi,
+                discovery_level,
+                data,
+            })
         }
         // HwError (0x000A): [code:1]
         0x000A => {
@@ -925,9 +922,8 @@ impl SleController for UsbController {
         info.max_connections = 8;
         info.max_mtu = 512;
         info.max_mps = 255;
-        info.transport_modes = SLE_TRANSPORT_UNRELIABLE
-            | SLE_TRANSPORT_RELIABLE
-            | SLE_TRANSPORT_FRAGMENTED;
+        info.transport_modes =
+            SLE_TRANSPORT_UNRELIABLE | SLE_TRANSPORT_RELIABLE | SLE_TRANSPORT_FRAGMENTED;
         info.measurement_cap = SLE_MEAS_RSSI | SLE_MEAS_PATH_LOSS;
         info.security_cap = SLE_SEC_AES_CCM | SLE_SEC_ECDH_P256 | SLE_SEC_SC;
         info
@@ -993,11 +989,7 @@ impl SleController for UsbController {
             )
         };
         if ret < 0 {
-            pr_debug!(
-                "sparklink-usb: data tx handle={} failed: {}\n",
-                handle,
-                ret
-            );
+            pr_debug!("sparklink-usb: data tx handle={} failed: {}\n", handle, ret);
             return Err(Error::from_errno(ret));
         }
         pr_debug!(
@@ -1042,11 +1034,7 @@ kernel::usb_device_table!(
         // Match by interface class/subclass/protocol:
         //   Wireless Controller (0xE0) / RF Controller (0x01) / SparkLink DLI (0x05)
         (
-            usb::DeviceId::from_interface_info(
-                SLE_USB_CLASS,
-                SLE_USB_SUBCLASS,
-                SLE_USB_PROTOCOL,
-            ),
+            usb::DeviceId::from_interface_info(SLE_USB_CLASS, SLE_USB_SUBCLASS, SLE_USB_PROTOCOL,),
             (),
         ),
     ]
@@ -1109,17 +1097,14 @@ impl usb::Driver for SleUsbDriver {
                     // from the C device table and update the device info.
                     let mut real_mac = [0u8; 6];
                     // SAFETY: dev_id is valid, real_mac buffer is 6 bytes.
-                    let mac_ret = unsafe {
-                        sle_usb_dev_get_mac(i32::from(dev_id), real_mac.as_mut_ptr())
-                    };
+                    let mac_ret =
+                        unsafe { sle_usb_dev_get_mac(i32::from(dev_id), real_mac.as_mut_ptr()) };
                     if mac_ret == 0 && real_mac != [0u8; 6] {
                         // Use real MAC from controller
                         addr = real_mac;
                     }
                     // SAFETY: dev_id is valid.
-                    fw_version = unsafe {
-                        sle_usb_dev_get_fw_version(i32::from(dev_id))
-                    };
+                    fw_version = unsafe { sle_usb_dev_get_fw_version(i32::from(dev_id)) };
                     pr_info!(
                         "sparklink-usb: init OK fw=0x{:08x} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
                         fw_version,
@@ -1129,15 +1114,11 @@ impl usb::Driver for SleUsbDriver {
                     // Attempt firmware download (non-fatal if firmware
                     // blob is absent or already programmed).
                     let fw_name = kernel::c_str!("sparklink/sle_usb_v1.bin");
-                    let kern_dev: &kernel::device::Device<kernel::device::Core> = interface.as_ref();
+                    let kern_dev: &kernel::device::Device<kernel::device::Core> =
+                        interface.as_ref();
                     match super::sle_fw::load_usb_firmware(dev_id, fw_name, kern_dev) {
-                        Ok(r) => pr_info!(
-                            "sparklink-usb: firmware loaded ({} bytes)\n",
-                            r.size
-                        ),
-                        Err(_) => pr_debug!(
-                            "sparklink-usb: firmware load skipped\n"
-                        ),
+                        Ok(r) => pr_info!("sparklink-usb: firmware loaded ({} bytes)\n", r.size),
+                        Err(_) => pr_debug!("sparklink-usb: firmware load skipped\n"),
                     }
                 }
             }
@@ -1184,10 +1165,7 @@ impl usb::Driver for SleUsbDriver {
         Ok(())
     }
 
-    fn resume(
-        _interface: &usb::Interface<device::Core>,
-        data: Pin<&Self>,
-    ) -> Result {
+    fn resume(_interface: &usb::Interface<device::Core>, data: Pin<&Self>) -> Result {
         let dev_id = data.dev_id;
         if dev_id == u16::MAX {
             return Ok(());

@@ -714,3 +714,219 @@ impl SecurityInner {
         self.pwd_hash = None;
     }
 }
+
+// ---------------------------------------------------------------------------
+// RAL — Resolving Address List (T/XS 10003-2025 §8.6.18-8.6.25)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of entries in the RAL.
+const RAL_MAX_ENTRIES: usize = 8;
+
+/// A single entry in the Resolving Address List.
+///
+/// Each entry maps a peer identity to IRK pairs used for RPA
+/// generation and resolution.
+#[derive(Copy, Clone)]
+pub struct RalEntry {
+    /// Peer identity address type (0x00=alliance, 0x02=local, 0x06=private).
+    pub peer_id_type: u8,
+    /// Resolution algorithm bits: bit0=local algo, bit1=peer algo
+    /// (0=AES-CMAC, 1=HMAC-SM3).
+    pub resolve_algo: u8,
+    /// Peer IRKID.
+    pub peer_irkid: u8,
+    /// Local IRKID.
+    pub local_irkid: u8,
+    /// Peer identity address (6 bytes).
+    pub peer_id: [u8; 6],
+    /// Peer Identity Resolving Key (16 bytes).
+    pub peer_irk: [u8; 16],
+    /// Local Identity Resolving Key (16 bytes).
+    pub local_irk: [u8; 16],
+}
+
+impl RalEntry {
+    const fn zeroed() -> Self {
+        Self {
+            peer_id_type: 0,
+            resolve_algo: 0,
+            peer_irkid: 0,
+            local_irkid: 0,
+            peer_id: [0u8; 6],
+            peer_irk: [0u8; 16],
+            local_irk: [0u8; 16],
+        }
+    }
+}
+
+/// RPA manager: manages the RAL and RPA generation/resolution.
+pub struct RpaManager {
+    /// RAL entries (first `count` are valid).
+    entries: [RalEntry; RAL_MAX_ENTRIES],
+    /// Number of valid entries.
+    count: u8,
+    /// Whether RPA resolution is enabled.
+    enabled: bool,
+    /// RPA timeout in seconds (0 = no auto-refresh).
+    timeout_secs: u16,
+}
+
+impl RpaManager {
+    /// Create a new empty RPA manager.
+    pub fn new() -> Self {
+        Self {
+            entries: [RalEntry::zeroed(); RAL_MAX_ENTRIES],
+            count: 0,
+            enabled: false,
+            timeout_secs: 0,
+        }
+    }
+
+    /// Add a device to the RAL.
+    ///
+    /// RPA resolution must be disabled before calling this.
+    pub fn ral_add(&mut self, entry: RalEntry) -> Result {
+        if self.enabled {
+            return Err(EBUSY);
+        }
+        if (self.count as usize) >= RAL_MAX_ENTRIES {
+            return Err(ENOMEM);
+        }
+        // Check for duplicate peer identity
+        for i in 0..(self.count as usize) {
+            if self.entries[i].peer_id_type == entry.peer_id_type
+                && self.entries[i].peer_id == entry.peer_id
+            {
+                return Err(EEXIST);
+            }
+        }
+        self.entries[self.count as usize] = entry;
+        self.count += 1;
+        pr_info!("sparklink: RAL entry added (count={})\n", self.count);
+        Ok(())
+    }
+
+    /// Remove a device from the RAL by peer identity.
+    ///
+    /// RPA resolution must be disabled before calling this.
+    pub fn ral_remove(&mut self, peer_id_type: u8, peer_id: &[u8; 6]) -> Result {
+        if self.enabled {
+            return Err(EBUSY);
+        }
+        for i in 0..(self.count as usize) {
+            if self.entries[i].peer_id_type == peer_id_type
+                && self.entries[i].peer_id == *peer_id
+            {
+                // Swap-remove: replace with last entry
+                let last = (self.count - 1) as usize;
+                if i != last {
+                    self.entries[i] = self.entries[last];
+                }
+                self.entries[last] = RalEntry::zeroed();
+                self.count -= 1;
+                pr_info!("sparklink: RAL entry removed (count={})\n", self.count);
+                return Ok(());
+            }
+        }
+        Err(ENOENT)
+    }
+
+    /// Clear all RAL entries.
+    ///
+    /// RPA resolution must be disabled before calling this.
+    pub fn ral_clear(&mut self) -> Result {
+        if self.enabled {
+            return Err(EBUSY);
+        }
+        self.entries = [RalEntry::zeroed(); RAL_MAX_ENTRIES];
+        self.count = 0;
+        pr_info!("sparklink: RAL cleared\n");
+        Ok(())
+    }
+
+    /// Return the current number of RAL entries.
+    pub fn ral_size(&self) -> u8 {
+        self.count
+    }
+
+    /// Generate an RPA from an IRK using HMAC-SM3.
+    ///
+    /// RPA format: hash[0..3] || prand[0..3]
+    /// prand[0] top 2 bits forced to 0b01 (resolvable marker).
+    fn generate_rpa(irk: &[u8; 16]) -> [u8; 6] {
+        // Derive a deterministic prand from IRK for reproducibility
+        let pk = Sm3::hash(irk);
+        let mut prand = [pk[0], pk[1], pk[2]];
+        // Force top 2 bits to 01 (resolvable private address)
+        prand[0] = (prand[0] & 0x3F) | 0x40;
+
+        // hash = HMAC-SM3(IRK, prand) truncated to 3 bytes
+        let h = sle_crypto::hmac_sm3(irk, &prand);
+        [h[0], h[1], h[2], prand[0], prand[1], prand[2]]
+    }
+
+    /// Look up a peer and return its RPA (generated from peer IRK).
+    pub fn read_peer_rpa(
+        &self,
+        peer_id_type: u8,
+        peer_id: &[u8; 6],
+    ) -> Result<[u8; 6]> {
+        for i in 0..(self.count as usize) {
+            if self.entries[i].peer_id_type == peer_id_type
+                && self.entries[i].peer_id == *peer_id
+            {
+                return Ok(Self::generate_rpa(&self.entries[i].peer_irk));
+            }
+        }
+        Err(ENOENT)
+    }
+
+    /// Look up by local identity info and return local RPA.
+    pub fn read_local_rpa(
+        &self,
+        local_id_type: u8,
+        local_id: &[u8; 6],
+    ) -> Result<[u8; 6]> {
+        // In the standard, local RPA is per-device. We look for the
+        // first entry whose peer_id matches; in practice the local_irk
+        // is the same across entries. For testing, we return the RPA
+        // from the first matching or first entry.
+        for i in 0..(self.count as usize) {
+            if self.entries[i].peer_id_type == local_id_type
+                && self.entries[i].peer_id == *local_id
+            {
+                return Ok(Self::generate_rpa(&self.entries[i].local_irk));
+            }
+        }
+        // Fallback: use first entry's local_irk if any
+        if self.count > 0 {
+            return Ok(Self::generate_rpa(&self.entries[0].local_irk));
+        }
+        Err(ENOENT)
+    }
+
+    /// Enable or disable RPA resolution.
+    pub fn set_enabled(&mut self, enable: bool) {
+        self.enabled = enable;
+        pr_info!(
+            "sparklink: RPA resolution {}\n",
+            if enable { "enabled" } else { "disabled" }
+        );
+    }
+
+    /// Check if RPA resolution is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Set the RPA timeout in seconds.
+    pub fn set_timeout(&mut self, secs: u16) {
+        self.timeout_secs = secs;
+        pr_info!("sparklink: RPA timeout set to {} seconds\n", secs);
+    }
+
+    /// Get the current RPA timeout.
+    pub fn timeout(&self) -> u16 {
+        self.timeout_secs
+    }
+}

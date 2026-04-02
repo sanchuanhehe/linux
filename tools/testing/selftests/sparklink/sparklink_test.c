@@ -166,6 +166,16 @@
 #define SL_IOCTL_SET_ROLE        _IOW(SL_MAGIC, 0xA0, uint8_t)
 #define SL_IOCTL_GET_ROLE        _IOR(SL_MAGIC, 0xA1, uint8_t)
 
+/* RAL / RPA management */
+#define SL_IOCTL_RAL_ADD         _IOW(SL_MAGIC, 0xB0, struct sle_ral_add_params)
+#define SL_IOCTL_RAL_REMOVE      _IOW(SL_MAGIC, 0xB1, struct sle_ral_remove_params)
+#define SL_IOCTL_RAL_CLEAR       _IO(SL_MAGIC, 0xB2)
+#define SL_IOCTL_RAL_SIZE        _IOR(SL_MAGIC, 0xB3, uint8_t)
+#define SL_IOCTL_RAL_READ_PEER_RPA  _IOWR(SL_MAGIC, 0xB4, struct sle_ral_query_params)
+#define SL_IOCTL_RAL_READ_LOCAL_RPA _IOWR(SL_MAGIC, 0xB5, struct sle_ral_query_params)
+#define SL_IOCTL_RPA_ENABLE      _IOW(SL_MAGIC, 0xB6, uint8_t)
+#define SL_IOCTL_RPA_SET_TIMEOUT _IOW(SL_MAGIC, 0xB7, uint16_t)
+
 /* ------------------------------------------------------------------ */
 /* Userspace data structures — must match repr(C) in sparklink_core   */
 /* ------------------------------------------------------------------ */
@@ -454,6 +464,31 @@ struct sle_password_params {
 	uint8_t  len;
 	uint8_t  _reserved[3];
 	uint8_t  data[32];
+} __attribute__((packed));
+
+struct sle_ral_add_params {
+	uint8_t  resolve_algo;
+	uint8_t  peer_id_type;
+	uint8_t  peer_irkid;
+	uint8_t  local_irkid;
+	uint8_t  peer_id[6];
+	uint8_t  _reserved[2];
+	uint8_t  peer_irk[16];
+	uint8_t  local_irk[16];
+} __attribute__((packed));
+
+struct sle_ral_remove_params {
+	uint8_t  peer_id_type;
+	uint8_t  _reserved;
+	uint8_t  peer_id[6];
+} __attribute__((packed));
+
+struct sle_ral_query_params {
+	uint8_t  id_type;
+	uint8_t  _reserved;
+	uint8_t  id[6];
+	uint8_t  rpa[6];
+	uint8_t  _pad[2];
 } __attribute__((packed));
 
 struct sle_hash_test {
@@ -2075,6 +2110,288 @@ static void test_security_oob_pin_password(int fd)
 
 	printf("  OOB/Passkey/Password: %d OK, %d FAIL\n", ok_count,
 	       fail_count);
+}
+
+/* ****************************************************************** *
+ * test_rpa_management                                                *
+ *   Resolving Address List and RPA generation/resolution.            *
+ * ****************************************************************** */
+
+static void test_rpa_management(int fd)
+{
+	test_header("RPA: RAL management and RPA generation");
+
+	int ok_count = 0, fail_count = 0;
+	int ret;
+
+	/* 1. RAL should start empty */
+	uint8_t count = 0xFF;
+	ret = ioctl(fd, SL_IOCTL_RAL_SIZE, &count);
+	if (ret == 0 && count == 0) {
+		printf("  OK:   RAL initial size is 0\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL initial size expected 0, got %u (ret=%d)\n",
+		       count, ret);
+		fail_count++;
+	}
+
+	/* 2. Add first device to RAL */
+	struct sle_ral_add_params add;
+	memset(&add, 0, sizeof(add));
+	add.resolve_algo = 0x01; /* HMAC-SM3 for local */
+	add.peer_id_type = 0x00;
+	add.peer_irkid = 1;
+	add.local_irkid = 2;
+	uint8_t peer_id1[6] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+	memcpy(add.peer_id, peer_id1, 6);
+	/* Fill IRKs with test patterns */
+	for (int i = 0; i < 16; i++) {
+		add.peer_irk[i] = (uint8_t)(0xA0 + i);
+		add.local_irk[i] = (uint8_t)(0xB0 + i);
+	}
+	ret = ioctl(fd, SL_IOCTL_RAL_ADD, &add);
+	if (ret == 0) {
+		printf("  OK:   RAL add device 1\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL add device 1: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 3. RAL size should be 1 */
+	count = 0xFF;
+	ret = ioctl(fd, SL_IOCTL_RAL_SIZE, &count);
+	if (ret == 0 && count == 1) {
+		printf("  OK:   RAL size is 1 after add\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL size expected 1, got %u\n", count);
+		fail_count++;
+	}
+
+	/* 4. Duplicate add should fail with EEXIST */
+	ret = ioctl(fd, SL_IOCTL_RAL_ADD, &add);
+	if (ret < 0 && errno == EEXIST) {
+		printf("  OK:   RAL duplicate add rejected (EEXIST)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL duplicate add should fail with EEXIST\n");
+		fail_count++;
+	}
+
+	/* 5. Add second device */
+	struct sle_ral_add_params add2;
+	memset(&add2, 0, sizeof(add2));
+	add2.resolve_algo = 0x02; /* HMAC-SM3 for peer */
+	add2.peer_id_type = 0x02;
+	add2.peer_irkid = 3;
+	add2.local_irkid = 4;
+	uint8_t peer_id2[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+	memcpy(add2.peer_id, peer_id2, 6);
+	for (int i = 0; i < 16; i++) {
+		add2.peer_irk[i] = (uint8_t)(0xC0 + i);
+		add2.local_irk[i] = (uint8_t)(0xD0 + i);
+	}
+	ret = ioctl(fd, SL_IOCTL_RAL_ADD, &add2);
+	if (ret == 0) {
+		printf("  OK:   RAL add device 2\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL add device 2: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 6. RAL size should be 2 */
+	count = 0xFF;
+	ret = ioctl(fd, SL_IOCTL_RAL_SIZE, &count);
+	if (ret == 0 && count == 2) {
+		printf("  OK:   RAL size is 2\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL size expected 2, got %u\n", count);
+		fail_count++;
+	}
+
+	/* 7. Read peer RPA for device 1 */
+	struct sle_ral_query_params qp;
+	memset(&qp, 0, sizeof(qp));
+	qp.id_type = 0x00;
+	memcpy(qp.id, peer_id1, 6);
+	ret = ioctl(fd, SL_IOCTL_RAL_READ_PEER_RPA, &qp);
+	if (ret == 0) {
+		/* Verify RPA has resolvable marker: top 2 bits of rpa[3] == 01 */
+		int resolvable = (qp.rpa[3] & 0xC0) == 0x40;
+		/* RPA should be non-zero */
+		int nonzero = 0;
+		for (int i = 0; i < 6; i++)
+			if (qp.rpa[i] != 0)
+				nonzero = 1;
+		if (resolvable && nonzero) {
+			printf("  OK:   read peer RPA (resolvable marker correct)\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: peer RPA format incorrect\n");
+			fail_count++;
+		}
+	} else {
+		printf("  FAIL: read peer RPA: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 8. Read local RPA for device 1 */
+	struct sle_ral_query_params ql;
+	memset(&ql, 0, sizeof(ql));
+	ql.id_type = 0x00;
+	memcpy(ql.id, peer_id1, 6);
+	ret = ioctl(fd, SL_IOCTL_RAL_READ_LOCAL_RPA, &ql);
+	if (ret == 0) {
+		int resolvable = (ql.rpa[3] & 0xC0) == 0x40;
+		int nonzero = 0;
+		for (int i = 0; i < 6; i++)
+			if (ql.rpa[i] != 0)
+				nonzero = 1;
+		if (resolvable && nonzero) {
+			printf("  OK:   read local RPA (resolvable marker correct)\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: local RPA format incorrect\n");
+			fail_count++;
+		}
+	} else {
+		printf("  FAIL: read local RPA: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 9. Peer RPA and local RPA should differ (different IRKs) */
+	if (memcmp(qp.rpa, ql.rpa, 6) != 0) {
+		printf("  OK:   peer RPA differs from local RPA\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: peer and local RPA should differ\n");
+		fail_count++;
+	}
+
+	/* 10. Enable RPA resolution */
+	uint8_t enable = 1;
+	ret = ioctl(fd, SL_IOCTL_RPA_ENABLE, &enable);
+	if (ret == 0) {
+		printf("  OK:   RPA resolution enabled\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RPA enable: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 11. RAL add should fail while RPA is enabled (EBUSY) */
+	ret = ioctl(fd, SL_IOCTL_RAL_ADD, &add2);
+	if (ret < 0 && errno == EBUSY) {
+		printf("  OK:   RAL add blocked while RPA enabled (EBUSY)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL add should fail with EBUSY when enabled\n");
+		fail_count++;
+	}
+
+	/* 12. RAL remove should fail while RPA is enabled (EBUSY) */
+	struct sle_ral_remove_params rm;
+	memset(&rm, 0, sizeof(rm));
+	rm.peer_id_type = 0x00;
+	memcpy(rm.peer_id, peer_id1, 6);
+	ret = ioctl(fd, SL_IOCTL_RAL_REMOVE, &rm);
+	if (ret < 0 && errno == EBUSY) {
+		printf("  OK:   RAL remove blocked while RPA enabled (EBUSY)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL remove should fail with EBUSY\n");
+		fail_count++;
+	}
+
+	/* 13. RAL clear should fail while RPA is enabled (EBUSY) */
+	ret = ioctl(fd, SL_IOCTL_RAL_CLEAR, NULL);
+	if (ret < 0 && errno == EBUSY) {
+		printf("  OK:   RAL clear blocked while RPA enabled (EBUSY)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL clear should fail with EBUSY\n");
+		fail_count++;
+	}
+
+	/* 14. Disable RPA resolution */
+	enable = 0;
+	ret = ioctl(fd, SL_IOCTL_RPA_ENABLE, &enable);
+	if (ret == 0) {
+		printf("  OK:   RPA resolution disabled\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RPA disable: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 15. Set RPA timeout */
+	uint16_t timeout = 900;
+	ret = ioctl(fd, SL_IOCTL_RPA_SET_TIMEOUT, &timeout);
+	if (ret == 0) {
+		printf("  OK:   RPA timeout set to 900s\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RPA set timeout: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 16. Remove device 1 */
+	ret = ioctl(fd, SL_IOCTL_RAL_REMOVE, &rm);
+	if (ret == 0) {
+		printf("  OK:   RAL remove device 1\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL remove device 1: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 17. RAL size should be 1 */
+	count = 0xFF;
+	ret = ioctl(fd, SL_IOCTL_RAL_SIZE, &count);
+	if (ret == 0 && count == 1) {
+		printf("  OK:   RAL size is 1 after remove\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL size expected 1, got %u\n", count);
+		fail_count++;
+	}
+
+	/* 18. Remove non-existent device should fail (ENOENT) */
+	ret = ioctl(fd, SL_IOCTL_RAL_REMOVE, &rm);
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   RAL remove non-existent device (ENOENT)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL remove non-existent should fail\n");
+		fail_count++;
+	}
+
+	/* 19. Clear RAL */
+	ret = ioctl(fd, SL_IOCTL_RAL_CLEAR, NULL);
+	if (ret == 0) {
+		printf("  OK:   RAL clear\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL clear: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 20. RAL size should be 0 after clear */
+	count = 0xFF;
+	ret = ioctl(fd, SL_IOCTL_RAL_SIZE, &count);
+	if (ret == 0 && count == 0) {
+		printf("  OK:   RAL size is 0 after clear\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RAL size expected 0, got %u\n", count);
+		fail_count++;
+	}
+
+	printf("  RPA management: %d OK, %d FAIL\n", ok_count, fail_count);
 }
 
 static void test_ssap_service(int fd)
@@ -8930,6 +9247,7 @@ int main(void)
 	test_security_ecdh(fd);
 	test_security_numeric_comparison(fd);
 	test_security_oob_pin_password(fd);
+	test_rpa_management(fd);
 	test_ssap_service(fd);
 	test_ssap_dynamic_registration(fd);
 	test_power_management(fd);

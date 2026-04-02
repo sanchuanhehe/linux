@@ -66,7 +66,7 @@ use kernel::{
 
 use sle_adv::{AdvParams, AdvScanInner, ScanParams};
 use sle_conn::{AccessResponseType, ConnManager, ConnState, GtRole, NegotiatedParams, CONN_DATA_MAX};
-use sle_security::SecurityInner;
+use sle_security::{SecurityInner, RpaManager, RalEntry};
 use sle_ssap::SsapInner;
 use sle_power::PowerInner;
 use sle_event::EventQueue;
@@ -699,6 +699,32 @@ const SL_IOCTL_SET_ROLE: u32 = _IOW::<u8>(SL_MAGIC, 0xA0);
 
 /// Get current local GT node role.
 const SL_IOCTL_GET_ROLE: u32 = _IOR::<u8>(SL_MAGIC, 0xA1);
+
+// --- RAL / RPA management ioctls (T/XS 10003-2025 §8.6.18-§8.6.25) ---
+
+/// Add a device to the Resolving Address List.
+const SL_IOCTL_RAL_ADD: u32 = _IOW::<SleRalAddParams>(SL_MAGIC, 0xB0);
+
+/// Remove a device from the RAL by peer identity.
+const SL_IOCTL_RAL_REMOVE: u32 = _IOW::<SleRalRemoveParams>(SL_MAGIC, 0xB1);
+
+/// Clear all RAL entries.
+const SL_IOCTL_RAL_CLEAR: u32 = _IO(SL_MAGIC, 0xB2);
+
+/// Read current RAL entry count.
+const SL_IOCTL_RAL_SIZE: u32 = _IOR::<u8>(SL_MAGIC, 0xB3);
+
+/// Read peer RPA for a given identity.
+const SL_IOCTL_RAL_READ_PEER_RPA: u32 = _IOWR::<SleRalQueryParams>(SL_MAGIC, 0xB4);
+
+/// Read local RPA for a given identity.
+const SL_IOCTL_RAL_READ_LOCAL_RPA: u32 = _IOWR::<SleRalQueryParams>(SL_MAGIC, 0xB5);
+
+/// Enable or disable RPA resolution.
+const SL_IOCTL_RPA_ENABLE: u32 = _IOW::<u8>(SL_MAGIC, 0xB6);
+
+/// Set RPA timeout in seconds.
+const SL_IOCTL_RPA_SET_TIMEOUT: u32 = _IOW::<u16>(SL_MAGIC, 0xB7);
 
 // ---------------------------------------------------------------------------
 // SparkLink address (6 bytes, same as SLE MAC layer identifier)
@@ -1455,6 +1481,61 @@ pub struct SlePasskeyInput {
 
 // SAFETY: SlePasskeyInput is repr(C) with only primitive fields.
 unsafe impl FromBytes for SlePasskeyInput {}
+
+/// Parameters for adding a device to the RAL.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleRalAddParams {
+    /// Resolution algorithm bits (bit0=local, bit1=peer; 0=AES-CMAC, 1=HMAC-SM3).
+    pub resolve_algo: u8,
+    /// Peer identity address type.
+    pub peer_id_type: u8,
+    /// Peer IRKID.
+    pub peer_irkid: u8,
+    /// Local IRKID.
+    pub local_irkid: u8,
+    /// Peer identity address (6 bytes).
+    pub peer_id: [u8; 6],
+    _reserved: [u8; 2],
+    /// Peer Identity Resolving Key (16 bytes).
+    pub peer_irk: [u8; 16],
+    /// Local Identity Resolving Key (16 bytes).
+    pub local_irk: [u8; 16],
+}
+
+// SAFETY: SleRalAddParams is repr(C) with only primitive fields.
+unsafe impl FromBytes for SleRalAddParams {}
+
+/// Parameters for removing a device from the RAL.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleRalRemoveParams {
+    /// Peer identity address type.
+    pub peer_id_type: u8,
+    _reserved: u8,
+    /// Peer identity address (6 bytes).
+    pub peer_id: [u8; 6],
+}
+
+// SAFETY: SleRalRemoveParams is repr(C) with only primitive fields.
+unsafe impl FromBytes for SleRalRemoveParams {}
+
+/// Query/result for reading a peer or local RPA.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleRalQueryParams {
+    /// Identity address type.
+    pub id_type: u8,
+    _reserved: u8,
+    /// Identity address (6 bytes).
+    pub id: [u8; 6],
+    /// Output: resolved RPA (6 bytes), filled by kernel.
+    pub rpa: [u8; 6],
+    _pad: [u8; 2],
+}
+
+// SAFETY: SleRalQueryParams is repr(C) with only primitive fields.
+unsafe impl FromBytes for SleRalQueryParams {}
 
 /// Security status returned to userspace.
 ///
@@ -2244,6 +2325,7 @@ struct SubsystemShared {
     conn: ConnManager,
     adv_scan: AdvScanInner,
     security: SecurityInner,
+    rpa: RpaManager,
     ssap: SsapInner,
     power: PowerInner,
     phy: sle_phy::PhyConfig,
@@ -3495,6 +3577,7 @@ impl kernel::InPlaceModule for SparkLinkModule {
                     conn,
                     adv_scan: AdvScanInner::new(addr, b"sparklink-ctl"),
                     security: SecurityInner::new(),
+                    rpa: RpaManager::new(),
                     ssap: SsapInner::new(),
                     power: PowerInner::new(),
                     phy: sle_phy::PhyConfig::default_config(),
@@ -3548,6 +3631,41 @@ fn ioctl_set_oob(arg: usize) -> Result {
     let s = ss.as_mut().ok_or(ENODEV)?;
     s.security.set_oob_data(&params.data);
     Ok(())
+}
+
+/// Handle RAL_ADD ioctl in a separate stack frame (SleRalAddParams is 44 bytes).
+#[inline(never)]
+fn ioctl_ral_add(arg: usize) -> Result {
+    let params: SleRalAddParams = read_user_struct(arg)?;
+    let entry = RalEntry {
+        peer_id_type: params.peer_id_type,
+        resolve_algo: params.resolve_algo,
+        peer_irkid: params.peer_irkid,
+        local_irkid: params.local_irkid,
+        peer_id: params.peer_id,
+        peer_irk: params.peer_irk,
+        local_irk: params.local_irk,
+    };
+    let mut ss = SUBSYSTEM.lock();
+    let s = ss.as_mut().ok_or(ENODEV)?;
+    s.rpa.ral_add(entry)
+}
+
+/// Handle RAL_READ_PEER_RPA / RAL_READ_LOCAL_RPA ioctls.
+#[inline(never)]
+fn ioctl_ral_read_rpa(arg: usize, is_local: bool) -> Result {
+    let mut params: SleRalQueryParams = read_user_struct(arg)?;
+    let rpa = {
+        let ss = SUBSYSTEM.lock();
+        let s = ss.as_ref().ok_or(ENODEV)?;
+        if is_local {
+            s.rpa.read_local_rpa(params.id_type, &params.id)?
+        } else {
+            s.rpa.read_peer_rpa(params.id_type, &params.id)?
+        }
+    };
+    params.rpa = rpa;
+    write_user_struct(arg, &params)
 }
 
 #[vtable]
@@ -5014,6 +5132,53 @@ impl MiscDevice for SparkLinkCtl {
                 let ss = SUBSYSTEM.lock();
                 let s = ss.as_ref().ok_or(ENODEV)?;
                 write_user_struct(arg, &(s.local_role as u8))?;
+                Ok(0)
+            }
+            // --- RAL / RPA management ---
+            SL_IOCTL_RAL_ADD => {
+                ioctl_ral_add(arg)?;
+                Ok(0)
+            }
+            SL_IOCTL_RAL_REMOVE => {
+                let params: SleRalRemoveParams = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.rpa.ral_remove(params.peer_id_type, &params.peer_id)?;
+                Ok(0)
+            }
+            SL_IOCTL_RAL_CLEAR => {
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.rpa.ral_clear()?;
+                Ok(0)
+            }
+            SL_IOCTL_RAL_SIZE => {
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let count = s.rpa.ral_size();
+                write_user_struct(arg, &count)?;
+                Ok(0)
+            }
+            SL_IOCTL_RAL_READ_PEER_RPA => {
+                ioctl_ral_read_rpa(arg, false)?;
+                Ok(0)
+            }
+            SL_IOCTL_RAL_READ_LOCAL_RPA => {
+                ioctl_ral_read_rpa(arg, true)?;
+                Ok(0)
+            }
+            SL_IOCTL_RPA_ENABLE => {
+                let enable: u8 = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.rpa.set_enabled(enable != 0);
+                Ok(0)
+            }
+            SL_IOCTL_RPA_SET_TIMEOUT => {
+                let secs: u16 = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.rpa.set_timeout(secs);
                 Ok(0)
             }
             _ => {

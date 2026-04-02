@@ -171,6 +171,8 @@ pub(crate) struct SleAttachInfo {
     pub fw_version: u32,
     /// Feature bitmask (0 if not yet read).
     pub features: u64,
+    /// Extended feature bits 64-72.
+    pub features_ext: u16,
     /// Maximum PDU payload size (0 = use protocol default).
     pub max_pdu: u16,
     /// Maximum concurrent connections (0 = use protocol default).
@@ -185,6 +187,7 @@ impl SleAttachInfo {
             addr,
             fw_version: 0,
             features: 0,
+            features_ext: 0,
             max_pdu: 0,
             max_connections: 0,
         }

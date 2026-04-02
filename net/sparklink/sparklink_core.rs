@@ -275,7 +275,8 @@ pub struct GenlDliInfo {
     pub max_mps: u16,
     /// Security capabilities (bitmask).
     pub security_cap: u16,
-    _pad: [u8; 2],
+    /// Extended feature bits 64-72.
+    pub features_ext: u16,
 }
 
 /// Get DLI controller info (C FFI export).
@@ -297,10 +298,10 @@ pub unsafe extern "C" fn sparklink_genl_get_dli_info(out: *mut GenlDliInfo) -> i
             info.measurement_cap = ci.measurement_cap;
             info.fw_version = ci.fw_version;
             info.features = ci.features;
+            info.features_ext = ci.features_ext;
             info.max_mtu = ci.max_mtu;
             info.max_mps = ci.max_mps;
             info.security_cap = ci.security_cap;
-            info._pad = [0u8; 2];
             0
         }
         None => -(bindings::ENODEV as i32),
@@ -1644,9 +1645,11 @@ pub struct SleDliInfo {
     pub max_mps: u16,
     /// Security capabilities (bitmask).
     pub security_cap: u16,
+    /// Extended feature bits 64-72.
+    pub features_ext: u16,
     /// Controller name (null-terminated).
     pub name: [u8; 32],
-    _reserved: [u8; 6],
+    _reserved: [u8; 4],
 }
 
 /// DLI event returned to userspace via DLI_POLL_EVENT ioctl.
@@ -2279,6 +2282,7 @@ pub(crate) fn sle_attach_device(info: &sle_transport::SleAttachInfo) -> Result<u
         addr: info.addr,
         fw_version: info.fw_version,
         features: info.features,
+        features_ext: info.features_ext,
         max_pdu_payload: if info.max_pdu > 0 { info.max_pdu } else { default_pdu },
         max_connections: if info.max_connections > 0 {
             info.max_connections
@@ -3195,6 +3199,7 @@ impl kernel::InPlaceModule for SparkLinkModule {
                         writeln!(f, "bus: {:?}", cinfo.bus)?;
                         writeln!(f, "firmware: {}.{}.{}", major, minor, patch)?;
                         writeln!(f, "features: 0x{:016x}", cinfo.features)?;
+                        writeln!(f, "features_ext: 0x{:04x}", cinfo.features_ext)?;
                         writeln!(f, "max_connections: {}", cinfo.max_connections)?;
                         writeln!(f, "max_mtu: {}", cinfo.max_mtu)?;
                         writeln!(f, "max_mps: {}", cinfo.max_mps)?;
@@ -4572,8 +4577,9 @@ impl MiscDevice for SparkLinkCtl {
                     max_mtu: cinfo.max_mtu,
                     max_mps: cinfo.max_mps,
                     security_cap: cinfo.security_cap,
+                    features_ext: cinfo.features_ext,
                     name,
-                    _reserved: [0u8; 6],
+                    _reserved: [0u8; 4],
                 };
                 drop(ss);
                 write_user_struct(arg, &info)?;

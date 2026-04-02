@@ -574,8 +574,9 @@ struct sle_dli_info {
 	uint16_t max_mtu;
 	uint16_t max_mps;
 	uint16_t security_cap;
+	uint16_t features_ext;
 	uint8_t  name[32];
-	uint8_t  _reserved[6];
+	uint8_t  _reserved[4];
 } __attribute__((packed));
 
 /* DLI event from controller */

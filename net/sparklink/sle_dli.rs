@@ -193,49 +193,83 @@ pub enum SleFeature {
     TxRxGap100us     = 1 << 30,
     /// Bit 31: 系统管理帧控制
     SysMgmtFrame     = 1 << 31,
-    /// Bit 32: 系统管理跳频
+    /// Bit 32: 系统管理帧跳频算法
     SysMgmtHopping   = 1 << 32,
-    /// Bit 33: 远端公钥验证
-    RemotePkVerify   = 1 << 33,
-    /// Bit 34: 功率控制
-    PowerControl     = 1 << 34,
-    /// Bit 35: 信道质量
-    ChannelQuality   = 1 << 35,
-    /// Bit 36: 5GHz频段
-    Band5ghz         = 1 << 36,
-    /// Bit 37: 角色切换
-    RoleSwitch       = 1 << 37,
-    /// Bit 38: 组播通信(1)
-    Multicast1       = 1 << 38,
-    /// Bit 39: 组播通信(2)
-    Multicast2       = 1 << 39,
-    /// Bit 40: 组播通信(3)
-    Multicast3       = 1 << 40,
-    /// Bit 41: 组播通信(4)
-    Multicast4       = 1 << 41,
-    /// Bit 42: 链路参数更新(1)
-    LinkParamUpdate1 = 1 << 42,
-    /// Bit 43: 链路参数更新(2)
-    LinkParamUpdate2 = 1 << 43,
-    /// Bit 44: TG模式
-    TgMode           = 1 << 44,
-    /// Bit 45: NTP时间类型(1)
-    NtpTimeType1     = 1 << 45,
-    /// Bit 46: NTP时间类型(2)
-    NtpTimeType2     = 1 << 46,
-    /// Bit 47: CBG反馈
-    CbgFeedback      = 1 << 47,
-    /// Bit 48: 感知测量(1)
-    SensingMeas1     = 1 << 48,
-    /// Bit 49: 感知测量(2)
-    SensingMeas2     = 1 << 49,
-    /// Bit 50: 同步数据单播
-    SyncDataUnicast  = 1 << 50,
-    /// Bit 51: 同步数据组播(1)
-    SyncDataMcast1   = 1 << 51,
-    /// Bit 52: 同步数据组播(2)
-    SyncDataMcast2   = 1 << 52,
+    /// Bit 33: 最小可用信道流程
+    MinAvailChannel  = 1 << 33,
+    /// Bit 34: 睡眠时钟精度更新
+    SleepClkAccuracy = 1 << 34,
+    /// Bit 35: 远程公钥验证
+    RemotePkVerify   = 1 << 35,
+    /// Bit 36: 功率控制更新
+    PowerControl     = 1 << 36,
+    /// Bit 37: 信道质量估计
+    ChannelQuality   = 1 << 37,
+    /// Bit 38: 5GHz频段
+    Band5ghz         = 1 << 38,
+    /// Bit 39: 角色切换
+    RoleSwitch       = 1 << 39,
+    /// Bit 40: 异步数据组播-G节点
+    AsyncDataMcastG  = 1 << 40,
+    /// Bit 41: 异步数据组播-T节点
+    AsyncDataMcastT  = 1 << 41,
+    /// Bit 42: 异步双向组播-G节点
+    AsyncBidiMcastG  = 1 << 42,
+    /// Bit 43: 异步双向组播-T节点
+    AsyncBidiMcastT  = 1 << 43,
+    /// Bit 44: 异步反馈组播-G节点
+    AsyncFbMcastG    = 1 << 44,
+    /// Bit 45: 异步反馈组播-T节点
+    AsyncFbMcastT    = 1 << 45,
+    /// Bit 46: 异步链接态广播-G节点
+    AsyncLinkBcastG  = 1 << 46,
+    /// Bit 47: 异步链接态广播-T节点
+    AsyncLinkBcastT  = 1 << 47,
+    /// Bit 48: 同步数据组播-G节点
+    SyncDataMcastG   = 1 << 48,
+    /// Bit 49: 同步数据组播-T节点
+    SyncDataMcastT   = 1 << 49,
+    /// Bit 50: 同步双向组播-G节点
+    SyncBidiMcastG   = 1 << 50,
+    /// Bit 51: 同步双向组播-T节点
+    SyncBidiMcastT   = 1 << 51,
+    /// Bit 52: 同步反馈组播-G节点
+    SyncFbMcastG     = 1 << 52,
+    /// Bit 53: 同步反馈组播-T节点
+    SyncFbMcastT     = 1 << 53,
+    /// Bit 54: 同步链接态广播-G节点
+    SyncLinkBcastG   = 1 << 54,
+    /// Bit 55: 同步链接态广播-T节点
+    SyncLinkBcastT   = 1 << 55,
+    /// Bit 56: 异步单播链路参数更新
+    AsyncUcastParamUpd  = 1 << 56,
+    /// Bit 57: 异步组播链路参数更新
+    AsyncMcastParamUpd  = 1 << 57,
+    /// Bit 58: 同步链路参数更新
+    SyncParamUpd     = 1 << 58,
+    /// Bit 59: 链接态广播链路参数更新
+    LinkBcastParamUpd   = 1 << 59,
+    /// Bit 60: 先发后发TG模式
+    TgMode           = 1 << 60,
+    /// Bit 61: 128比特NTP时间
+    Ntp128           = 1 << 61,
+    /// Bit 62: 64比特NTP时间
+    Ntp64            = 1 << 62,
+    /// Bit 63: 32比特NTP时间
+    Ntp32            = 1u64 << 63,
 }
+
+/// Extended feature bits 64-72 (T/XS 10003-2025 Table 9, continued).
+/// Stored in a separate `features_ext: u16` field.
+pub const SLE_FEAT_EXT_CBG_FB_TYPE3: u16   = 1 << 0;  // Bit 64
+pub const SLE_FEAT_EXT_CBG_FB_TYPE4: u16   = 1 << 1;  // Bit 65
+pub const SLE_FEAT_EXT_NB_RANGING: u16     = 1 << 2;  // Bit 66
+pub const SLE_FEAT_EXT_UWB_RANGING: u16    = 1 << 3;  // Bit 67
+pub const SLE_FEAT_EXT_UWB_SENSING: u16    = 1 << 4;  // Bit 68
+pub const SLE_FEAT_EXT_NB_SENSING: u16     = 1 << 5;  // Bit 69
+pub const SLE_FEAT_EXT_SYNC_UCAST_G: u16  = 1 << 6;  // Bit 70
+pub const SLE_FEAT_EXT_SYNC_UCAST_T: u16  = 1 << 7;  // Bit 71
+pub const SLE_FEAT_EXT_VERIFY_BCAST: u16   = 1 << 8;  // Bit 72
 
 /// Static information about a controller.
 pub struct SleControllerInfo {
@@ -249,6 +283,8 @@ pub struct SleControllerInfo {
     pub fw_version: u32,
     /// Bitmask of supported features (see [`SleFeature`]).
     pub features: u64,
+    /// Extended feature bits 64-72 (see `SLE_FEAT_EXT_*`).
+    pub features_ext: u16,
     /// Maximum PDU payload size in bytes.
     pub max_pdu_payload: u16,
     /// Maximum number of concurrent connections (0 = unlimited).
@@ -291,6 +327,7 @@ impl Default for SleControllerInfo {
             addr: [0u8; 6],
             fw_version: 0,
             features: 0,
+            features_ext: 0,
             max_pdu_payload: 255,
             max_connections: 1,
             max_mtu: 247,

@@ -232,6 +232,23 @@ pub(crate) const SL_IOCTL_SSAP_ADD_PROP: u32 = _IOWR::<SsapAddProperty>(SL_MAGIC
 /// Remove a service by its start handle.
 pub(crate) const SL_IOCTL_SSAP_REMOVE_SVC: u32 = _IOW::<u16>(SL_MAGIC, 0x59);
 
+// --- Remote SSAP client-side ioctls ---
+
+/// Initiate SSAP ExchangeInfo (MTU negotiation) with connected peer.
+pub(crate) const SL_IOCTL_SSAP_EXCHANGE_INFO: u32 = _IOW::<SsapRemoteCmd>(SL_MAGIC, 0x5A);
+
+/// Discover remote services via FindStructure.
+pub(crate) const SL_IOCTL_SSAP_REMOTE_DISCOVER: u32 = _IOWR::<SsapRemoteDiscover>(SL_MAGIC, 0x5B);
+
+/// Read a remote property by handle.
+pub(crate) const SL_IOCTL_SSAP_REMOTE_READ: u32 = _IOWR::<SsapRemoteReadWrite>(SL_MAGIC, 0x5C);
+
+/// Write a remote property by handle.
+pub(crate) const SL_IOCTL_SSAP_REMOTE_WRITE: u32 = _IOW::<SsapRemoteReadWrite>(SL_MAGIC, 0x5D);
+
+/// Dequeue one inbound remote notification/indication.
+pub(crate) const SL_IOCTL_SSAP_REMOTE_EVENT: u32 = _IOR::<SsapNotification>(SL_MAGIC, 0x5E);
+
 // --- Power management ioctls ---
 
 /// Get power management status.
@@ -1380,6 +1397,53 @@ pub(crate) struct SsapAddProperty {
 
 // SAFETY: SsapAddProperty is repr(C) with only primitive fields.
 unsafe impl FromBytes for SsapAddProperty {}
+
+/// Remote SSAP command targeting a specific connection handle.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct SsapRemoteCmd {
+    /// Connection handle of the remote peer.
+    pub conn_handle: u16,
+    pub(crate) _reserved: [u8; 2],
+}
+
+// SAFETY: SsapRemoteCmd is repr(C) with only primitive fields.
+unsafe impl FromBytes for SsapRemoteCmd {}
+
+/// Remote service discovery via FindStructure.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct SsapRemoteDiscover {
+    /// Connection handle of the remote peer.
+    pub conn_handle: u16,
+    /// Start handle of the range to discover (input).
+    pub start_handle: u16,
+    /// End handle of the range to discover (input).
+    pub end_handle: u16,
+    /// Number of discovered entries returned (output).
+    pub count: u16,
+}
+
+// SAFETY: SsapRemoteDiscover is repr(C) with only primitive fields.
+unsafe impl FromBytes for SsapRemoteDiscover {}
+
+/// Remote SSAP read/write targeting a specific connection.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct SsapRemoteReadWrite {
+    /// Connection handle of the remote peer.
+    pub conn_handle: u16,
+    /// Property handle on the remote device.
+    pub handle: u16,
+    /// Data length in bytes.
+    pub length: u16,
+    pub(crate) _pad: [u8; 2],
+    /// Data buffer (max 248 bytes).
+    pub data: [u8; 248],
+}
+
+// SAFETY: SsapRemoteReadWrite is repr(C) with only primitive fields.
+unsafe impl FromBytes for SsapRemoteReadWrite {}
 
 // ---------------------------------------------------------------------------
 // Power management userspace data structures

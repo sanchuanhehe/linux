@@ -1231,6 +1231,30 @@ impl ConnManager {
             .map(|s| (s.mtu, s.info_exchanged))
     }
 
+    /// Get a mutable reference to the SSAP session for a connection.
+    pub fn get_ssap_session(
+        &mut self,
+        handle: u16,
+    ) -> Option<&mut super::sle_ssap::SsapSession> {
+        let entry = self.find_mut(handle).ok()?;
+        entry.ssap_session.as_mut()
+    }
+
+    /// Pop the first available remote event from any connected peer's SSAP session.
+    /// Returns (conn_handle, RemoteEvent) if any peer has a queued event.
+    pub fn pop_any_remote_event(
+        &mut self,
+    ) -> Option<(u16, super::sle_ssap::RemoteEvent)> {
+        for entry in self.connections.iter_mut() {
+            if let Some(session) = &mut entry.ssap_session {
+                if let Some(evt) = session.remote_db.pop_remote_event() {
+                    return Some((entry.handle, evt));
+                }
+            }
+        }
+        None
+    }
+
     /// Consume a TX credit on the specified channel before sending a PDU.
     pub fn consume_tx_credit(&mut self, handle: u16, tcid: u16) -> Result {
         let entry = self.find_mut(handle)?;

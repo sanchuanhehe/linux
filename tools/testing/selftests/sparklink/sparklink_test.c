@@ -7871,12 +7871,10 @@ static void test_credit_flow_control(int fd)
 		memset(&inj, 0, sizeof(inj));
 		inj.handle = handle;
 		inj.data[0] = 0x0A; /* TCID: SMTC */
-		inj.data[1] = 0x01; /* ExchangeInfoReq */
+		inj.data[1] = 0x02; /* ExchangeInfoReq (SsapMsgCode 0x02) */
 		inj.data[2] = 23;   /* MTU LE16 */
 		inj.data[3] = 0;
-		inj.data[4] = 23;   /* MPS LE16 */
-		inj.data[5] = 0;
-		inj.length = 6;
+		inj.length = 4;
 		ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
 		if (ret < 0) {
 			printf("  FAIL: INJECT #%d: %s\n", i + 1, strerror(errno));
@@ -7909,10 +7907,9 @@ static void test_credit_flow_control(int fd)
 		memset(&inj, 0, sizeof(inj));
 		inj.handle = handle;
 		inj.data[0] = 0x0A;
-		inj.data[1] = 0x01;
+		inj.data[1] = 0x02; /* ExchangeInfoReq (SsapMsgCode 0x02) */
 		inj.data[2] = 23; inj.data[3] = 0;
-		inj.data[4] = 23; inj.data[5] = 0;
-		inj.length = 6;
+		inj.length = 4;
 		ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
 		if (ret < 0) {
 			printf("  FAIL: INJECT batch #%d: %s\n",
@@ -9771,6 +9768,83 @@ static void fuzz_fill(void *buf, size_t len)
 		p[i] = (uint8_t)(fuzz_rand() & 0xFF);
 }
 
+/* -----------------------------------------------------------------------
+ * Remote SSAP client-side ioctl tests
+ *
+ * Verifies that the remote SSAP ioctls correctly reject operations when
+ * no connection is established, and that the ioctl/struct interfaces
+ * are properly wired up.
+ * ----------------------------------------------------------------------- */
+static void test_ssap_remote_ioctls(int fd)
+{
+	test_header("SSAP remote client-side ioctls (no connection)");
+	int ret;
+
+	/* EXCHANGE_INFO: should fail with no active connection */
+	struct ssap_remote_cmd exc;
+	memset(&exc, 0, sizeof(exc));
+	exc.conn_handle = 0x0001;
+	ret = ioctl(fd, SL_IOCTL_SSAP_EXCHANGE_INFO, &exc);
+	if (ret < 0) {
+		printf("  OK:   EXCHANGE_INFO rejected (no conn): errno=%d\n", errno);
+	} else {
+		printf("  FAIL: EXCHANGE_INFO should fail without connection\n");
+	}
+
+	/* REMOTE_DISCOVER: should fail with no active connection */
+	struct ssap_remote_discover disc;
+	memset(&disc, 0, sizeof(disc));
+	disc.conn_handle = 0x0001;
+	disc.start_handle = 0x0001;
+	disc.end_handle = 0xFFFF;
+	ret = ioctl(fd, SL_IOCTL_SSAP_REMOTE_DISCOVER, &disc);
+	if (ret < 0) {
+		printf("  OK:   REMOTE_DISCOVER rejected (no conn): errno=%d\n", errno);
+	} else {
+		printf("  FAIL: REMOTE_DISCOVER should fail without connection\n");
+	}
+
+	/* REMOTE_READ: should fail with no active connection */
+	struct ssap_remote_read_write rrw;
+	memset(&rrw, 0, sizeof(rrw));
+	rrw.conn_handle = 0x0001;
+	rrw.handle = 0x0010;
+	ret = ioctl(fd, SL_IOCTL_SSAP_REMOTE_READ, &rrw);
+	if (ret < 0) {
+		printf("  OK:   REMOTE_READ rejected (no conn): errno=%d\n", errno);
+	} else {
+		printf("  FAIL: REMOTE_READ should fail without connection\n");
+	}
+
+	/* REMOTE_WRITE: should fail with no active connection */
+	memset(&rrw, 0, sizeof(rrw));
+	rrw.conn_handle = 0x0001;
+	rrw.handle = 0x0010;
+	rrw.length = 4;
+	rrw.data[0] = 0xDE;
+	rrw.data[1] = 0xAD;
+	rrw.data[2] = 0xBE;
+	rrw.data[3] = 0xEF;
+	ret = ioctl(fd, SL_IOCTL_SSAP_REMOTE_WRITE, &rrw);
+	if (ret < 0) {
+		printf("  OK:   REMOTE_WRITE rejected (no conn): errno=%d\n", errno);
+	} else {
+		printf("  FAIL: REMOTE_WRITE should fail without connection\n");
+	}
+
+	/* REMOTE_EVENT: should return EAGAIN when no events queued */
+	struct ssap_notification ntf;
+	memset(&ntf, 0, sizeof(ntf));
+	ret = ioctl(fd, SL_IOCTL_SSAP_REMOTE_EVENT, &ntf);
+	if (ret < 0 && errno == EAGAIN) {
+		printf("  OK:   REMOTE_EVENT returned EAGAIN (empty queue)\n");
+	} else if (ret < 0) {
+		printf("  OK:   REMOTE_EVENT rejected: errno=%d\n", errno);
+	} else {
+		printf("  FAIL: REMOTE_EVENT should fail with no events\n");
+	}
+}
+
 static void test_ioctl_fuzz(int fd)
 {
 	test_header("Ioctl fuzz: deterministic payload injection");
@@ -10248,6 +10322,7 @@ int main(void)
 	test_ext_advertising(fd);
 	test_sync_link_management(fd);
 	test_phy_extreme_params(fd);
+	test_ssap_remote_ioctls(fd);
 	test_ioctl_fuzz(fd);
 	test_genetlink();
 

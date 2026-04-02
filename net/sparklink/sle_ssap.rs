@@ -1352,6 +1352,58 @@ impl SsapSession {
         pdu.encode(buf)
     }
 
+    /// Build a FindStructureReq PDU for remote service discovery.
+    pub fn build_find_structure_req(
+        &self,
+        start_handle: u16,
+        end_handle: u16,
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        let pdu = SsapPdu::FindStructureReq {
+            start_handle,
+            end_handle,
+        };
+        pdu.encode(buf)
+    }
+
+    /// Build a ReadReq PDU for remote property read.
+    pub fn build_read_req(&self, handle: u16, buf: &mut [u8]) -> Result<usize> {
+        let pdu = SsapPdu::ReadReq { handle };
+        pdu.encode(buf)
+    }
+
+    /// Build a WriteReq PDU for remote property write.
+    pub fn build_write_req(
+        &self,
+        handle: u16,
+        data: &[u8],
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        let mut d = KVec::new();
+        d.extend_from_slice(data, GFP_KERNEL)?;
+        let pdu = SsapPdu::WriteReq {
+            handle,
+            data: d,
+        };
+        pdu.encode(buf)
+    }
+
+    /// Build a WriteCmd PDU (no response expected).
+    pub fn build_write_cmd(
+        &self,
+        handle: u16,
+        data: &[u8],
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        let mut d = KVec::new();
+        d.extend_from_slice(data, GFP_KERNEL)?;
+        let pdu = SsapPdu::WriteCmd {
+            handle,
+            data: d,
+        };
+        pdu.encode(buf)
+    }
+
     /// Process a received ExchangeInfoRsp from the peer.
     /// Updates the session MTU to the minimum of local and remote.
     pub fn handle_exchange_info_rsp(&mut self, remote_mtu: u16, local_mtu: u16) {
@@ -1442,15 +1494,30 @@ impl SsapSession {
                 // Write confirmed. No additional action.
                 Ok(0)
             }
-            _ => {
-                // Unsupported PDU — send ErrorRsp
-                let rsp = SsapPdu::ErrorRsp {
-                    req_opcode: pdu_data[0],
-                    handle: 0,
-                    error: SsapError::RequestNotSupported,
-                };
-                rsp.encode(resp_buf)
+            SsapPdu::ValueNtf { handle, data } => {
+                // Inbound notification from remote peer — store in event queue
+                let _ = self.remote_db.push_remote_event(handle, false, &data);
+                Ok(0) // No response for notifications
             }
+            SsapPdu::ValueInd { handle, data } => {
+                // Inbound indication from remote peer — store and ACK
+                let _ = self.remote_db.push_remote_event(handle, true, &data);
+                let ack = SsapPdu::ValueAck { handle };
+                ack.encode(resp_buf)
+            }
+            SsapPdu::ErrorRsp {
+                req_opcode: _,
+                handle: _,
+                error,
+            } => {
+                // Remote peer returned an error for our request
+                self.remote_db.last_error = Some(error);
+                Ok(0)
+            }
+            // All known PDU variants are handled above.
+            // If SsapPdu is extended with new variants, they will
+            // produce a compile error here rather than silently
+            // being rejected.
         }
     }
 }
@@ -1471,6 +1538,20 @@ pub struct RemoteServiceDb {
     pub discovery_complete: bool,
     /// Last-read property value (placeholder for request-response routing).
     pub last_read_value: KVec<u8>,
+    /// Inbound remote notification/indication events.
+    pub remote_events: KVec<RemoteEvent>,
+    /// Last error received from remote peer.
+    pub last_error: Option<SsapError>,
+}
+
+/// An inbound notification or indication from a remote peer.
+pub struct RemoteEvent {
+    /// Property handle on the remote device.
+    pub handle: u16,
+    /// True if indication (requires ACK), false if notification.
+    pub indication: bool,
+    /// Event data payload.
+    pub data: KVec<u8>,
 }
 
 impl RemoteServiceDb {
@@ -1480,6 +1561,8 @@ impl RemoteServiceDb {
             entries: KVec::new(),
             discovery_complete: false,
             last_read_value: KVec::new(),
+            remote_events: KVec::new(),
+            last_error: None,
         }
     }
 
@@ -1516,11 +1599,40 @@ impl RemoteServiceDb {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.last_read_value.clear();
+        self.remote_events.clear();
+        self.last_error = None;
         self.discovery_complete = false;
     }
 
     /// Number of cached entries.
     pub fn entry_count(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Store an inbound remote notification/indication.
+    pub fn push_remote_event(
+        &mut self,
+        handle: u16,
+        indication: bool,
+        data: &[u8],
+    ) -> Result {
+        let mut d = KVec::new();
+        d.extend_from_slice(data, GFP_KERNEL)?;
+        let evt = RemoteEvent {
+            handle,
+            indication,
+            data: d,
+        };
+        self.remote_events.push(evt, GFP_KERNEL)?;
+        Ok(())
+    }
+
+    /// Pop the oldest remote event, if any.
+    pub fn pop_remote_event(&mut self) -> Option<RemoteEvent> {
+        if self.remote_events.is_empty() {
+            None
+        } else {
+            self.remote_events.remove(0).ok()
+        }
     }
 }

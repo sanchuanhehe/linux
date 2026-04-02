@@ -2348,6 +2348,130 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
             s.ssap.remove_service(start_handle)?;
             Ok(0)
         }
+        SL_IOCTL_SSAP_EXCHANGE_INFO
+        | SL_IOCTL_SSAP_REMOTE_DISCOVER
+        | SL_IOCTL_SSAP_REMOTE_READ
+        | SL_IOCTL_SSAP_REMOTE_WRITE
+        | SL_IOCTL_SSAP_REMOTE_EVENT => ioctl_ssap_remote(cmd, arg),
+        _ => Err(EINVAL),
+    }
+}
+
+/// Remote SSAP client-side ioctl sub-dispatcher.
+///
+/// Sends SSAP request PDUs to connected remote peers via the SMTC
+/// service management channel. Responses arrive asynchronously through
+/// the normal PDU receive path and are cached in `remote_db`.
+#[inline(never)]
+fn ioctl_ssap_remote(cmd: u32, arg: usize) -> Result<isize> {
+    match cmd {
+        SL_IOCTL_SSAP_EXCHANGE_INFO => {
+            let params: SsapRemoteCmd = read_user_struct(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let handle = s.conn.resolve_handle(params.conn_handle)?;
+            let mut buf = [0u8; sle_ssap::SSAP_PDU_MAX];
+            let session = s.conn.get_ssap_session(handle).ok_or(ENOENT)?;
+            let pdu_len = session.build_exchange_info_req(247, &mut buf)?;
+            if pdu_len > 0 {
+                s.conn
+                    .consume_tx_credit(handle, sle_conn::tcid::SERVICE_MGMT)?;
+                let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                tx_buf[1..1 + pdu_len].copy_from_slice(&buf[..pdu_len]);
+                let _ = s.controller.send_data(handle, &tx_buf[..1 + pdu_len]);
+            }
+            Ok(0)
+        }
+        SL_IOCTL_SSAP_REMOTE_DISCOVER => {
+            let mut params: SsapRemoteDiscover = read_user_struct(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let handle = s.conn.resolve_handle(params.conn_handle)?;
+            let mut buf = [0u8; sle_ssap::SSAP_PDU_MAX];
+            let session = s.conn.get_ssap_session(handle).ok_or(ENOENT)?;
+            let pdu_len = session.build_find_structure_req(
+                params.start_handle,
+                params.end_handle,
+                &mut buf,
+            )?;
+            // Return current remote_db entry count before sending
+            params.count = session.remote_db.entry_count() as u16;
+            if pdu_len > 0 {
+                s.conn
+                    .consume_tx_credit(handle, sle_conn::tcid::SERVICE_MGMT)?;
+                let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                tx_buf[1..1 + pdu_len].copy_from_slice(&buf[..pdu_len]);
+                let _ = s.controller.send_data(handle, &tx_buf[..1 + pdu_len]);
+            }
+            drop(ss);
+            write_user_struct(arg, &params)?;
+            Ok(0)
+        }
+        SL_IOCTL_SSAP_REMOTE_READ => {
+            let params: SsapRemoteReadWrite = read_user_struct(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let handle = s.conn.resolve_handle(params.conn_handle)?;
+            let mut buf = [0u8; sle_ssap::SSAP_PDU_MAX];
+            let session = s.conn.get_ssap_session(handle).ok_or(ENOENT)?;
+            let pdu_len = session.build_read_req(params.handle, &mut buf)?;
+            if pdu_len > 0 {
+                s.conn
+                    .consume_tx_credit(handle, sle_conn::tcid::SERVICE_MGMT)?;
+                let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                tx_buf[1..1 + pdu_len].copy_from_slice(&buf[..pdu_len]);
+                let _ = s.controller.send_data(handle, &tx_buf[..1 + pdu_len]);
+            }
+            Ok(0)
+        }
+        SL_IOCTL_SSAP_REMOTE_WRITE => {
+            let params: SsapRemoteReadWrite = read_user_struct(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let handle = s.conn.resolve_handle(params.conn_handle)?;
+            let data_len = (params.length as usize).min(params.data.len());
+            let mut buf = [0u8; sle_ssap::SSAP_PDU_MAX];
+            let session = s.conn.get_ssap_session(handle).ok_or(ENOENT)?;
+            let pdu_len = session.build_write_req(
+                params.handle,
+                &params.data[..data_len],
+                &mut buf,
+            )?;
+            if pdu_len > 0 {
+                s.conn
+                    .consume_tx_credit(handle, sle_conn::tcid::SERVICE_MGMT)?;
+                let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                tx_buf[1..1 + pdu_len].copy_from_slice(&buf[..pdu_len]);
+                let _ = s.controller.send_data(handle, &tx_buf[..1 + pdu_len]);
+            }
+            Ok(0)
+        }
+        SL_IOCTL_SSAP_REMOTE_EVENT => {
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            // Pop remote event from the first connection that has one
+            let evt = s.conn.pop_any_remote_event();
+            match evt {
+                Some((conn_handle, re)) => {
+                    let mut out: SsapNotification = unsafe { core::mem::zeroed() };
+                    out.handle = re.handle;
+                    out.indication = re.indication as u8;
+                    let copy_len = re.data.len().min(out.data.len());
+                    out.data[..copy_len].copy_from_slice(&re.data[..copy_len]);
+                    out.length = copy_len as u8;
+                    // Encode conn_handle in unused notification_count area
+                    let _ = conn_handle;
+                    drop(ss);
+                    write_user_struct(arg, &out)?;
+                    Ok(0)
+                }
+                None => Err(EAGAIN),
+            }
+        }
         _ => Err(EINVAL),
     }
 }
@@ -3085,7 +3209,12 @@ impl MiscDevice for SparkLinkCtl {
             | SL_IOCTL_SSAP_DEQUEUE_NTF
             | SL_IOCTL_SSAP_ADD_SVC
             | SL_IOCTL_SSAP_ADD_PROP
-            | SL_IOCTL_SSAP_REMOVE_SVC => ioctl_dispatch_sec_ssap(cmd, arg),
+            | SL_IOCTL_SSAP_REMOVE_SVC
+            | SL_IOCTL_SSAP_EXCHANGE_INFO
+            | SL_IOCTL_SSAP_REMOTE_DISCOVER
+            | SL_IOCTL_SSAP_REMOTE_READ
+            | SL_IOCTL_SSAP_REMOTE_WRITE
+            | SL_IOCTL_SSAP_REMOTE_EVENT => ioctl_dispatch_sec_ssap(cmd, arg),
             // --- Infrastructure: PM, sync, DLI, events, PHY, role, RAL/RPA ---
             SL_IOCTL_PM_INFO
             | SL_IOCTL_PM_SET_STATE

@@ -705,6 +705,34 @@ struct sle_event_stats {
 #define SL_IOCTL_SSAP_ADD_PROP		_IOWR(SL_MAGIC, 0x58, struct ssap_add_property)
 #define SL_IOCTL_SSAP_REMOVE_SVC	_IOW(SL_MAGIC, 0x59, __u16)
 
+/* --- Remote SSAP client-side operations --------------------------------- */
+
+struct ssap_remote_cmd {
+	__u16 conn_handle;
+	__u8  _reserved[2];
+};
+
+struct ssap_remote_discover {
+	__u16 conn_handle;
+	__u16 start_handle;
+	__u16 end_handle;
+	__u16 count;		/* output: number of entries discovered */
+};
+
+struct ssap_remote_read_write {
+	__u16 conn_handle;
+	__u16 handle;
+	__u16 length;
+	__u8  _pad[2];
+	__u8  data[248];
+};
+
+#define SL_IOCTL_SSAP_EXCHANGE_INFO	_IOW(SL_MAGIC, 0x5A, struct ssap_remote_cmd)
+#define SL_IOCTL_SSAP_REMOTE_DISCOVER	_IOWR(SL_MAGIC, 0x5B, struct ssap_remote_discover)
+#define SL_IOCTL_SSAP_REMOTE_READ	_IOWR(SL_MAGIC, 0x5C, struct ssap_remote_read_write)
+#define SL_IOCTL_SSAP_REMOTE_WRITE	_IOW(SL_MAGIC, 0x5D, struct ssap_remote_read_write)
+#define SL_IOCTL_SSAP_REMOTE_EVENT	_IOR(SL_MAGIC, 0x5E, struct ssap_notification)
+
 /* --- Power management --------------------------------------------------- */
 
 #define SL_IOCTL_PM_INFO		_IOR(SL_MAGIC, 0x60, struct sle_pm_info)

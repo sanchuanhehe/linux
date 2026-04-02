@@ -181,6 +181,7 @@ Source code layout
     ├── Kconfig                  # Subsystem Kconfig
     ├── Makefile                 # Build rules
     ├── sparklink_core.rs        # Core module
+    ├── sle_uapi.rs              # UAPI ioctl constants and repr(C) data types
     ├── sparklink_genl.c         # Generic Netlink C bridge
     ├── sle_pdu.rs               # Frame codec
     ├── sle_adv.rs               # Advertising/scanning
@@ -675,6 +676,252 @@ Role management (0xA0 -- 0xA1)
      - ``GET_ROLE``
      - Read (u8)
      - Get current local GT node role
+
+Extended advertising (0x14 -- 0x1B, 0x22)
+-----------------------------------------
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0x14
+     - ``EXT_ADV_CONFIGURE``
+     - Write (SleExtAdvConfig)
+     - Configure extended advertising set
+   * - 0x15
+     - ``EXT_ADV_SET_DATA``
+     - Write (SleExtAdvData)
+     - Set advertising data for a set
+   * - 0x16
+     - ``EXT_ADV_ENABLE``
+     - Write (u8)
+     - Enable advertising set by handle
+   * - 0x17
+     - ``EXT_ADV_DISABLE``
+     - Write (u8)
+     - Disable advertising set by handle
+   * - 0x18
+     - ``EXT_ADV_REMOVE``
+     - Write (u8)
+     - Remove advertising set by handle
+   * - 0x19
+     - ``EXT_ADV_INFO``
+     - Read/Write (SleExtAdvInfo)
+     - Query advertising set state
+   * - 0x1A
+     - ``EXT_ADV_ENABLE_EX``
+     - Write (SleExtAdvEnableParams)
+     - Enable with max events/duration
+   * - 0x1B
+     - ``EXT_ADV_TICK``
+     - None
+     - Advance advertising timer by one event period
+   * - 0x22
+     - ``INJECT_RAW_ADV``
+     - Write (SleInjectRawAdv)
+     - Inject raw advertising PDU for testing
+
+AFH and connection extensions (0x39 -- 0x3F)
+---------------------------------------------
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0x39
+     - ``SET_CONN_MTU``
+     - Write (SleConnMtuParams)
+     - Set per-connection MTU/MPS
+   * - 0x3A
+     - ``AFH_SET_MAP``
+     - Write (SleAfhMapParams)
+     - Set channel map for a connection
+   * - 0x3B
+     - ``AFH_GET_MAP``
+     - Read/Write (SleAfhMapParams)
+     - Get current channel map
+   * - 0x3C
+     - ``AFH_REPORT_RSSI``
+     - Write (SleAfhRssiReport)
+     - Report measured RSSI for a channel
+   * - 0x3D
+     - ``AFH_CLASSIFY``
+     - Read/Write (SleAfhClassifyParams)
+     - Classify channels by RSSI threshold
+   * - 0x3E
+     - ``AFH_HOP_NEXT``
+     - Read/Write (SleAfhHopInfo)
+     - Advance hopping sequence
+   * - 0x3F
+     - ``AFH_REPORT_RETX``
+     - Write (SleAfhRetxReport)
+     - Report retransmission on a channel
+
+Security extensions (0x49 -- 0x4F)
+----------------------------------
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0x49
+     - ``SEC_RESET``
+     - None
+     - Reset security state to unpaired
+   * - 0x4A
+     - ``SEC_GET_PASSKEY``
+     - Read (u32)
+     - Get generated numeric comparison passkey
+   * - 0x4B
+     - ``SEC_CONFIRM_PASSKEY``
+     - None
+     - Confirm numeric comparison
+   * - 0x4C
+     - ``SEC_REJECT_PASSKEY``
+     - None
+     - Reject numeric comparison
+   * - 0x4D
+     - ``SEC_SET_OOB``
+     - Write (SleOobData)
+     - Set OOB pairing data
+   * - 0x4E
+     - ``SEC_INPUT_PASSKEY``
+     - Write (SlePasskeyInput)
+     - Input passkey for passkey entry
+   * - 0x4F
+     - ``SEC_SET_PASSWORD``
+     - Write (SlePasswordParams)
+     - Set PIN/password for pairing
+
+Sync link management (0x66 -- 0x6E)
+------------------------------------
+
+Isochronous (sync) links for time-sensitive data, supporting unicast
+CIG and multicast BIG groups per T/XS 10002-2025 chapter 8.10.
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0x66
+     - ``SYNC_UCAST_PARAM``
+     - Read/Write (SleSyncCigConfig)
+     - Configure CIG parameters
+   * - 0x67
+     - ``SYNC_UCAST_CREATE``
+     - Write (SleSyncCreateCmd)
+     - Create/activate CIG links
+   * - 0x68
+     - ``SYNC_UCAST_REMOVE``
+     - Write (u8)
+     - Remove CIG by ID
+   * - 0x69
+     - ``SYNC_MCAST_PARAM``
+     - Read/Write (SleSyncBigConfig)
+     - Configure BIG parameters
+   * - 0x6A
+     - ``SYNC_MCAST_CREATE``
+     - Write (SleSyncCreateCmd)
+     - Create/activate BIG links
+   * - 0x6B
+     - ``SYNC_MCAST_REMOVE``
+     - Write (u8)
+     - Remove BIG by ID (fails with EBUSY if active)
+   * - 0x6C
+     - ``SYNC_DATAPATH_CFG``
+     - Write (SleSyncDatapathCmd)
+     - Configure datapath for sync link
+   * - 0x6D
+     - ``SYNC_DATAPATH_REMOVE``
+     - Write (u16)
+     - Remove datapath from sync link
+   * - 0x6E
+     - ``SYNC_INFO``
+     - Read/Write (SleSyncLinkInfo)
+     - Query sync link state
+
+PHY extensions (0x96 -- 0x97)
+-----------------------------
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0x96
+     - ``PHY_GET_SINR``
+     - Read (SleSinrThresholds)
+     - Get SINR threshold table
+   * - 0x97
+     - ``PHY_SET_SINR``
+     - Write (SleSinrThresholds)
+     - Set SINR threshold table
+
+RAL/RPA management (0xB0 -- 0xB7)
+----------------------------------
+
+Resolving Address List and Resolvable Private Address management
+per T/XS 10003-2025 sections 8.6.18--8.6.25.
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0xB0
+     - ``RAL_ADD``
+     - Write (SleRalAddParams)
+     - Add entry to resolving address list
+   * - 0xB1
+     - ``RAL_REMOVE``
+     - Write (SleRalRemoveParams)
+     - Remove RAL entry by peer identity
+   * - 0xB2
+     - ``RAL_CLEAR``
+     - None
+     - Clear entire resolving address list
+   * - 0xB3
+     - ``RAL_SIZE``
+     - Read (u8)
+     - Get number of RAL entries
+   * - 0xB4
+     - ``RAL_READ_PEER_RPA``
+     - Read/Write (SleRalQueryParams)
+     - Read peer's RPA
+   * - 0xB5
+     - ``RAL_READ_LOCAL_RPA``
+     - Read/Write (SleRalQueryParams)
+     - Read local RPA
+   * - 0xB6
+     - ``RPA_ENABLE``
+     - Write (u8)
+     - Enable/disable RPA generation
+   * - 0xB7
+     - ``RPA_SET_TIMEOUT``
+     - Write (u16)
+     - Set RPA rotation timeout in seconds
 
 Event delivery via read()
 =========================
@@ -1653,6 +1900,20 @@ Current limitations:
    subsystems. Configuration parameters use module-level atomics
    instead of per-instance data as a workaround.
 
+Recent additions:
+
+- Extended advertising (0x14--0x1B, 0x22) with multi-set management
+  and duration/max-event control
+- Adaptive frequency hopping (AFH, 0x3A--0x3F) with RSSI-based channel
+  classification and retransmission tracking
+- Per-connection MTU/MPS negotiation (0x39)
+- Numeric comparison, OOB, and PIN/password pairing methods
+  (0x49--0x4F), supplementing the existing JustWorks and PSK methods
+- RAL/RPA management (0xB0--0xB7) for resolvable private address
+  generation and resolution per T/XS 10003-2025
+- Sync link management (0x66--0x6E) for isochronous CIG/BIG data paths
+- PHY SINR threshold management (0x96--0x97)
+
 Planned work:
 
 - Physical SLE radio hardware bring-up and conformance testing
@@ -1690,6 +1951,7 @@ Module dependency graph
       ├── sle_mgmt.rs       Management plane, DLI command queue
       ├── sle_transport.rs  Transport abstraction layer
       ├── sle_fw.rs         Firmware version parsing
+      ├── sle_uapi.rs       UAPI ioctl consts + repr(C) data types
       └── sparklink_genl.c  C genetlink family (FFI bridge)
 
 Design decisions
@@ -1783,36 +2045,38 @@ Code statistics
 
     Component                  Lines
     ─────────────────────────  ─────
-    sparklink_core.rs           ~3880
-    sle_dli.rs                  ~1360
-    sle_ssap.rs                 ~1410
-    sle_usb.rs                  ~1210
-    sle_usb_ffi.c               ~1010
-    sle_conn.rs                  ~980
-    sle_event.rs                 ~760
-    sle_serdev_ffi.c             ~600
-    sle_phy.rs                   ~580
-    sle_serdev.rs                ~570
-    sle_pdu.rs                   ~530
-    sle_uart.rs                  ~520
-    sle_spi.rs                   ~460
-    sle_adv.rs                   ~390
-    sle_netlink.rs               ~360
+    sparklink_core.rs           ~3517
+    sle_uapi.rs                 ~1890
+    sle_conn.rs                 ~1784
+    sle_ssap.rs                 ~1494
+    sle_dli.rs                  ~1380
+    sle_usb.rs                  ~1186
+    sle_usb_ffi.c               ~1011
+    sle_security.rs              ~908
+    sle_event.rs                 ~750
+    sle_adv.rs                   ~729
+    sle_phy.rs                   ~684
+    sparklink_genl.c             ~655
+    sle_serdev_ffi.c             ~597
+    sle_pdu.rs                   ~559
+    sle_serdev.rs                ~544
+    sle_uart.rs                  ~527
+    sle_spi.rs                   ~472
+    sle_crypto_ffi.c             ~419
+    sle_netlink.rs               ~364
     sle_transport.rs             ~350
-    sle_mgmt.rs                  ~340
-    sle_power.rs                 ~310
-    sle_security.rs              ~280
-    sle_configfs.rs              ~230
-    sle_crypto_ffi.c             ~220
-    sle_crypto.rs                ~190
-    sle_fw.rs                    ~180
-    sparklink_genl.c             ~660
+    sle_mgmt.rs                  ~333
+    sle_dev.rs                   ~326
+    sle_power.rs                 ~314
+    sle_crypto.rs                ~267
+    sle_configfs.rs              ~227
+    sle_fw.rs                    ~173
     ─────────────────────────  ─────
-    Kernel total               ~16380
-    Test + tools                ~7130
-    UAPI header                  ~274
-    Documentation               ~1740
-    Grand total                ~25520
+    Kernel total               ~21460
+    Test + tools               ~10360
+    UAPI headers                ~1019
+    Documentation               ~2089
+    Grand total                ~34930
 
 References
 ==========

@@ -2601,7 +2601,7 @@ impl MiscDevice for SparkLinkCtl {
                     firmware_version: cinfo.fw_version,
                     features: cinfo.features,
                     max_connections: cinfo.max_connections,
-                    max_adv_sets: 1,
+                    max_adv_sets: sle_adv::EXT_ADV_MAX_SETS as u8,
                     transport_modes: cinfo.transport_modes,
                     measurement_cap: cinfo.measurement_cap,
                     max_mtu: cinfo.max_mtu,

@@ -589,6 +589,118 @@ pub const MAX_CONNECTIONS: usize = 8;
 /// Invalid connection handle sentinel.
 pub const INVALID_HANDLE: u16 = 0xFFFF;
 
+/// Maximum sync links per CIG/BIG group (per T/XS 10003-2025 8.10.1: 0x01-0x1F).
+pub const MAX_SYNC_LINKS_PER_CIG: usize = 8;
+
+// ---------------------------------------------------------------------------
+// Sync link types and state (T/XS 10003-2025 section 8.10)
+// ---------------------------------------------------------------------------
+
+/// Whether a sync link is unicast (CIS) or multicast (BIS).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SyncLinkType {
+    Unicast = 0,
+    Multicast = 1,
+}
+
+/// Lifecycle state for a sync link.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SyncLinkState {
+    /// Parameters configured but link not yet created.
+    Configured = 0,
+    /// Link creation in progress.
+    Creating = 1,
+    /// Link is active and carrying data.
+    Active = 2,
+}
+
+/// Per-sync-link entry managed by ConnManager.
+#[derive(Clone, Debug)]
+pub struct SyncLinkEntry {
+    /// Sync link connection handle.
+    pub handle: u16,
+    /// Unicast or multicast.
+    pub link_type: SyncLinkType,
+    /// Current state.
+    pub state: SyncLinkState,
+    /// Associated async connection handle.
+    pub acl_handle: u16,
+    /// CIG/BIG group identifier (0x00-0xEF).
+    pub cig_id: u8,
+    /// CIS/BIS identifier within the group.
+    pub cis_id: u8,
+    /// G→T SDU interval in microseconds.
+    pub sdu_interval_g2t: u32,
+    /// T→G SDU interval in microseconds.
+    pub sdu_interval_t2g: u32,
+    /// Max SDU payload size G→T (bytes).
+    pub max_sdu_g2t: u16,
+    /// Max SDU payload size T→G (bytes).
+    pub max_sdu_t2g: u16,
+    /// PDU retransmit count G→T.
+    pub retransmit_g2t: u8,
+    /// PDU retransmit count T→G.
+    pub retransmit_t2g: u8,
+    /// Max transport delay G→T (ms).
+    pub max_latency_g2t: u16,
+    /// Max transport delay T→G (ms).
+    pub max_latency_t2g: u16,
+    /// Adaptation mode: 0=periodic, 1=aperiodic.
+    pub adapt_mode: u8,
+    /// Data path direction (0=input, 1=output, 2=both).
+    pub datapath_direction: u8,
+    /// Data path identifier.
+    pub datapath_id: u8,
+    /// Codec identifier.
+    pub codec_id: u8,
+    /// Whether data path has been configured.
+    pub datapath_configured: bool,
+}
+
+/// Parameters for configuring a sync unicast CIG group.
+pub struct SyncCigParams {
+    pub cig_id: u8,
+    pub sdu_interval_g2t: u32,
+    pub sdu_interval_t2g: u32,
+    pub max_sdu_g2t: u16,
+    pub max_sdu_t2g: u16,
+    pub retransmit_g2t: u8,
+    pub retransmit_t2g: u8,
+    pub max_latency_g2t: u16,
+    pub max_latency_t2g: u16,
+    pub adapt_mode: u8,
+    pub link_count: u8,
+}
+
+/// Result of CIG configuration.
+pub struct SyncCigResult {
+    pub cig_id: u8,
+    pub link_count: u8,
+    pub handles: [u16; MAX_SYNC_LINKS_PER_CIG],
+}
+
+/// Parameters for configuring a sync multicast BIG group.
+pub struct SyncBigParams {
+    pub big_id: u8,
+    pub sdu_interval_g2t: u32,
+    pub sdu_interval_t2g: u32,
+    pub max_sdu_g2t: u16,
+    pub max_sdu_t2g: u16,
+    pub retransmit_g2t: u8,
+    pub retransmit_t2g: u8,
+    pub max_latency_g2t: u16,
+    pub max_latency_t2g: u16,
+    pub adapt_mode: u8,
+    pub link_count: u8,
+}
+
+/// Result of BIG configuration.
+pub struct SyncBigResult {
+    pub big_id: u8,
+    pub link_count: u8,
+    pub handles: [u16; MAX_SYNC_LINKS_PER_CIG],
+}
+
 // ---------------------------------------------------------------------------
 // Per-connection state
 // ---------------------------------------------------------------------------
@@ -680,6 +792,10 @@ pub struct ConnManager {
     pub total_created: u64,
     /// Total connections completed (lifetime counter).
     pub total_completed: u64,
+    /// Sync link entries (CIS/BIS).
+    sync_links: KVec<SyncLinkEntry>,
+    /// Next sync handle to allocate.
+    next_sync_handle: u16,
 }
 
 impl ConnManager {
@@ -692,6 +808,8 @@ impl ConnManager {
             max_connections: MAX_CONNECTIONS,
             total_created: 0,
             total_completed: 0,
+            sync_links: KVec::new(),
+            next_sync_handle: 1,
         }
     }
 
@@ -1320,5 +1438,272 @@ impl ConnManager {
             handle, peer[0], peer[1], peer[2], peer[3], peer[4], peer[5]
         );
         Ok(peer)
+    }
+
+    // -----------------------------------------------------------------------
+    // Sync link management (T/XS 10003-2025 section 8.10)
+    // -----------------------------------------------------------------------
+
+    /// Configure a sync unicast event group set (CIG) per 8.10.1.
+    ///
+    /// Associates SDU interval, latency, and per-link parameters with
+    /// a CIG ID. Returns the allocated link handles.
+    pub fn sync_ucast_configure(&mut self, params: &SyncCigParams) -> Result<SyncCigResult> {
+        if params.cig_id > 0xEF {
+            return Err(EINVAL);
+        }
+        if params.link_count == 0 || params.link_count as usize > MAX_SYNC_LINKS_PER_CIG {
+            return Err(EINVAL);
+        }
+        // Remove existing CIG if reconfiguring.
+        self.sync_links.retain(|l| l.cig_id != params.cig_id);
+
+        let mut handles = [0u16; MAX_SYNC_LINKS_PER_CIG];
+        for i in 0..params.link_count as usize {
+            let handle = self.alloc_sync_handle();
+            let link = SyncLinkEntry {
+                handle,
+                link_type: SyncLinkType::Unicast,
+                state: SyncLinkState::Configured,
+                acl_handle: 0,
+                cig_id: params.cig_id,
+                cis_id: i as u8,
+                sdu_interval_g2t: params.sdu_interval_g2t,
+                sdu_interval_t2g: params.sdu_interval_t2g,
+                max_sdu_g2t: params.max_sdu_g2t,
+                max_sdu_t2g: params.max_sdu_t2g,
+                retransmit_g2t: params.retransmit_g2t,
+                retransmit_t2g: params.retransmit_t2g,
+                max_latency_g2t: params.max_latency_g2t,
+                max_latency_t2g: params.max_latency_t2g,
+                adapt_mode: params.adapt_mode,
+                datapath_direction: 0,
+                datapath_id: 0,
+                codec_id: 0,
+                datapath_configured: false,
+            };
+            handles[i] = handle;
+            self.sync_links.push(link, GFP_KERNEL)?;
+        }
+        Ok(SyncCigResult {
+            cig_id: params.cig_id,
+            link_count: params.link_count,
+            handles,
+        })
+    }
+
+    /// Create (activate) sync unicast links within a configured CIG per 8.10.3.
+    ///
+    /// Each link is bound to an existing async connection via `acl_handles`.
+    pub fn sync_ucast_create(
+        &mut self,
+        cig_id: u8,
+        acl_handles: &[u16],
+    ) -> Result<u8> {
+        // Verify async connections exist.
+        for &ah in acl_handles {
+            let entry = self.find(ah)?;
+            if entry.state != ConnState::Connected {
+                return Err(EPIPE);
+            }
+        }
+        let mut count = 0u8;
+        for link in self.sync_links.iter_mut() {
+            if link.cig_id != cig_id {
+                continue;
+            }
+            if link.state != SyncLinkState::Configured {
+                continue;
+            }
+            let idx = count as usize;
+            if idx < acl_handles.len() {
+                link.acl_handle = acl_handles[idx];
+                link.state = SyncLinkState::Active;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return Err(ENOENT);
+        }
+        Ok(count)
+    }
+
+    /// Remove all sync links belonging to a CIG per 8.10.4.
+    pub fn sync_ucast_remove(&mut self, cig_id: u8) -> Result {
+        // Cannot remove a CIG with active links.
+        for link in self.sync_links.iter() {
+            if link.cig_id == cig_id && link.state == SyncLinkState::Active {
+                return Err(EBUSY);
+            }
+        }
+        let before = self.sync_links.len();
+        self.sync_links.retain(|l| l.cig_id != cig_id);
+        if self.sync_links.len() == before {
+            return Err(ENOENT);
+        }
+        Ok(())
+    }
+
+    /// Configure a sync multicast event group set (BIG) per 8.10.7.
+    pub fn sync_mcast_configure(&mut self, params: &SyncBigParams) -> Result<SyncBigResult> {
+        if params.big_id > 0xEF {
+            return Err(EINVAL);
+        }
+        if params.link_count == 0 || params.link_count as usize > MAX_SYNC_LINKS_PER_CIG {
+            return Err(EINVAL);
+        }
+        self.sync_links.retain(|l| !(l.cig_id == params.big_id && l.link_type == SyncLinkType::Multicast));
+
+        let mut handles = [0u16; MAX_SYNC_LINKS_PER_CIG];
+        for i in 0..params.link_count as usize {
+            let handle = self.alloc_sync_handle();
+            let link = SyncLinkEntry {
+                handle,
+                link_type: SyncLinkType::Multicast,
+                state: SyncLinkState::Configured,
+                acl_handle: 0,
+                cig_id: params.big_id,
+                cis_id: i as u8,
+                sdu_interval_g2t: params.sdu_interval_g2t,
+                sdu_interval_t2g: params.sdu_interval_t2g,
+                max_sdu_g2t: params.max_sdu_g2t,
+                max_sdu_t2g: params.max_sdu_t2g,
+                retransmit_g2t: params.retransmit_g2t,
+                retransmit_t2g: params.retransmit_t2g,
+                max_latency_g2t: params.max_latency_g2t,
+                max_latency_t2g: params.max_latency_t2g,
+                adapt_mode: params.adapt_mode,
+                datapath_direction: 0,
+                datapath_id: 0,
+                codec_id: 0,
+                datapath_configured: false,
+            };
+            handles[i] = handle;
+            self.sync_links.push(link, GFP_KERNEL)?;
+        }
+        Ok(SyncBigResult {
+            big_id: params.big_id,
+            link_count: params.link_count,
+            handles,
+        })
+    }
+
+    /// Create (activate) sync multicast links per 8.10.9.
+    pub fn sync_mcast_create(
+        &mut self,
+        big_id: u8,
+        acl_handles: &[u16],
+    ) -> Result<u8> {
+        for &ah in acl_handles {
+            let entry = self.find(ah)?;
+            if entry.state != ConnState::Connected {
+                return Err(EPIPE);
+            }
+        }
+        let mut count = 0u8;
+        for link in self.sync_links.iter_mut() {
+            if link.cig_id != big_id || link.link_type != SyncLinkType::Multicast {
+                continue;
+            }
+            if link.state != SyncLinkState::Configured {
+                continue;
+            }
+            let idx = count as usize;
+            if idx < acl_handles.len() {
+                link.acl_handle = acl_handles[idx];
+                link.state = SyncLinkState::Active;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return Err(ENOENT);
+        }
+        Ok(count)
+    }
+
+    /// Remove all sync multicast links belonging to a BIG per 8.10.10.
+    pub fn sync_mcast_remove(&mut self, big_id: u8) -> Result {
+        for link in self.sync_links.iter() {
+            if link.cig_id == big_id
+                && link.link_type == SyncLinkType::Multicast
+                && link.state == SyncLinkState::Active
+            {
+                return Err(EBUSY);
+            }
+        }
+        let before = self.sync_links.len();
+        self.sync_links
+            .retain(|l| !(l.cig_id == big_id && l.link_type == SyncLinkType::Multicast));
+        if self.sync_links.len() == before {
+            return Err(ENOENT);
+        }
+        Ok(())
+    }
+
+    /// Configure the data path for a sync link per 8.10.13.
+    pub fn sync_datapath_config(
+        &mut self,
+        sync_handle: u16,
+        direction: u8,
+        path_id: u8,
+        codec_id: u8,
+    ) -> Result {
+        let link = self.find_sync_mut(sync_handle)?;
+        if link.state != SyncLinkState::Active {
+            return Err(EINVAL);
+        }
+        link.datapath_direction = direction;
+        link.datapath_id = path_id;
+        link.codec_id = codec_id;
+        link.datapath_configured = true;
+        Ok(())
+    }
+
+    /// Remove the data path for a sync link per 8.10.14.
+    pub fn sync_datapath_remove(&mut self, sync_handle: u16) -> Result {
+        let link = self.find_sync_mut(sync_handle)?;
+        if !link.datapath_configured {
+            return Err(EINVAL);
+        }
+        link.datapath_configured = false;
+        link.datapath_direction = 0;
+        link.datapath_id = 0;
+        link.codec_id = 0;
+        Ok(())
+    }
+
+    /// Get information about a sync link by handle.
+    pub fn sync_link_info(&self, sync_handle: u16) -> Result<&SyncLinkEntry> {
+        self.find_sync(sync_handle)
+    }
+
+    /// Allocate a sync link handle.
+    fn alloc_sync_handle(&mut self) -> u16 {
+        let h = self.next_sync_handle;
+        self.next_sync_handle = h.wrapping_add(1);
+        if self.next_sync_handle == 0 {
+            self.next_sync_handle = 1;
+        }
+        h
+    }
+
+    /// Find a sync link by handle (mutable).
+    fn find_sync_mut(&mut self, handle: u16) -> Result<&mut SyncLinkEntry> {
+        for link in self.sync_links.iter_mut() {
+            if link.handle == handle {
+                return Ok(link);
+            }
+        }
+        Err(ENOENT)
+    }
+
+    /// Find a sync link by handle (immutable).
+    fn find_sync(&self, handle: u16) -> Result<&SyncLinkEntry> {
+        for link in self.sync_links.iter() {
+            if link.handle == handle {
+                return Ok(link);
+            }
+        }
+        Err(ENOENT)
     }
 }

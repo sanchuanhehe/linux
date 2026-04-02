@@ -583,6 +583,35 @@ const SL_IOCTL_PM_TICK: u32 = _IO(SL_MAGIC, 0x64);
 /// Record a data activity event.
 const SL_IOCTL_PM_ACTIVITY: u32 = _IO(SL_MAGIC, 0x65);
 
+// --- Sync link management ioctls (T/XS 10003-2025 section 8.10) ---
+
+/// Configure sync unicast CIG group parameters.
+const SL_IOCTL_SYNC_UCAST_PARAM: u32 = _IOWR::<SleSyncCigConfig>(SL_MAGIC, 0x66);
+
+/// Create (activate) sync unicast links within a CIG.
+const SL_IOCTL_SYNC_UCAST_CREATE: u32 = _IOW::<SleSyncCreateCmd>(SL_MAGIC, 0x67);
+
+/// Remove a sync unicast CIG group.
+const SL_IOCTL_SYNC_UCAST_REMOVE: u32 = _IOW::<u8>(SL_MAGIC, 0x68);
+
+/// Configure sync multicast BIG group parameters.
+const SL_IOCTL_SYNC_MCAST_PARAM: u32 = _IOWR::<SleSyncBigConfig>(SL_MAGIC, 0x69);
+
+/// Create (activate) sync multicast links within a BIG.
+const SL_IOCTL_SYNC_MCAST_CREATE: u32 = _IOW::<SleSyncCreateCmd>(SL_MAGIC, 0x6A);
+
+/// Remove a sync multicast BIG group.
+const SL_IOCTL_SYNC_MCAST_REMOVE: u32 = _IOW::<u8>(SL_MAGIC, 0x6B);
+
+/// Configure data path for a sync link (codec).
+const SL_IOCTL_SYNC_DATAPATH_CFG: u32 = _IOW::<SleSyncDatapathCmd>(SL_MAGIC, 0x6C);
+
+/// Remove data path for a sync link.
+const SL_IOCTL_SYNC_DATAPATH_REMOVE: u32 = _IOW::<u16>(SL_MAGIC, 0x6D);
+
+/// Get sync link information.
+const SL_IOCTL_SYNC_INFO: u32 = _IOWR::<SleSyncLinkInfo>(SL_MAGIC, 0x6E);
+
 /// Get number of pending events in the event queue.
 const SL_IOCTL_EVENT_COUNT: u32 = _IO(SL_MAGIC, 0x70);
 
@@ -1150,6 +1179,144 @@ unsafe impl FromBytes for SleAfhRssiReport {}
 unsafe impl FromBytes for SleAfhClassifyParams {}
 // SAFETY: repr(C) with only primitive fields.
 unsafe impl FromBytes for SleAfhHopInfo {}
+
+// ---------------------------------------------------------------------------
+// Sync link management userspace data structures (T/XS 10003-2025 §8.10)
+// ---------------------------------------------------------------------------
+
+/// Configuration parameters for a sync unicast CIG group.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleSyncCigConfig {
+    /// CIG identifier (0x00-0xEF).
+    pub cig_id: u8,
+    /// Number of sync links to create (1-8).
+    pub link_count: u8,
+    /// Adaptation mode: 0=periodic, 1=aperiodic.
+    pub adapt_mode: u8,
+    _pad: u8,
+    /// G→T SDU interval in microseconds.
+    pub sdu_interval_g2t: u32,
+    /// T→G SDU interval in microseconds.
+    pub sdu_interval_t2g: u32,
+    /// Max SDU payload G→T (bytes).
+    pub max_sdu_g2t: u16,
+    /// Max SDU payload T→G (bytes).
+    pub max_sdu_t2g: u16,
+    /// Max transport delay G→T (ms).
+    pub max_latency_g2t: u16,
+    /// Max transport delay T→G (ms).
+    pub max_latency_t2g: u16,
+    /// PDU retransmit count G→T.
+    pub retransmit_g2t: u8,
+    /// PDU retransmit count T→G.
+    pub retransmit_t2g: u8,
+    /// Output: allocated sync link handles.
+    pub handles_out: [u16; 8],
+}
+
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleSyncCigConfig {}
+
+/// Configuration parameters for a sync multicast BIG group.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleSyncBigConfig {
+    /// BIG identifier (0x00-0xEF).
+    pub big_id: u8,
+    /// Number of sync links to create (1-8).
+    pub link_count: u8,
+    /// Adaptation mode: 0=periodic, 1=aperiodic.
+    pub adapt_mode: u8,
+    _pad: u8,
+    /// G→T SDU interval in microseconds.
+    pub sdu_interval_g2t: u32,
+    /// T→G SDU interval in microseconds.
+    pub sdu_interval_t2g: u32,
+    /// Max SDU payload G→T (bytes).
+    pub max_sdu_g2t: u16,
+    /// Max SDU payload T→G (bytes).
+    pub max_sdu_t2g: u16,
+    /// Max transport delay G→T (ms).
+    pub max_latency_g2t: u16,
+    /// Max transport delay T→G (ms).
+    pub max_latency_t2g: u16,
+    /// PDU retransmit count G→T.
+    pub retransmit_g2t: u8,
+    /// PDU retransmit count T→G.
+    pub retransmit_t2g: u8,
+    /// Output: allocated sync link handles.
+    pub handles_out: [u16; 8],
+}
+
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleSyncBigConfig {}
+
+/// Create (activate) sync links — binds CIG/BIG links to async connections.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleSyncCreateCmd {
+    /// CIG or BIG identifier.
+    pub group_id: u8,
+    /// Number of links to create.
+    pub link_count: u8,
+    _pad: [u8; 2],
+    /// ACL connection handles to bind (one per link).
+    pub acl_handles: [u16; 8],
+}
+
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleSyncCreateCmd {}
+
+/// Sync link data path configuration.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleSyncDatapathCmd {
+    /// Sync link handle.
+    pub sync_handle: u16,
+    /// Direction: 0=input, 1=output, 2=both.
+    pub direction: u8,
+    /// Data path identifier.
+    pub path_id: u8,
+    /// Codec identifier.
+    pub codec_id: u8,
+    _pad: [u8; 3],
+}
+
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleSyncDatapathCmd {}
+
+/// Sync link information query/response.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleSyncLinkInfo {
+    /// Sync link handle (input).
+    pub sync_handle: u16,
+    /// Associated ACL handle (output).
+    pub acl_handle: u16,
+    /// CIG/BIG ID (output).
+    pub group_id: u8,
+    /// CIS/BIS ID within group (output).
+    pub stream_id: u8,
+    /// Link type: 0=unicast, 1=multicast (output).
+    pub link_type: u8,
+    /// State: 0=configured, 1=creating, 2=active (output).
+    pub state: u8,
+    /// G→T SDU interval µs (output).
+    pub sdu_interval_g2t: u32,
+    /// T→G SDU interval µs (output).
+    pub sdu_interval_t2g: u32,
+    /// Max SDU G→T (output).
+    pub max_sdu_g2t: u16,
+    /// Max SDU T→G (output).
+    pub max_sdu_t2g: u16,
+    /// Data path configured (output).
+    pub datapath_configured: u8,
+    _pad2: [u8; 3],
+}
+
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleSyncLinkInfo {}
 
 // ---------------------------------------------------------------------------
 // Security management userspace data structures
@@ -4240,6 +4407,131 @@ impl MiscDevice for SparkLinkCtl {
                 let mut ss = SUBSYSTEM.lock();
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 s.power.on_activity();
+                Ok(0)
+            }
+            // --- Sync link management ---
+            SL_IOCTL_SYNC_UCAST_PARAM => {
+                let mut cfg = read_user_struct::<SleSyncCigConfig>(arg)?;
+                let params = sle_conn::SyncCigParams {
+                    cig_id: cfg.cig_id,
+                    sdu_interval_g2t: cfg.sdu_interval_g2t,
+                    sdu_interval_t2g: cfg.sdu_interval_t2g,
+                    max_sdu_g2t: cfg.max_sdu_g2t,
+                    max_sdu_t2g: cfg.max_sdu_t2g,
+                    retransmit_g2t: cfg.retransmit_g2t,
+                    retransmit_t2g: cfg.retransmit_t2g,
+                    max_latency_g2t: cfg.max_latency_g2t,
+                    max_latency_t2g: cfg.max_latency_t2g,
+                    adapt_mode: cfg.adapt_mode,
+                    link_count: cfg.link_count,
+                };
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let result = s.conn.sync_ucast_configure(&params)?;
+                cfg.cig_id = result.cig_id;
+                cfg.link_count = result.link_count;
+                cfg.handles_out = result.handles;
+                drop(ss);
+                write_user_struct(arg, &cfg)?;
+                Ok(0)
+            }
+            SL_IOCTL_SYNC_UCAST_CREATE => {
+                let cmd = read_user_struct::<SleSyncCreateCmd>(arg)?;
+                let count = cmd.link_count.min(8) as usize;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let created = s.conn.sync_ucast_create(
+                    cmd.group_id,
+                    &cmd.acl_handles[..count],
+                )?;
+                Ok(created as isize)
+            }
+            SL_IOCTL_SYNC_UCAST_REMOVE => {
+                let cig_id = read_user_struct::<u8>(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.conn.sync_ucast_remove(cig_id)?;
+                Ok(0)
+            }
+            SL_IOCTL_SYNC_MCAST_PARAM => {
+                let mut cfg = read_user_struct::<SleSyncBigConfig>(arg)?;
+                let params = sle_conn::SyncBigParams {
+                    big_id: cfg.big_id,
+                    sdu_interval_g2t: cfg.sdu_interval_g2t,
+                    sdu_interval_t2g: cfg.sdu_interval_t2g,
+                    max_sdu_g2t: cfg.max_sdu_g2t,
+                    max_sdu_t2g: cfg.max_sdu_t2g,
+                    retransmit_g2t: cfg.retransmit_g2t,
+                    retransmit_t2g: cfg.retransmit_t2g,
+                    max_latency_g2t: cfg.max_latency_g2t,
+                    max_latency_t2g: cfg.max_latency_t2g,
+                    adapt_mode: cfg.adapt_mode,
+                    link_count: cfg.link_count,
+                };
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let result = s.conn.sync_mcast_configure(&params)?;
+                cfg.big_id = result.big_id;
+                cfg.link_count = result.link_count;
+                cfg.handles_out = result.handles;
+                drop(ss);
+                write_user_struct(arg, &cfg)?;
+                Ok(0)
+            }
+            SL_IOCTL_SYNC_MCAST_CREATE => {
+                let cmd = read_user_struct::<SleSyncCreateCmd>(arg)?;
+                let count = cmd.link_count.min(8) as usize;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let created = s.conn.sync_mcast_create(
+                    cmd.group_id,
+                    &cmd.acl_handles[..count],
+                )?;
+                Ok(created as isize)
+            }
+            SL_IOCTL_SYNC_MCAST_REMOVE => {
+                let big_id = read_user_struct::<u8>(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.conn.sync_mcast_remove(big_id)?;
+                Ok(0)
+            }
+            SL_IOCTL_SYNC_DATAPATH_CFG => {
+                let cmd = read_user_struct::<SleSyncDatapathCmd>(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.conn.sync_datapath_config(
+                    cmd.sync_handle,
+                    cmd.direction,
+                    cmd.path_id,
+                    cmd.codec_id,
+                )?;
+                Ok(0)
+            }
+            SL_IOCTL_SYNC_DATAPATH_REMOVE => {
+                let sync_handle = read_user_struct::<u16>(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.conn.sync_datapath_remove(sync_handle)?;
+                Ok(0)
+            }
+            SL_IOCTL_SYNC_INFO => {
+                let mut info = read_user_struct::<SleSyncLinkInfo>(arg)?;
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let link = s.conn.sync_link_info(info.sync_handle)?;
+                info.acl_handle = link.acl_handle;
+                info.group_id = link.cig_id;
+                info.stream_id = link.cis_id;
+                info.link_type = link.link_type as u8;
+                info.state = link.state as u8;
+                info.sdu_interval_g2t = link.sdu_interval_g2t;
+                info.sdu_interval_t2g = link.sdu_interval_t2g;
+                info.max_sdu_g2t = link.max_sdu_g2t;
+                info.max_sdu_t2g = link.max_sdu_t2g;
+                info.datapath_configured = if link.datapath_configured { 1 } else { 0 };
+                drop(ss);
+                write_user_struct(arg, &info)?;
                 Ok(0)
             }
             // --- Event notification ---

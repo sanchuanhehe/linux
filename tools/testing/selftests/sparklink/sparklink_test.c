@@ -113,6 +113,17 @@
 #define SL_IOCTL_PM_TICK         _IO(SL_MAGIC, 0x64)
 #define SL_IOCTL_PM_ACTIVITY     _IO(SL_MAGIC, 0x65)
 
+/* Sync link management */
+#define SL_IOCTL_SYNC_UCAST_PARAM    _IOWR(SL_MAGIC, 0x66, struct sle_sync_cig_config)
+#define SL_IOCTL_SYNC_UCAST_CREATE   _IOW(SL_MAGIC, 0x67, struct sle_sync_create_cmd)
+#define SL_IOCTL_SYNC_UCAST_REMOVE   _IOW(SL_MAGIC, 0x68, uint8_t)
+#define SL_IOCTL_SYNC_MCAST_PARAM    _IOWR(SL_MAGIC, 0x69, struct sle_sync_big_config)
+#define SL_IOCTL_SYNC_MCAST_CREATE   _IOW(SL_MAGIC, 0x6A, struct sle_sync_create_cmd)
+#define SL_IOCTL_SYNC_MCAST_REMOVE   _IOW(SL_MAGIC, 0x6B, uint8_t)
+#define SL_IOCTL_SYNC_DATAPATH_CFG   _IOW(SL_MAGIC, 0x6C, struct sle_sync_datapath_cmd)
+#define SL_IOCTL_SYNC_DATAPATH_REMOVE _IOW(SL_MAGIC, 0x6D, uint16_t)
+#define SL_IOCTL_SYNC_INFO           _IOWR(SL_MAGIC, 0x6E, struct sle_sync_link_info)
+
 /* Event notification */
 #define SL_IOCTL_EVENT_COUNT     _IO(SL_MAGIC, 0x70)
 #define SL_IOCTL_EVENT_STATS     _IOR(SL_MAGIC, 0x71, struct sle_event_stats)
@@ -320,6 +331,69 @@ struct sle_afh_hop_info {
 	uint16_t freq_mhz;
 	uint16_t event_counter;
 } __attribute__((packed));
+
+/* Sync link management */
+struct sle_sync_cig_config {
+	uint8_t  cig_id;
+	uint8_t  link_count;
+	uint8_t  adapt_mode;
+	uint8_t  _pad;
+	uint32_t sdu_interval_g2t;
+	uint32_t sdu_interval_t2g;
+	uint16_t max_sdu_g2t;
+	uint16_t max_sdu_t2g;
+	uint16_t max_latency_g2t;
+	uint16_t max_latency_t2g;
+	uint8_t  retransmit_g2t;
+	uint8_t  retransmit_t2g;
+	uint16_t handles_out[8];
+};
+
+struct sle_sync_big_config {
+	uint8_t  big_id;
+	uint8_t  link_count;
+	uint8_t  adapt_mode;
+	uint8_t  _pad;
+	uint32_t sdu_interval_g2t;
+	uint32_t sdu_interval_t2g;
+	uint16_t max_sdu_g2t;
+	uint16_t max_sdu_t2g;
+	uint16_t max_latency_g2t;
+	uint16_t max_latency_t2g;
+	uint8_t  retransmit_g2t;
+	uint8_t  retransmit_t2g;
+	uint16_t handles_out[8];
+};
+
+struct sle_sync_create_cmd {
+	uint8_t  group_id;
+	uint8_t  link_count;
+	uint8_t  _pad[2];
+	uint16_t acl_handles[8];
+};
+
+struct sle_sync_datapath_cmd {
+	uint16_t sync_handle;
+	uint8_t  direction;
+	uint8_t  path_id;
+	uint8_t  codec_id;
+	uint8_t  _pad[3];
+};
+
+struct sle_sync_link_info {
+	uint16_t sync_handle;
+	uint16_t acl_handle;
+	uint8_t  group_id;
+	uint8_t  stream_id;
+	uint8_t  link_type;
+	uint8_t  state;
+	uint32_t sdu_interval_g2t;
+	uint32_t sdu_interval_t2g;
+	uint16_t max_sdu_g2t;
+	uint16_t max_sdu_t2g;
+	uint8_t  datapath_configured;
+	uint8_t  _pad2[3];
+};
 
 /* Security */
 struct sle_psk_params {
@@ -7598,6 +7672,281 @@ static void test_ssap_capacity_stress(int fd)
 }
 
 /* ------------------------------------------------------------------ *
+ * test_sync_link_management — sync unicast/multicast link lifecycle *
+ *                                                                    *
+ * Exercises the sync link management ioctls per T/XS 10003-2025    *
+ * section 8.10: CIG/BIG configuration, link creation, data path    *
+ * setup, info query, and teardown.                                  *
+ * ------------------------------------------------------------------ */
+static void test_sync_link_management(int fd)
+{
+	test_header("Sync link management");
+
+	int ok_count = 0, fail_count = 0;
+	int ret;
+
+	/* Create a fresh async connection for sync link binding.
+	 * CONNECT puts it in Connecting state, then INJECT_CONN_RESP
+	 * transitions it to Connected. */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xDD;
+	cp.peer_addr[1] = 0xEE;
+	cp.peer_addr[5] = 0x99;
+	cp.gt_role = 0;
+	cp.bandwidth = 1;
+	cp.mcs_index = 4;
+	cp.timeout_10ms = 100;
+
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT for sync test: ret=%d errno=%d\n", ret, errno);
+		printf("sync_link_management: 0 OK / 15 FAIL\n");
+		return;
+	}
+	uint16_t acl_handle = (uint16_t)ret;
+
+	struct sle_inject_conn_resp inject;
+	memset(&inject, 0, sizeof(inject));
+	inject.handle = acl_handle;
+	inject.supervision_timeout = 300;
+	inject.data_mtu = 247;
+	inject.data_mps = 247;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &inject);
+	if (ret < 0) {
+		printf("  FAIL: INJECT_CONN_RESP for sync test: ret=%d errno=%d\n", ret, errno);
+		printf("sync_link_management: 0 OK / 15 FAIL\n");
+		return;
+	}
+
+	/* 1. Configure CIG with 2 unicast links */
+	struct sle_sync_cig_config cig;
+	memset(&cig, 0, sizeof(cig));
+	cig.cig_id = 0x01;
+	cig.link_count = 2;
+	cig.adapt_mode = 0;  /* periodic */
+	cig.sdu_interval_g2t = 10000;  /* 10ms */
+	cig.sdu_interval_t2g = 10000;
+	cig.max_sdu_g2t = 240;
+	cig.max_sdu_t2g = 40;
+	cig.max_latency_g2t = 10;
+	cig.max_latency_t2g = 10;
+	cig.retransmit_g2t = 2;
+	cig.retransmit_t2g = 2;
+	ret = ioctl(fd, SL_IOCTL_SYNC_UCAST_PARAM, &cig);
+	if (ret == 0 && cig.link_count == 2 && cig.handles_out[0] != 0) {
+		printf("  OK:   CIG configure: id=%d, links=%d, h0=%u, h1=%u\n",
+		       cig.cig_id, cig.link_count, cig.handles_out[0], cig.handles_out[1]);
+		ok_count++;
+	} else {
+		printf("  FAIL: CIG configure ret=%d link_count=%d\n", ret, cig.link_count);
+		fail_count++;
+	}
+	uint16_t cis_h0 = cig.handles_out[0];
+
+	/* 2. Query sync link info before creation (should be Configured=0) */
+	struct sle_sync_link_info info;
+	memset(&info, 0, sizeof(info));
+	info.sync_handle = cis_h0;
+	ret = ioctl(fd, SL_IOCTL_SYNC_INFO, &info);
+	if (ret == 0 && info.state == 0 && info.group_id == 0x01
+	    && info.link_type == 0 /* unicast */) {
+		printf("  OK:   sync info: state=Configured, group=0x%02x, type=unicast\n",
+		       info.group_id);
+		ok_count++;
+	} else {
+		printf("  FAIL: sync info ret=%d state=%d group=%d type=%d\n",
+		       ret, info.state, info.group_id, info.link_type);
+		fail_count++;
+	}
+
+	/* 3. Create (activate) CIG links bound to async handle 1 */
+	struct sle_sync_create_cmd create;
+	memset(&create, 0, sizeof(create));
+	create.group_id = 0x01;
+	create.link_count = 2;
+	create.acl_handles[0] = acl_handle;
+	create.acl_handles[1] = acl_handle;
+	ret = ioctl(fd, SL_IOCTL_SYNC_UCAST_CREATE, &create);
+	if (ret >= 0) {
+		printf("  OK:   CIG create: %d links activated\n", ret);
+		ok_count++;
+	} else {
+		printf("  FAIL: CIG create ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 4. Verify link is now Active (state=2) */
+	memset(&info, 0, sizeof(info));
+	info.sync_handle = cis_h0;
+	ret = ioctl(fd, SL_IOCTL_SYNC_INFO, &info);
+	if (ret == 0 && info.state == 2 && info.acl_handle == acl_handle) {
+		printf("  OK:   sync link active: acl_handle=%u\n", info.acl_handle);
+		ok_count++;
+	} else {
+		printf("  FAIL: expected active state=%d acl=%d\n", info.state, info.acl_handle);
+		fail_count++;
+	}
+
+	/* 5. Configure data path on the active link */
+	struct sle_sync_datapath_cmd dp;
+	memset(&dp, 0, sizeof(dp));
+	dp.sync_handle = cis_h0;
+	dp.direction = 2;  /* bidirectional */
+	dp.path_id = 1;
+	dp.codec_id = 0x06;  /* LC3 example */
+	ret = ioctl(fd, SL_IOCTL_SYNC_DATAPATH_CFG, &dp);
+	if (ret == 0) {
+		printf("  OK:   datapath config: dir=2, codec=0x%02x\n", dp.codec_id);
+		ok_count++;
+	} else {
+		printf("  FAIL: datapath config ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 6. Verify datapath_configured flag in info */
+	memset(&info, 0, sizeof(info));
+	info.sync_handle = cis_h0;
+	ret = ioctl(fd, SL_IOCTL_SYNC_INFO, &info);
+	if (ret == 0 && info.datapath_configured == 1) {
+		printf("  OK:   datapath_configured=1\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: datapath_configured=%d\n", info.datapath_configured);
+		fail_count++;
+	}
+
+	/* 7. Remove data path */
+	uint16_t dp_handle = cis_h0;
+	ret = ioctl(fd, SL_IOCTL_SYNC_DATAPATH_REMOVE, &dp_handle);
+	if (ret == 0) {
+		printf("  OK:   datapath removed\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: datapath remove ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 8. Cannot remove active CIG (EBUSY) */
+	uint8_t cig_id = 0x01;
+	ret = ioctl(fd, SL_IOCTL_SYNC_UCAST_REMOVE, &cig_id);
+	if (ret < 0 && errno == EBUSY) {
+		printf("  OK:   active CIG remove rejected (EBUSY)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EBUSY, ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 9. Reconfigure CIG (replaces existing, including active links) */
+	memset(&cig, 0, sizeof(cig));
+	cig.cig_id = 0x01;
+	cig.link_count = 1;
+	cig.sdu_interval_g2t = 7500;
+	cig.sdu_interval_t2g = 7500;
+	cig.max_sdu_g2t = 120;
+	cig.max_sdu_t2g = 40;
+	cig.max_latency_g2t = 8;
+	cig.max_latency_t2g = 8;
+	ret = ioctl(fd, SL_IOCTL_SYNC_UCAST_PARAM, &cig);
+	if (ret == 0 && cig.link_count == 1) {
+		printf("  OK:   CIG reconfigure: 1 link, interval=7500us\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: CIG reconfigure ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 10. Remove inactive CIG */
+	cig_id = 0x01;
+	ret = ioctl(fd, SL_IOCTL_SYNC_UCAST_REMOVE, &cig_id);
+	if (ret == 0) {
+		printf("  OK:   inactive CIG removed\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: CIG remove ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 11. Remove nonexistent CIG (ENOENT) */
+	cig_id = 0x42;
+	ret = ioctl(fd, SL_IOCTL_SYNC_UCAST_REMOVE, &cig_id);
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   nonexistent CIG remove rejected (ENOENT)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected ENOENT, ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 12. Configure BIG (multicast) */
+	struct sle_sync_big_config big;
+	memset(&big, 0, sizeof(big));
+	big.big_id = 0x10;
+	big.link_count = 2;
+	big.adapt_mode = 1;  /* aperiodic */
+	big.sdu_interval_g2t = 10000;
+	big.sdu_interval_t2g = 10000;
+	big.max_sdu_g2t = 200;
+	big.max_sdu_t2g = 0;
+	big.max_latency_g2t = 20;
+	big.max_latency_t2g = 20;
+	ret = ioctl(fd, SL_IOCTL_SYNC_MCAST_PARAM, &big);
+	if (ret == 0 && big.link_count == 2 && big.handles_out[0] != 0) {
+		printf("  OK:   BIG configure: id=0x%02x, links=%d\n", big.big_id, big.link_count);
+		ok_count++;
+	} else {
+		printf("  FAIL: BIG configure ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 13. Create BIG links */
+	memset(&create, 0, sizeof(create));
+	create.group_id = 0x10;
+	create.link_count = 2;
+	create.acl_handles[0] = acl_handle;
+	create.acl_handles[1] = acl_handle;
+	ret = ioctl(fd, SL_IOCTL_SYNC_MCAST_CREATE, &create);
+	if (ret >= 0) {
+		printf("  OK:   BIG create: %d links activated\n", ret);
+		ok_count++;
+	} else {
+		printf("  FAIL: BIG create ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 14. Invalid CIG ID (>0xEF) rejected */
+	memset(&cig, 0, sizeof(cig));
+	cig.cig_id = 0xF0;
+	cig.link_count = 1;
+	cig.sdu_interval_g2t = 10000;
+	cig.sdu_interval_t2g = 10000;
+	ret = ioctl(fd, SL_IOCTL_SYNC_UCAST_PARAM, &cig);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   invalid CIG ID 0xF0 rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EINVAL for cig_id=0xF0, ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 15. Zero link_count rejected */
+	memset(&cig, 0, sizeof(cig));
+	cig.cig_id = 0x02;
+	cig.link_count = 0;
+	ret = ioctl(fd, SL_IOCTL_SYNC_UCAST_PARAM, &cig);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   zero link_count rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EINVAL for link_count=0, ret=%d\n", ret);
+		fail_count++;
+	}
+
+	printf("  Sync link management: %d OK, %d FAIL\n", ok_count, fail_count);
+}
+
+/* ------------------------------------------------------------------ *
  * test_phy_extreme_params — PHY parameter boundary cases            *
  *                                                                    *
  * Tests PHY parameters at extreme values:                           *
@@ -7870,6 +8219,7 @@ int main(void)
 	test_mtu_mps_negotiation(fd);
 	test_afh_channel_map(fd);
 	test_ext_advertising(fd);
+	test_sync_link_management(fd);
 	test_phy_extreme_params(fd);
 	test_genetlink();
 

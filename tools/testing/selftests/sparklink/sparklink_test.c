@@ -74,6 +74,7 @@
 #define SL_IOCTL_SEC_SM4_DEC_TEST _IOW(SL_MAGIC, 0x46, struct sle_conn_data)
 #define SL_IOCTL_SEC_SM4_BLOCK_TEST _IOWR(SL_MAGIC, 0x47, struct sle_sm4_block_test)
 #define SL_IOCTL_SEC_HMAC_TEST   _IOWR(SL_MAGIC, 0x48, struct sle_hmac_test)
+#define SL_IOCTL_SEC_RESET       _IO(SL_MAGIC, 0x49)
 
 /* SSAP service layer */
 #define SL_IOCTL_SSAP_REGISTER_SVC _IO(SL_MAGIC, 0x50)
@@ -1297,6 +1298,70 @@ static void test_security_pairing(int fd)
 		} else {
 			printf("  FAIL: decrypt roundtrip mismatch!\n");
 		}
+	}
+}
+
+static void test_security_ecdh(int fd)
+{
+	test_header("Security: Just Works (ECDH) pairing");
+
+	/* Reset security state from previous PSK pairing */
+	int ret = ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+	check("SEC_RESET", ret);
+
+	/* Pair using Just Works (method=1, now backed by ECDH) */
+	struct sle_pair_params pair;
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 1;  /* JustWorks */
+
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	check("SEC_PAIR (JustWorks/ECDH)", ret);
+
+	/* Check security info */
+	struct sle_sec_info sec;
+	memset(&sec, 0, sizeof(sec));
+	ret = ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+	check("SEC_INFO after ECDH", ret);
+	if (ret == 0) {
+		printf("  state=%u method=%u enc_fingerprint=%02x%02x%02x%02x\n",
+		       sec.state, sec.method,
+		       sec.enc_key_fingerprint[0], sec.enc_key_fingerprint[1],
+		       sec.enc_key_fingerprint[2], sec.enc_key_fingerprint[3]);
+		if (sec.state != 2)
+			printf("  WARN: expected state=2 (Paired)\n");
+		if (sec.method != 1)
+			printf("  WARN: expected method=1 (JustWorks)\n");
+		if (sec.enc_key_fingerprint[0] == 0 &&
+		    sec.enc_key_fingerprint[1] == 0 &&
+		    sec.enc_key_fingerprint[2] == 0 &&
+		    sec.enc_key_fingerprint[3] == 0)
+			printf("  WARN: fingerprint all zeros, key derivation may have failed\n");
+	}
+
+	/* Enable encryption and verify encrypt/decrypt roundtrip */
+	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+	check("SEC_ENCRYPT_ON after ECDH", ret);
+
+	struct sle_conn_data enc_data;
+	memset(&enc_data, 0, sizeof(enc_data));
+	const char *text = "ECDH roundtrip test";
+	enc_data.length = strlen(text);
+	memcpy(enc_data.data, text, enc_data.length);
+
+	uint8_t original[255];
+	memcpy(original, enc_data.data, enc_data.length);
+
+	ret = ioctl(fd, SL_IOCTL_SEC_SM4_ENC_TEST, &enc_data);
+	check("SM4_ENC after ECDH", ret);
+
+	if (ret == 0) {
+		ret = ioctl(fd, SL_IOCTL_SEC_SM4_DEC_TEST, &enc_data);
+		check("SM4_DEC after ECDH", ret);
+
+		if (ret == 0 && memcmp(enc_data.data, original, enc_data.length) == 0)
+			printf("  OK:   ECDH encrypt/decrypt roundtrip passed\n");
+		else
+			printf("  FAIL: ECDH roundtrip mismatch\n");
 	}
 }
 
@@ -6269,6 +6334,7 @@ int main(void)
 	test_sm4_block(fd);
 	test_hmac_sm3(fd);
 	test_security_pairing(fd);
+	test_security_ecdh(fd);
 	test_ssap_service(fd);
 	test_ssap_dynamic_registration(fd);
 	test_power_management(fd);

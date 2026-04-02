@@ -483,6 +483,9 @@ const SL_IOCTL_SEC_SM4_BLOCK_TEST: u32 = _IOWR::<SleSm4BlockTest>(SL_MAGIC, 0x47
 /// HMAC-SM3 test: compute HMAC-SM3(key, data) and return digest.
 const SL_IOCTL_SEC_HMAC_TEST: u32 = _IOWR::<SleHmacTest>(SL_MAGIC, 0x48);
 
+/// Reset security state to Idle (e.g. on disconnect or re-pairing).
+const SL_IOCTL_SEC_RESET: u32 = _IO(SL_MAGIC, 0x49);
+
 // --- SSAP service layer ioctls ---
 
 /// Register the built-in device info service.
@@ -3361,6 +3364,12 @@ impl MiscDevice for SparkLinkCtl {
                 let dlen = (ht.data_len as usize).min(160);
                 ht.digest = sle_crypto::hmac_sm3(&ht.key[..klen], &ht.data[..dlen]);
                 write_user_struct(arg, &ht)?;
+                Ok(0)
+            }
+            SL_IOCTL_SEC_RESET => {
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.security.reset();
                 Ok(0)
             }
             // --- SSAP service layer ---

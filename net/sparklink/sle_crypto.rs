@@ -35,6 +35,13 @@ extern "C" {
         key: *const u8, iv: *mut u8,
         data: *mut u8, data_len: u32,
     ) -> core::ffi::c_int;
+    fn sle_ecdh_generate(
+        private_key: *mut u8, public_key: *mut u8,
+    ) -> core::ffi::c_int;
+    fn sle_ecdh_shared_secret(
+        private_key: *const u8, remote_public_key: *const u8,
+        secret: *mut u8,
+    ) -> core::ffi::c_int;
 }
 
 // =========================================================================
@@ -190,4 +197,69 @@ pub fn derive_keys(link_key: &[u8; 16]) -> ([u8; 16], [u8; 16]) {
     int_key.copy_from_slice(&int_full[..16]);
 
     (enc_key, int_key)
+}
+
+// =========================================================================
+// ECDH-P256 key exchange
+// =========================================================================
+
+/// Size of an ECDH-P256 private key in bytes.
+pub const ECDH_KEY_SIZE: usize = 32;
+/// Size of an ECDH-P256 public key in bytes (uncompressed X || Y).
+pub const ECDH_PUB_SIZE: usize = 64;
+
+/// ECDH-P256 key pair.
+pub struct EcdhKeyPair {
+    /// Private key (32 bytes).
+    pub private_key: [u8; ECDH_KEY_SIZE],
+    /// Public key, uncompressed (64 bytes: X || Y).
+    pub public_key: [u8; ECDH_PUB_SIZE],
+}
+
+impl EcdhKeyPair {
+    /// Generate a new random ECDH-P256 key pair using the kernel crypto API.
+    pub fn generate() -> Result<Self> {
+        let mut kp = Self {
+            private_key: [0u8; ECDH_KEY_SIZE],
+            public_key: [0u8; ECDH_PUB_SIZE],
+        };
+        // SAFETY: sle_ecdh_generate writes ECDH_KEY_SIZE bytes to
+        // private_key and ECDH_PUB_SIZE bytes to public_key. Both
+        // buffers are correctly sized.
+        let ret = unsafe {
+            sle_ecdh_generate(
+                kp.private_key.as_mut_ptr(),
+                kp.public_key.as_mut_ptr(),
+            )
+        };
+        if ret != 0 {
+            pr_err!("sparklink: sle_ecdh_generate failed: {}\n", ret);
+            return Err(EINVAL);
+        }
+        Ok(kp)
+    }
+}
+
+/// Compute the ECDH-P256 shared secret from a local private key and a
+/// remote public key.
+pub fn ecdh_shared_secret(
+    private_key: &[u8; ECDH_KEY_SIZE],
+    remote_public_key: &[u8; ECDH_PUB_SIZE],
+) -> Result<[u8; ECDH_KEY_SIZE]> {
+    let mut secret = [0u8; ECDH_KEY_SIZE];
+    // SAFETY: sle_ecdh_shared_secret reads ECDH_KEY_SIZE from private_key,
+    // ECDH_PUB_SIZE from remote_public_key, and writes ECDH_KEY_SIZE to
+    // secret. All buffers are correctly sized.
+    let ret = unsafe {
+        sle_ecdh_shared_secret(
+            private_key.as_ptr(),
+            remote_public_key.as_ptr(),
+            secret.as_mut_ptr(),
+        )
+    };
+    if ret != 0 {
+        pr_err!("sparklink: sle_ecdh_shared_secret failed: {}\n", ret);
+        return Err(EINVAL);
+    }
+    Ok(secret)
 }

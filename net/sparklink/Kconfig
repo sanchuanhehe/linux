@@ -12,6 +12,7 @@ menuconfig SPARKLINK
 	select CRYPTO_ECB
 	select CRYPTO_CTR
 	select CRYPTO_HMAC
+	select CRYPTO_ECDH
 	help
 	  SparkLink (also known as NearLink / 星闪) is a short-range wireless
 	  communication technology designed for low-latency, low-power, and

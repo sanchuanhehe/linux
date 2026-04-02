@@ -962,6 +962,29 @@ static void test_role_management(int fd)
 	else
 		printf("  WARN: SET_ROLE(3): expected EINVAL, got ret=%d errno=%d\n",
 		       ret, errno);
+
+	/* SET_ROLE with active connection should fail (EBUSY) */
+	struct sle_connect_params cp;
+
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xDE;
+	cp.peer_addr[1] = 0xAD;
+	cp.timeout_10ms = 100;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret >= 0) {
+		uint16_t conn_handle = (uint16_t)ret;
+		uint8_t try_gnode = 1;
+
+		ret = ioctl(fd, SL_IOCTL_SET_ROLE, &try_gnode);
+		if (ret < 0 && errno == EBUSY)
+			printf("  OK:   SET_ROLE blocked with active conn (EBUSY)\n");
+		else
+			printf("  WARN: SET_ROLE with conn expected EBUSY\n");
+		/* Clean up: disconnect */
+		ioctl(fd, SL_IOCTL_DISCONNECT, &conn_handle);
+	} else {
+		printf("  WARN: CONNECT failed, skipping EBUSY test\n");
+	}
 }
 
 static void test_unknown_ioctl(int fd)
@@ -2498,6 +2521,153 @@ static void test_rpa_management(int fd)
 	}
 
 	printf("  RPA management: %d OK, %d FAIL\n", ok_count, fail_count);
+}
+
+/* ------------------------------------------------------------------ *
+ * test_encrypted_data_path                                           *
+ *   End-to-end: PSK pair -> encrypt on -> send -> inject -> recv     *
+ * ------------------------------------------------------------------ */
+static void test_encrypted_data_path(int fd)
+{
+	test_header("Security: encrypted data path end-to-end");
+
+	int ok_count = 0, fail_count = 0;
+	int ret;
+
+	/* 1. Reset security, set PSK, pair */
+	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+
+	struct sle_psk_params psk;
+
+	memset(&psk, 0, sizeof(psk));
+	memcpy(psk.psk, "e2e-sec-key-test", 16);
+	ret = ioctl(fd, SL_IOCTL_SEC_SET_PSK, &psk);
+	if (ret != 0) {
+		printf("  FAIL: set PSK: %s\n", strerror(errno));
+		fail_count++;
+		return;
+	}
+	ok_count++;
+
+	struct sle_pair_params pair;
+
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 1; /* PSK */
+	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	if (ret != 0) {
+		printf("  FAIL: PSK pair: %s\n", strerror(errno));
+		fail_count++;
+		return;
+	}
+	ok_count++;
+
+	/* 2. Enable encryption */
+	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+	if (ret != 0) {
+		printf("  FAIL: encrypt on: %s\n", strerror(errno));
+		fail_count++;
+		return;
+	}
+	ok_count++;
+
+	/* 3. Establish a connection */
+	struct sle_connect_params cp;
+	uint16_t conn_h = 0;
+
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xE2;
+	cp.peer_addr[1] = 0xE2;
+	cp.timeout_10ms = 100;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret < 0) {
+		printf("  FAIL: connect: %s\n", strerror(errno));
+		fail_count++;
+		goto cleanup;
+	}
+	conn_h = (uint16_t)ret;
+	ok_count++;
+
+	/* 3b. Accept connection via injected response */
+	struct sle_inject_conn_resp resp;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = conn_h;
+	resp.response_type = 0;  /* Accepted */
+	resp.bandwidth_mhz = 2;
+	resp.mcs_index = 6;
+	resp.supervision_timeout = 200;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+	if (ret != 0) {
+		printf("  FAIL: accept connection: %s\n", strerror(errno));
+		fail_count++;
+		goto cleanup;
+	}
+	ok_count++;
+
+	/* 4. Send data through encrypted path */
+	struct sle_conn_data tx;
+
+	memset(&tx, 0, sizeof(tx));
+	const char *msg = "encrypted-e2e-payload";
+
+	tx.handle = conn_h;
+	tx.length = strlen(msg);
+	memcpy(tx.data, msg, tx.length);
+	ret = ioctl(fd, SL_IOCTL_CONN_SEND, &tx);
+	if (ret >= 0) {
+		printf("  OK:   encrypted send succeeded (%d bytes)\n", ret);
+		ok_count++;
+	} else {
+		printf("  FAIL: encrypted send: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 5. Inject ciphertext as incoming data and receive */
+	struct sle_conn_data inject;
+
+	memset(&inject, 0, sizeof(inject));
+	inject.length = tx.length;
+	memcpy(inject.data, tx.data, tx.length); /* ciphertext from send */
+	inject.handle = conn_h;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inject);
+	if (ret == 0) {
+		printf("  OK:   inject ciphertext succeeded\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: inject ciphertext: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 6. Receive and verify decryption restores original */
+	struct sle_conn_data rx;
+
+	memset(&rx, 0, sizeof(rx));
+	rx.handle = conn_h;
+	ret = ioctl(fd, SL_IOCTL_CONN_RECV, &rx);
+	if (ret == 0 && rx.length == (uint16_t)strlen(msg) &&
+	    memcmp(rx.data, msg, strlen(msg)) == 0) {
+		printf("  OK:   encrypted roundtrip: plaintext matches\n");
+		ok_count++;
+	} else if (ret == 0) {
+		printf("  FAIL: decrypted data does not match original\n");
+		fail_count++;
+	} else {
+		printf("  FAIL: recv after inject: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* Cleanup */
+cleanup:
+	ioctl(fd, SL_IOCTL_DISCONNECT, &conn_h);
+
+	/* Restore to Encrypted/JustWorks for subsequent tests */
+	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+	memset(&pair, 0, sizeof(pair));
+	pair.method = 1;
+	ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
+
+	printf("  Encrypted data path: %d OK, %d FAIL\n", ok_count, fail_count);
 }
 
 static void test_ssap_service(int fd)
@@ -9470,6 +9640,53 @@ static void test_sync_link_management(int fd)
 		fail_count++;
 	}
 
+	/* 16. BIG (multicast) remove - active group should be rejected */
+	uint8_t big_rm_id = big.big_id;
+
+	ret = ioctl(fd, SL_IOCTL_SYNC_MCAST_REMOVE, &big_rm_id);
+	if (ret < 0 && errno == EBUSY) {
+		printf("  OK:   active BIG remove rejected (EBUSY)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: BIG remove active: expected EBUSY, ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 17. Reconfigure BIG to make links inactive, then remove */
+	memset(&big, 0, sizeof(big));
+	big.big_id = 0x10;
+	big.link_count = 1;
+	big.sdu_interval_g2t = 10000;
+	big.max_sdu_g2t = 64;
+	big.max_latency_g2t = 10;
+	ret = ioctl(fd, SL_IOCTL_SYNC_MCAST_PARAM, &big);
+	if (ret == 0) {
+		ret = ioctl(fd, SL_IOCTL_SYNC_MCAST_REMOVE, &big_rm_id);
+		if (ret == 0) {
+			printf("  OK:   BIG remove (after reconfigure)\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: BIG remove after reconfig: %s\n",
+			       strerror(errno));
+			fail_count++;
+		}
+	} else {
+		printf("  FAIL: BIG reconfigure: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 18. BIG remove - nonexistent group (ENOENT) */
+	uint8_t bad_big = 0xEE;
+
+	ret = ioctl(fd, SL_IOCTL_SYNC_MCAST_REMOVE, &bad_big);
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   BIG remove nonexistent (ENOENT)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: BIG remove nonexistent expected ENOENT\n");
+		fail_count++;
+	}
+
 	printf("  Sync link management: %d OK, %d FAIL\n", ok_count, fail_count);
 }
 
@@ -9749,6 +9966,7 @@ int main(void)
 	test_security_numeric_comparison(fd);
 	test_security_oob_pin_password(fd);
 	test_rpa_management(fd);
+	test_encrypted_data_path(fd);
 	test_ssap_service(fd);
 	test_ssap_dynamic_registration(fd);
 	test_power_management(fd);

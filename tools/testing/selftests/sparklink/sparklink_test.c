@@ -40,6 +40,7 @@
 /* ------------------------------------------------------------------ */
 
 #include "sparklink_ioctl.h"
+#include "sparklink.h"
 
 /* ------------------------------------------------------------------ */
 /* Test helpers                                                        */
@@ -3050,27 +3051,8 @@ cleanup:
 /* Generic Netlink test (raw socket, no libnl dependency)              */
 /* ------------------------------------------------------------------ */
 
-/* Sparklink genetlink constants (must match uapi/linux/sparklink.h) */
-#define SL_GENL_NAME		"sparklink"
-#define SL_GENL_CMD_GET_DEV_INFO 1
-#define SL_GENL_CMD_START_ADV	 4
-#define SL_GENL_CMD_STOP_ADV	 5
-#define SL_GENL_CMD_START_SCAN	 6
-#define SL_GENL_CMD_STOP_SCAN	 7
-#define SL_GENL_CMD_GET_PM_INFO	 23
-#define SL_GENL_CMD_GET_DLI_INFO 27
-#define SL_GENL_CMD_GET_VERSION	 28
-#define SL_GENL_CMD_SET_ROLE	 29
-#define SL_GENL_CMD_GET_ROLE	 30
-#define SL_GENL_ATTR_DEV_COUNT	 5
-#define SL_GENL_ATTR_PROTO_VER	 6
-#define SL_GENL_ATTR_GENL_VER	 7
-#define SL_GENL_ATTR_GT_ROLE	 12
-#define SL_GENL_ATTR_DISC_LEVEL	 18
-#define SL_GENL_ATTR_INTERVAL_MS 19
-#define SL_GENL_ATTR_WINDOW_MS	 20
-#define SL_GENL_ATTR_PM_STATE	 35
-#define SL_GENL_ATTR_DLI_BUS	 46
+/* Sparklink genetlink constants from sparklink.h */
+#define SL_GENL_NAME		SPARKLINK_GENL_NAME
 
 struct genl_msg {
 	struct nlmsghdr nlh;
@@ -9956,11 +9938,11 @@ static void test_genetlink(void)
 
 	/* Step 2: GET_DEV_INFO command */
 	char resp[4096];
-	int len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_GET_DEV_INFO,
+	int len = genl_send_cmd(nlfd, family_id, SPARKLINK_CMD_GET_DEV_INFO,
 				2, resp, sizeof(resp));
 	if (len > 0) {
 		uint32_t count = genl_get_u32_attr(resp, len,
-						   SL_GENL_ATTR_DEV_COUNT);
+						   SPARKLINK_ATTR_DEV_COUNT);
 		if (count != 0xDEAD) {
 			printf("  OK:   GET_DEV_INFO: dev_count=%u\n", count);
 		} else {
@@ -9971,13 +9953,13 @@ static void test_genetlink(void)
 	}
 
 	/* Step 3: GET_VERSION command */
-	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_GET_VERSION,
+	len = genl_send_cmd(nlfd, family_id, SPARKLINK_CMD_GET_VERSION,
 			    3, resp, sizeof(resp));
 	if (len > 0) {
 		uint32_t proto_ver = genl_get_u32_attr(resp, len,
-						       SL_GENL_ATTR_PROTO_VER);
+						       SPARKLINK_ATTR_PROTO_VERSION);
 		uint32_t genl_ver = genl_get_u32_attr(resp, len,
-						      SL_GENL_ATTR_GENL_VER);
+						      SPARKLINK_ATTR_GENL_VERSION);
 		if (proto_ver != 0xDEAD) {
 			printf("  OK:   GET_VERSION: proto=0x%06x genl=%u\n",
 			       proto_ver, genl_ver);
@@ -9989,10 +9971,10 @@ static void test_genetlink(void)
 	}
 
 	/* Step 4: GET_ROLE — query current role */
-	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_GET_ROLE,
+	len = genl_send_cmd(nlfd, family_id, SPARKLINK_CMD_GET_ROLE,
 			    4, resp, sizeof(resp));
 	if (len > 0) {
-		uint8_t role = genl_get_u8_attr(resp, len, SL_GENL_ATTR_GT_ROLE);
+		uint8_t role = genl_get_u8_attr(resp, len, SPARKLINK_ATTR_GT_ROLE);
 
 		if (role != 0xFF) {
 			printf("  OK:   GET_ROLE: role=%u (%s)\n", role,
@@ -10005,8 +9987,8 @@ static void test_genetlink(void)
 	}
 
 	/* Step 5: SET_ROLE to GNode (1) */
-	len = genl_send_cmd_u8(nlfd, family_id, SL_GENL_CMD_SET_ROLE,
-			       5, SL_GENL_ATTR_GT_ROLE, 1,
+	len = genl_send_cmd_u8(nlfd, family_id, SPARKLINK_CMD_SET_ROLE,
+			       5, SPARKLINK_ATTR_GT_ROLE, 1,
 			       resp, sizeof(resp));
 	if (len > 0)
 		printf("  OK:   SET_ROLE(GNode): accepted\n");
@@ -10015,10 +9997,10 @@ static void test_genetlink(void)
 		       len);
 
 	/* Step 6: GET_ROLE again — verify it changed */
-	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_GET_ROLE,
+	len = genl_send_cmd(nlfd, family_id, SPARKLINK_CMD_GET_ROLE,
 			    6, resp, sizeof(resp));
 	if (len > 0) {
-		uint8_t role = genl_get_u8_attr(resp, len, SL_GENL_ATTR_GT_ROLE);
+		uint8_t role = genl_get_u8_attr(resp, len, SPARKLINK_ATTR_GT_ROLE);
 
 		if (role == 1)
 			printf("  OK:   GET_ROLE after SET: GNode confirmed\n");
@@ -10028,11 +10010,11 @@ static void test_genetlink(void)
 	}
 
 	/* Step 7: GET_PM_INFO — power management query */
-	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_GET_PM_INFO,
+	len = genl_send_cmd(nlfd, family_id, SPARKLINK_CMD_GET_PM_INFO,
 			    7, resp, sizeof(resp));
 	if (len > 0) {
 		uint8_t pm_state = genl_get_u8_attr(resp, len,
-						    SL_GENL_ATTR_PM_STATE);
+						    SPARKLINK_ATTR_PM_STATE);
 		if (pm_state != 0xFF)
 			printf("  OK:   GET_PM_INFO: pm_state=%u\n", pm_state);
 		else
@@ -10042,10 +10024,10 @@ static void test_genetlink(void)
 	}
 
 	/* Step 8: GET_DLI_INFO — controller information */
-	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_GET_DLI_INFO,
+	len = genl_send_cmd(nlfd, family_id, SPARKLINK_CMD_GET_DLI_INFO,
 			    8, resp, sizeof(resp));
 	if (len > 0) {
-		uint8_t bus = genl_get_u8_attr(resp, len, SL_GENL_ATTR_DLI_BUS);
+		uint8_t bus = genl_get_u8_attr(resp, len, SPARKLINK_ATTR_DLI_BUS);
 
 		if (bus != 0xFF)
 			printf("  OK:   GET_DLI_INFO: bus=%u\n", bus);
@@ -10056,7 +10038,7 @@ static void test_genetlink(void)
 	}
 
 	/* Step 9: START_ADV via genetlink */
-	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_START_ADV,
+	len = genl_send_cmd(nlfd, family_id, SPARKLINK_CMD_START_ADV,
 			    9, resp, sizeof(resp));
 	if (len > 0 || len == 0)
 		printf("  OK:   START_ADV (genl): accepted\n");
@@ -10064,7 +10046,7 @@ static void test_genetlink(void)
 		printf("  WARN: START_ADV (genl): ret=%d\n", len);
 
 	/* Step 10: STOP_ADV via genetlink */
-	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_STOP_ADV,
+	len = genl_send_cmd(nlfd, family_id, SPARKLINK_CMD_STOP_ADV,
 			    10, resp, sizeof(resp));
 	if (len > 0 || len == 0)
 		printf("  OK:   STOP_ADV (genl): accepted\n");
@@ -10072,11 +10054,11 @@ static void test_genetlink(void)
 		printf("  WARN: STOP_ADV (genl): ret=%d\n", len);
 
 	/* Step 11: SET_ROLE back to TNode for scan */
-	genl_send_cmd_u8(nlfd, family_id, SL_GENL_CMD_SET_ROLE,
-			 11, SL_GENL_ATTR_GT_ROLE, 0, resp, sizeof(resp));
+	genl_send_cmd_u8(nlfd, family_id, SPARKLINK_CMD_SET_ROLE,
+			 11, SPARKLINK_ATTR_GT_ROLE, 0, resp, sizeof(resp));
 
 	/* Step 12: START_SCAN via genetlink */
-	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_START_SCAN,
+	len = genl_send_cmd(nlfd, family_id, SPARKLINK_CMD_START_SCAN,
 			    12, resp, sizeof(resp));
 	if (len > 0 || len == 0)
 		printf("  OK:   START_SCAN (genl): accepted\n");
@@ -10084,7 +10066,7 @@ static void test_genetlink(void)
 		printf("  WARN: START_SCAN (genl): ret=%d\n", len);
 
 	/* Step 13: STOP_SCAN via genetlink */
-	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_STOP_SCAN,
+	len = genl_send_cmd(nlfd, family_id, SPARKLINK_CMD_STOP_SCAN,
 			    13, resp, sizeof(resp));
 	if (len > 0 || len == 0)
 		printf("  OK:   STOP_SCAN (genl): accepted\n");

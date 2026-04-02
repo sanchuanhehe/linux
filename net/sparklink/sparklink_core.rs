@@ -416,6 +416,26 @@ const SL_IOCTL_START_SCAN: u32 = _IOW::<SleScanParams>(SL_MAGIC, 0x12);
 /// Stop SLE scanning.
 const SL_IOCTL_STOP_SCAN: u32 = _IO(SL_MAGIC, 0x13);
 
+// --- Extended advertising ioctls ---
+
+/// Configure an extended advertising set.
+const SL_IOCTL_EXT_ADV_CONFIGURE: u32 = _IOW::<SleExtAdvConfig>(SL_MAGIC, 0x14);
+
+/// Set data for an extended advertising set.
+const SL_IOCTL_EXT_ADV_SET_DATA: u32 = _IOW::<SleExtAdvData>(SL_MAGIC, 0x15);
+
+/// Enable an extended advertising set.
+const SL_IOCTL_EXT_ADV_ENABLE: u32 = _IOW::<u8>(SL_MAGIC, 0x16);
+
+/// Disable an extended advertising set.
+const SL_IOCTL_EXT_ADV_DISABLE: u32 = _IOW::<u8>(SL_MAGIC, 0x17);
+
+/// Remove an extended advertising set.
+const SL_IOCTL_EXT_ADV_REMOVE: u32 = _IOW::<u8>(SL_MAGIC, 0x18);
+
+/// Get info about an extended advertising set.
+const SL_IOCTL_EXT_ADV_INFO: u32 = _IOWR::<SleExtAdvInfo>(SL_MAGIC, 0x19);
+
 /// Inject a simulated advertising PDU for loopback testing.
 /// Userspace provides a SleInjectAdv struct; if in scanning state,
 /// the PDU is processed as a received advertisement.
@@ -722,6 +742,85 @@ pub struct SleScanParams {
 
 // SAFETY: SleScanParams is repr(C) with only primitive fields, all bit patterns valid.
 unsafe impl FromBytes for SleScanParams {}
+
+// ---------------------------------------------------------------------------
+// Extended advertising userspace data structures
+// ---------------------------------------------------------------------------
+
+/// Extended advertising set configuration.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleExtAdvConfig {
+    /// Set handle (0..3).
+    pub handle: u8,
+    /// Discovery level (0-4).
+    pub discovery_level: u8,
+    /// Advertising SID (0-15).
+    pub sid: u8,
+    /// Broadcast type (0-3).
+    pub broadcast_type: u8,
+    /// Primary PHY (0=1M, 1=2M, 2=Coded).
+    pub primary_phy: u8,
+    /// Secondary PHY (0=1M, 1=2M, 2=Coded).
+    pub secondary_phy: u8,
+    /// TX power in dBm.
+    pub tx_power_dbm: i8,
+    /// Include TX power in extended header.
+    pub include_tx_power: u8,
+    /// Advertising interval in milliseconds.
+    pub interval_ms: u16,
+    _reserved: [u8; 6],
+}
+
+/// Extended advertising data payload.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SleExtAdvData {
+    /// Set handle (0..3).
+    pub handle: u8,
+    _pad: u8,
+    /// Length of data in bytes.
+    pub data_len: u16,
+    /// Raw advertising data.
+    pub data: [u8; 252],
+}
+
+impl Default for SleExtAdvData {
+    fn default() -> Self {
+        Self {
+            handle: 0,
+            _pad: 0,
+            data_len: 0,
+            data: [0u8; 252],
+        }
+    }
+}
+
+/// Extended advertising set info (output).
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleExtAdvInfo {
+    /// Set handle (input).
+    pub handle: u8,
+    /// State: 0=Idle, 1=Configured, 2=Active.
+    pub state: u8,
+    /// Advertising SID.
+    pub sid: u8,
+    /// Primary PHY.
+    pub primary_phy: u8,
+    /// Data length.
+    pub data_len: u16,
+    _pad: u16,
+    /// PDUs sent.
+    pub tx_count: u64,
+}
+
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleExtAdvConfig {}
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleExtAdvData {}
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleExtAdvInfo {}
 
 /// Injected advertising data for loopback testing.
 #[repr(C)]
@@ -3297,6 +3396,82 @@ impl MiscDevice for SparkLinkCtl {
                 let mask = s.dev_registry.allocated_mask();
                 drop(ss);
                 write_user_struct(arg, &mask)?;
+                Ok(0)
+            }
+            // --- Extended advertising ---
+            SL_IOCTL_EXT_ADV_CONFIGURE => {
+                let cfg: SleExtAdvConfig = read_user_struct(arg)?;
+                let primary_phy = sle_adv::ExtAdvPhy::from_raw(cfg.primary_phy)
+                    .ok_or(EINVAL)?;
+                let secondary_phy = sle_adv::ExtAdvPhy::from_raw(cfg.secondary_phy)
+                    .ok_or(EINVAL)?;
+                let bcast = sle_pdu::BroadcastType::from_raw(cfg.broadcast_type)
+                    .ok_or(EINVAL)?;
+                let params = sle_adv::ExtAdvParams {
+                    discovery_level: cfg.discovery_level,
+                    interval_slots: u32::from(cfg.interval_ms) * 8, // ms to 125us slots
+                    broadcast_type: bcast,
+                    tx_power: cfg.tx_power_dbm,
+                    primary_phy,
+                    secondary_phy,
+                    sid: cfg.sid,
+                    include_tx_power: cfg.include_tx_power != 0,
+                };
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.adv_scan.ext_adv_configure(cfg.handle, params)?;
+                Ok(0)
+            }
+            SL_IOCTL_EXT_ADV_SET_DATA => {
+                let d: SleExtAdvData = read_user_struct(arg)?;
+                let len = (d.data_len as usize).min(252);
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.adv_scan.ext_adv_set_data(d.handle, &d.data[..len])?;
+                Ok(0)
+            }
+            SL_IOCTL_EXT_ADV_ENABLE => {
+                let handle: u8 = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.adv_scan.ext_adv_enable(handle)?;
+                Ok(0)
+            }
+            SL_IOCTL_EXT_ADV_DISABLE => {
+                let handle: u8 = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.adv_scan.ext_adv_disable(handle)?;
+                Ok(0)
+            }
+            SL_IOCTL_EXT_ADV_REMOVE => {
+                let handle: u8 = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.adv_scan.ext_adv_remove(handle)?;
+                Ok(0)
+            }
+            SL_IOCTL_EXT_ADV_INFO => {
+                let params: SleExtAdvInfo = read_user_struct(arg)?;
+                let ss = SUBSYSTEM.lock();
+                let s = ss.as_ref().ok_or(ENODEV)?;
+                let (state, sid, phy, data_len, tx_count) =
+                    s.adv_scan.ext_adv_info(params.handle)?;
+                drop(ss);
+                let out = SleExtAdvInfo {
+                    handle: params.handle,
+                    state: match state {
+                        sle_adv::ExtAdvState::Idle => 0,
+                        sle_adv::ExtAdvState::Configured => 1,
+                        sle_adv::ExtAdvState::Active => 2,
+                    },
+                    sid,
+                    primary_phy: phy,
+                    data_len: data_len as u16,
+                    _pad: 0,
+                    tx_count,
+                };
+                write_user_struct(arg, &out)?;
                 Ok(0)
             }
             SL_IOCTL_INJECT_ADV => {

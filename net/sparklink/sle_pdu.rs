@@ -321,6 +321,16 @@ impl AdvDataBuilder {
         self.push_tlv(AdvDataType::SleMacAddr as u8, addr)
     }
 
+    /// Append raw bytes directly to the payload (not TLV-wrapped).
+    pub fn push_raw(&mut self, data: &[u8]) -> Result {
+        if data.len() > self.remaining() {
+            return Err(ENOMEM);
+        }
+        self.buf[self.len..self.len + data.len()].copy_from_slice(data);
+        self.len += data.len();
+        Ok(())
+    }
+
     /// Get a reference to the built payload.
     pub fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.len]

@@ -50,6 +50,14 @@
 #define SL_IOCTL_START_SCAN      _IOW(SL_MAGIC, 0x12, struct sle_scan_params)
 #define SL_IOCTL_STOP_SCAN       _IO(SL_MAGIC, 0x13)
 
+/* Extended advertising */
+#define SL_IOCTL_EXT_ADV_CONFIGURE _IOW(SL_MAGIC, 0x14, struct sle_ext_adv_config)
+#define SL_IOCTL_EXT_ADV_SET_DATA  _IOW(SL_MAGIC, 0x15, struct sle_ext_adv_data)
+#define SL_IOCTL_EXT_ADV_ENABLE    _IOW(SL_MAGIC, 0x16, uint8_t)
+#define SL_IOCTL_EXT_ADV_DISABLE   _IOW(SL_MAGIC, 0x17, uint8_t)
+#define SL_IOCTL_EXT_ADV_REMOVE    _IOW(SL_MAGIC, 0x18, uint8_t)
+#define SL_IOCTL_EXT_ADV_INFO      _IOWR(SL_MAGIC, 0x19, struct sle_ext_adv_info)
+
 #define SL_IOCTL_INJECT_ADV      _IOW(SL_MAGIC, 0x20, struct sle_inject_adv)
 #define SL_IOCTL_SCAN_RESULT_COUNT _IO(SL_MAGIC, 0x21)
 #define SL_IOCTL_INJECT_RAW_ADV  _IOW(SL_MAGIC, 0x22, struct sle_inject_raw_adv)
@@ -162,6 +170,37 @@ struct sle_scan_params {
 	uint16_t interval_ms;
 	uint8_t  filter_discovery_level;
 	uint8_t  _reserved[9];
+} __attribute__((packed));
+
+/* Extended advertising structs */
+struct sle_ext_adv_config {
+	uint8_t  handle;
+	uint8_t  discovery_level;
+	uint8_t  sid;
+	uint8_t  broadcast_type;
+	uint8_t  primary_phy;
+	uint8_t  secondary_phy;
+	int8_t   tx_power_dbm;
+	uint8_t  include_tx_power;
+	uint16_t interval_ms;
+	uint8_t  _reserved[6];
+} __attribute__((packed));
+
+struct sle_ext_adv_data {
+	uint8_t  handle;
+	uint8_t  _pad;
+	uint16_t data_len;
+	uint8_t  data[252];
+} __attribute__((packed));
+
+struct sle_ext_adv_info {
+	uint8_t  handle;
+	uint8_t  state;
+	uint8_t  sid;
+	uint8_t  primary_phy;
+	uint16_t data_len;
+	uint16_t _pad;
+	uint64_t tx_count;
 } __attribute__((packed));
 
 struct sle_inject_adv {
@@ -7300,6 +7339,204 @@ cleanup:
 }
 
 /* ------------------------------------------------------------------ *
+ * test_ext_advertising — extended advertising set management         *
+ *                                                                    *
+ * Tests multi-set extended advertising: configure, set data, enable, *
+ * disable, remove, and info queries.                                *
+ * ------------------------------------------------------------------ */
+static void test_ext_advertising(int fd)
+{
+	test_header("Extended advertising management");
+
+	int ok_count = 0, fail_count = 0;
+	int ret;
+
+	/* 1. Configure set 0 with default parameters */
+	struct sle_ext_adv_config cfg;
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.handle = 0;
+	cfg.discovery_level = 2;
+	cfg.sid = 5;
+	cfg.broadcast_type = 1; /* AccessibleScannable */
+	cfg.primary_phy = 0;    /* 1M */
+	cfg.secondary_phy = 1;  /* 2M */
+	cfg.tx_power_dbm = 10;
+	cfg.include_tx_power = 1;
+	cfg.interval_ms = 200;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_CONFIGURE, &cfg);
+	if (ret == 0) {
+		printf("  OK:   configure set 0 (SID=5, 1M/2M)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: configure set 0: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 2. Query info — should be Configured (state=1) */
+	struct sle_ext_adv_info info;
+	memset(&info, 0, sizeof(info));
+	info.handle = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_INFO, &info);
+	if (ret == 0 && info.state == 1 && info.sid == 5) {
+		printf("  OK:   set 0 state=Configured, SID=%u\n", info.sid);
+		ok_count++;
+	} else {
+		printf("  FAIL: info state=%u sid=%u (expected 1/5)\n", info.state, info.sid);
+		fail_count++;
+	}
+
+	/* 3. Set advertising data */
+	struct sle_ext_adv_data adv_data;
+	memset(&adv_data, 0, sizeof(adv_data));
+	adv_data.handle = 0;
+	adv_data.data_len = 16;
+	memset(adv_data.data, 0xAA, 16);
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_SET_DATA, &adv_data);
+	if (ret == 0) {
+		printf("  OK:   set data (16 bytes)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: set data: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 4. Verify data length in info */
+	memset(&info, 0, sizeof(info));
+	info.handle = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_INFO, &info);
+	if (ret == 0 && info.data_len == 16) {
+		printf("  OK:   data_len=%u confirmed\n", info.data_len);
+		ok_count++;
+	} else {
+		printf("  FAIL: data_len=%u (expected 16)\n", info.data_len);
+		fail_count++;
+	}
+
+	/* 5. Enable set 0 */
+	uint8_t h = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_ENABLE, &h);
+	if (ret == 0) {
+		printf("  OK:   enable set 0\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: enable set 0: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 6. Info should show Active (state=2) */
+	memset(&info, 0, sizeof(info));
+	info.handle = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_INFO, &info);
+	if (ret == 0 && info.state == 2) {
+		printf("  OK:   set 0 state=Active\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: state=%u (expected 2)\n", info.state);
+		fail_count++;
+	}
+
+	/* 7. Cannot remove active set */
+	h = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_REMOVE, &h);
+	if (ret < 0 && errno == EBUSY) {
+		printf("  OK:   remove active set rejected (EBUSY)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EBUSY for removing active set, ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 8. Disable set 0 */
+	h = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_DISABLE, &h);
+	if (ret == 0) {
+		printf("  OK:   disable set 0\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: disable set 0: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 9. Remove set 0 */
+	h = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_REMOVE, &h);
+	if (ret == 0) {
+		printf("  OK:   remove set 0\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: remove set 0: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 10. Info on removed set should fail */
+	memset(&info, 0, sizeof(info));
+	info.handle = 0;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_INFO, &info);
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   info on removed set returns ENOENT\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected ENOENT, ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 11. Configure multiple sets simultaneously */
+	int multi_ok = 1;
+	for (int i = 0; i < 4; i++) {
+		memset(&cfg, 0, sizeof(cfg));
+		cfg.handle = (uint8_t)i;
+		cfg.discovery_level = 1;
+		cfg.sid = (uint8_t)i;
+		cfg.broadcast_type = 1;
+		cfg.interval_ms = 100;
+		ret = ioctl(fd, SL_IOCTL_EXT_ADV_CONFIGURE, &cfg);
+		if (ret != 0) multi_ok = 0;
+	}
+	if (multi_ok) {
+		printf("  OK:   configured 4 sets concurrently\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: multi-set configure failed\n");
+		fail_count++;
+	}
+
+	/* 12. Reject handle >= 4 */
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.handle = 4;
+	cfg.broadcast_type = 1;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_CONFIGURE, &cfg);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   handle=4 rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EINVAL for handle=4, ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 13. Reject invalid SID > 15 */
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.handle = 0;
+	cfg.sid = 16;
+	cfg.broadcast_type = 1;
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_CONFIGURE, &cfg);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   SID=16 rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EINVAL for SID=16, ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* Cleanup: remove all sets */
+	for (int i = 0; i < 4; i++) {
+		h = (uint8_t)i;
+		ioctl(fd, SL_IOCTL_EXT_ADV_REMOVE, &h);
+	}
+
+	printf("  Extended advertising: %d OK, %d FAIL\n", ok_count, fail_count);
+}
+
+/* ------------------------------------------------------------------ *
  * test_ssap_capacity_stress — SSAP service/property limits          *
  *                                                                    *
  * Registers services until the subsystem refuses, verifying that    *
@@ -7632,6 +7869,7 @@ int main(void)
 	test_crc12_verification(fd);
 	test_mtu_mps_negotiation(fd);
 	test_afh_channel_map(fd);
+	test_ext_advertising(fd);
 	test_phy_extreme_params(fd);
 	test_genetlink();
 

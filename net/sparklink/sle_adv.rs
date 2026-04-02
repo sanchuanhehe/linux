@@ -110,6 +110,145 @@ impl Default for ScanResult {
 }
 
 // ---------------------------------------------------------------------------
+// Extended advertising (T/XS 10002-2025 section 6.8)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of concurrent extended advertising sets.
+pub const EXT_ADV_MAX_SETS: usize = 4;
+
+/// Maximum extended advertising data length.
+/// Primary channel: 251 bytes. Auxiliary channel: up to 1650 bytes.
+pub const EXT_ADV_DATA_MAX: usize = 1650;
+
+/// Extended advertising PHY selection.
+#[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum ExtAdvPhy {
+    /// 1 MHz bandwidth (default).
+    #[default]
+    Phy1M = 0,
+    /// 2 MHz bandwidth.
+    Phy2M = 1,
+    /// 4 MHz bandwidth (coded PHY).
+    PhyCoded = 2,
+}
+
+impl ExtAdvPhy {
+    pub fn from_raw(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Phy1M),
+            1 => Some(Self::Phy2M),
+            2 => Some(Self::PhyCoded),
+            _ => None,
+        }
+    }
+}
+
+/// Extended advertising set parameters.
+#[derive(Clone, Debug)]
+pub struct ExtAdvParams {
+    /// Discovery level (0-4).
+    pub discovery_level: u8,
+    /// Advertising interval in 125us slots.
+    pub interval_slots: u32,
+    /// Broadcast type for the PDU header.
+    pub broadcast_type: BroadcastType,
+    /// TX power in dBm.
+    pub tx_power: i8,
+    /// Primary advertising PHY.
+    pub primary_phy: ExtAdvPhy,
+    /// Secondary advertising PHY (for auxiliary channel).
+    pub secondary_phy: ExtAdvPhy,
+    /// Advertising SID (set identifier, 0-15).
+    pub sid: u8,
+    /// Whether to include TX power in the extended header.
+    pub include_tx_power: bool,
+}
+
+impl Default for ExtAdvParams {
+    fn default() -> Self {
+        Self {
+            discovery_level: 1,
+            interval_slots: 800,
+            broadcast_type: BroadcastType::AccessibleScannable,
+            tx_power: 0,
+            primary_phy: ExtAdvPhy::Phy1M,
+            secondary_phy: ExtAdvPhy::Phy1M,
+            sid: 0,
+            include_tx_power: true,
+        }
+    }
+}
+
+/// State of a single extended advertising set.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum ExtAdvState {
+    #[default]
+    Idle,
+    Configured,
+    Active,
+}
+
+/// A single extended advertising set.
+pub struct ExtAdvSet {
+    /// Set handle (0..EXT_ADV_MAX_SETS-1).
+    pub handle: u8,
+    /// Current state.
+    pub state: ExtAdvState,
+    /// Advertising parameters.
+    pub params: ExtAdvParams,
+    /// Advertising data (primary + auxiliary combined).
+    pub data: [u8; EXT_ADV_DATA_MAX],
+    /// Length of valid data.
+    pub data_len: usize,
+    /// Number of PDUs sent since enabled.
+    pub tx_count: u64,
+}
+
+impl ExtAdvSet {
+    fn new(handle: u8) -> Self {
+        Self {
+            handle,
+            state: ExtAdvState::Idle,
+            params: ExtAdvParams::default(),
+            data: [0u8; EXT_ADV_DATA_MAX],
+            data_len: 0,
+            tx_count: 0,
+        }
+    }
+
+    /// Build an extended advertising PDU.
+    /// For data <= 251 bytes, uses a single primary PDU.
+    /// For larger data, the primary PDU carries 251 bytes and signals
+    /// auxiliary data via the PacketType field.
+    pub fn build_pdu(&self, addr: &[u8; 6], name: &[u8]) -> Option<AdvPdu> {
+        if self.state != ExtAdvState::Active {
+            return None;
+        }
+        let mut builder = AdvDataBuilder::new();
+        let _ = builder.push_discovery_level(self.params.discovery_level);
+        if self.params.include_tx_power {
+            let _ = builder.push_tx_power(self.params.tx_power);
+        }
+        let _ = builder.push_sle_addr(addr);
+        if !name.is_empty() {
+            let _ = builder.push_complete_name(name);
+        }
+        // Append custom advertising data.
+        if self.data_len > 0 {
+            let _ = builder.push_raw(&self.data[..self.data_len]);
+        }
+
+        Some(AdvPdu::build(
+            self.params.broadcast_type,
+            PacketType::ExtendedAdv,
+            0,
+            &builder,
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // State machine
 // ---------------------------------------------------------------------------
 
@@ -147,6 +286,8 @@ pub struct AdvScanInner {
     pub scan_results: KVec<ScanResult>,
     /// Maximum number of scan results to retain.
     pub scan_results_max: usize,
+    /// Extended advertising sets.
+    pub ext_adv_sets: [Option<ExtAdvSet>; EXT_ADV_MAX_SETS],
 }
 
 impl AdvScanInner {
@@ -164,6 +305,7 @@ impl AdvScanInner {
             addr,
             scan_results: KVec::new(),
             scan_results_max: 64,
+            ext_adv_sets: [None, None, None, None],
         }
     }
 
@@ -382,5 +524,141 @@ impl AdvScanInner {
     /// Get the number of available scan results.
     pub fn scan_result_count(&self) -> usize {
         self.scan_results.len()
+    }
+
+    // -----------------------------------------------------------------------
+    // Extended advertising set management
+    // -----------------------------------------------------------------------
+
+    /// Configure an extended advertising set.
+    ///
+    /// Creates or updates the set at `handle` (0..EXT_ADV_MAX_SETS-1).
+    pub fn ext_adv_configure(&mut self, handle: u8, params: ExtAdvParams) -> Result {
+        let idx = handle as usize;
+        if idx >= EXT_ADV_MAX_SETS {
+            return Err(EINVAL);
+        }
+        if params.sid > 15 {
+            return Err(EINVAL);
+        }
+        match &mut self.ext_adv_sets[idx] {
+            Some(set) => {
+                if set.state == ExtAdvState::Active {
+                    return Err(EBUSY);
+                }
+                set.params = params;
+                set.state = ExtAdvState::Configured;
+            }
+            slot => {
+                let mut set = ExtAdvSet::new(handle);
+                set.params = params;
+                set.state = ExtAdvState::Configured;
+                *slot = Some(set);
+            }
+        }
+        Ok(())
+    }
+
+    /// Set advertising data for an extended advertising set.
+    pub fn ext_adv_set_data(&mut self, handle: u8, data: &[u8]) -> Result {
+        let idx = handle as usize;
+        if idx >= EXT_ADV_MAX_SETS {
+            return Err(EINVAL);
+        }
+        let set = self.ext_adv_sets[idx].as_mut().ok_or(ENOENT)?;
+        if set.state == ExtAdvState::Idle {
+            return Err(EINVAL);
+        }
+        let len = data.len().min(EXT_ADV_DATA_MAX);
+        set.data[..len].copy_from_slice(&data[..len]);
+        set.data_len = len;
+        Ok(())
+    }
+
+    /// Enable an extended advertising set.
+    pub fn ext_adv_enable(&mut self, handle: u8) -> Result {
+        let idx = handle as usize;
+        if idx >= EXT_ADV_MAX_SETS {
+            return Err(EINVAL);
+        }
+        let set = self.ext_adv_sets[idx].as_mut().ok_or(ENOENT)?;
+        if set.state == ExtAdvState::Idle {
+            return Err(EINVAL);
+        }
+        set.state = ExtAdvState::Active;
+        set.tx_count = 0;
+        Ok(())
+    }
+
+    /// Disable an extended advertising set.
+    pub fn ext_adv_disable(&mut self, handle: u8) -> Result {
+        let idx = handle as usize;
+        if idx >= EXT_ADV_MAX_SETS {
+            return Err(EINVAL);
+        }
+        let set = self.ext_adv_sets[idx].as_mut().ok_or(ENOENT)?;
+        if set.state != ExtAdvState::Active {
+            return Err(EINVAL);
+        }
+        set.state = ExtAdvState::Configured;
+        Ok(())
+    }
+
+    /// Remove an extended advertising set.
+    pub fn ext_adv_remove(&mut self, handle: u8) -> Result {
+        let idx = handle as usize;
+        if idx >= EXT_ADV_MAX_SETS {
+            return Err(EINVAL);
+        }
+        let set = self.ext_adv_sets[idx].as_ref().ok_or(ENOENT)?;
+        if set.state == ExtAdvState::Active {
+            return Err(EBUSY);
+        }
+        self.ext_adv_sets[idx] = None;
+        Ok(())
+    }
+
+    /// Get info about an extended advertising set.
+    pub fn ext_adv_info(&self, handle: u8) -> Result<(ExtAdvState, u8, u8, usize, u64)> {
+        let idx = handle as usize;
+        if idx >= EXT_ADV_MAX_SETS {
+            return Err(EINVAL);
+        }
+        let set = self.ext_adv_sets[idx].as_ref().ok_or(ENOENT)?;
+        Ok((
+            set.state,
+            set.params.sid,
+            set.params.primary_phy as u8,
+            set.data_len,
+            set.tx_count,
+        ))
+    }
+
+    /// Build extended advertising PDU for the given set.
+    pub fn build_ext_adv_pdu(&self, handle: u8) -> Option<AdvPdu> {
+        let idx = handle as usize;
+        if idx >= EXT_ADV_MAX_SETS {
+            return None;
+        }
+        let set = self.ext_adv_sets[idx].as_ref()?;
+        let name = if self.local_name_len > 0 {
+            &self.local_name[..self.local_name_len]
+        } else {
+            &[]
+        };
+        set.build_pdu(&self.addr, name)
+    }
+
+    /// Count active extended advertising sets.
+    pub fn ext_adv_active_count(&self) -> u8 {
+        let mut count = 0u8;
+        for slot in &self.ext_adv_sets {
+            if let Some(set) = slot {
+                if set.state == ExtAdvState::Active {
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 }

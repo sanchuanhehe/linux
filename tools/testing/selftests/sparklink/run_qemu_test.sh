@@ -91,7 +91,18 @@ info "Building sparklink_test (static)..."
 TEST_SRC="$SCRIPT_DIR/sparklink_test.c"
 TEST_BIN="$SCRIPT_DIR/sparklink_test_static"
 
-gcc -Wall -Wextra -O2 -static -o "$TEST_BIN" "$TEST_SRC"
+# Resolve kernel source tree root (four levels up from selftests/sparklink)
+KERNEL_SRC="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+
+# Symlink UAPI header into the test directory for local include
+UAPI_HEADER="$KERNEL_SRC/include/uapi/linux/sparklink_ioctl.h"
+SYMLINK_TARGET="$SCRIPT_DIR/sparklink_ioctl.h"
+if [ ! -e "$SYMLINK_TARGET" ] && [ -f "$UAPI_HEADER" ]; then
+	ln -sf "$UAPI_HEADER" "$SYMLINK_TARGET"
+fi
+
+gcc -Wall -Wextra -O2 -static \
+    -o "$TEST_BIN" "$TEST_SRC"
 
 info "  Built: $TEST_BIN"
 

@@ -3053,10 +3053,24 @@ cleanup:
 /* Sparklink genetlink constants (must match uapi/linux/sparklink.h) */
 #define SL_GENL_NAME		"sparklink"
 #define SL_GENL_CMD_GET_DEV_INFO 1
-#define SL_GENL_CMD_GET_VERSION	 28  /* SPARKLINK_CMD_GET_VERSION enum value */
-#define SL_GENL_ATTR_DEV_COUNT	 5   /* SPARKLINK_ATTR_DEV_COUNT */
-#define SL_GENL_ATTR_PROTO_VER	 6   /* SPARKLINK_ATTR_PROTO_VERSION */
-#define SL_GENL_ATTR_GENL_VER	 7   /* SPARKLINK_ATTR_GENL_VERSION */
+#define SL_GENL_CMD_START_ADV	 4
+#define SL_GENL_CMD_STOP_ADV	 5
+#define SL_GENL_CMD_START_SCAN	 6
+#define SL_GENL_CMD_STOP_SCAN	 7
+#define SL_GENL_CMD_GET_PM_INFO	 23
+#define SL_GENL_CMD_GET_DLI_INFO 27
+#define SL_GENL_CMD_GET_VERSION	 28
+#define SL_GENL_CMD_SET_ROLE	 29
+#define SL_GENL_CMD_GET_ROLE	 30
+#define SL_GENL_ATTR_DEV_COUNT	 5
+#define SL_GENL_ATTR_PROTO_VER	 6
+#define SL_GENL_ATTR_GENL_VER	 7
+#define SL_GENL_ATTR_GT_ROLE	 12
+#define SL_GENL_ATTR_DISC_LEVEL	 18
+#define SL_GENL_ATTR_INTERVAL_MS 19
+#define SL_GENL_ATTR_WINDOW_MS	 20
+#define SL_GENL_ATTR_PM_STATE	 35
+#define SL_GENL_ATTR_DLI_BUS	 46
 
 struct genl_msg {
 	struct nlmsghdr nlh;
@@ -3121,10 +3135,18 @@ static int genl_send_cmd(int nlfd, uint16_t family_id, uint8_t cmd,
 {
 	struct genl_msg req;
 
+	/* Drain any stale messages from socket buffer */
+	{
+		char drain[4096];
+
+		while (recv(nlfd, drain, sizeof(drain), MSG_DONTWAIT) > 0)
+			;
+	}
+
 	memset(&req, 0, sizeof(req));
 	req.nlh.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
 	req.nlh.nlmsg_type = family_id;
-	req.nlh.nlmsg_flags = NLM_F_REQUEST;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
 	req.nlh.nlmsg_seq = seq;
 	req.genl.cmd = cmd;
 	req.genl.version = 1;
@@ -3142,10 +3164,9 @@ static int genl_send_cmd(int nlfd, uint16_t family_id, uint8_t cmd,
 	if (nlh->nlmsg_type == NLMSG_ERROR) {
 		struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(nlh);
 
-		if (err->error != 0)
-			return err->error;
+		return err->error; /* 0 = success (ACK), <0 = error */
 	}
-	return len;
+	return len; /* data reply */
 }
 
 static uint32_t genl_get_u32_attr(char *msg, int msg_len, uint16_t attr_type)
@@ -3166,6 +3187,74 @@ static uint32_t genl_get_u32_attr(char *msg, int msg_len, uint16_t attr_type)
 		remaining -= step;
 	}
 	return 0xDEAD;
+}
+
+static uint8_t genl_get_u8_attr(char *msg, int msg_len, uint16_t attr_type)
+{
+	char *attr_start = msg + NLMSG_HDRLEN + GENL_HDRLEN;
+	int remaining = msg_len - NLMSG_HDRLEN - GENL_HDRLEN;
+
+	while (remaining >= (int)NLA_HDRLEN) {
+		struct nlattr *nla = (struct nlattr *)attr_start;
+
+		if (nla->nla_len < NLA_HDRLEN || (int)nla->nla_len > remaining)
+			break;
+		if (nla->nla_type == attr_type && nla->nla_len >= NLA_HDRLEN + 1)
+			return *(uint8_t *)((char *)nla + NLA_HDRLEN);
+		int step = NLA_ALIGN(nla->nla_len);
+
+		attr_start += step;
+		remaining -= step;
+	}
+	return 0xFF;
+}
+
+static int genl_send_cmd_u8(int nlfd, uint16_t family_id, uint8_t cmd,
+			    uint32_t seq, uint16_t attr_type, uint8_t val,
+			    char *resp, int resp_size)
+{
+	struct genl_msg req;
+
+	/* Drain any stale messages from socket buffer */
+	{
+		char drain[4096];
+
+		while (recv(nlfd, drain, sizeof(drain), MSG_DONTWAIT) > 0)
+			;
+	}
+
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+	req.nlh.nlmsg_type = family_id;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	req.nlh.nlmsg_seq = seq;
+	req.genl.cmd = cmd;
+	req.genl.version = 1;
+
+	/* Append a u8 NLA attribute */
+	struct nlattr *nla = (struct nlattr *)((char *)&req + req.nlh.nlmsg_len);
+
+	nla->nla_type = attr_type;
+	nla->nla_len = NLA_HDRLEN + 1;
+	*(uint8_t *)((char *)nla + NLA_HDRLEN) = val;
+	req.nlh.nlmsg_len += NLA_ALIGN(nla->nla_len);
+
+	if (send(nlfd, &req, req.nlh.nlmsg_len, 0) < 0)
+		return -1;
+
+	int len = recv(nlfd, resp, resp_size, 0);
+
+	if (len < 0)
+		return -1;
+
+	struct nlmsghdr *nlh = (struct nlmsghdr *)resp;
+
+	if (nlh->nlmsg_type == NLMSG_ERROR) {
+		struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(nlh);
+
+		return err->error; /* 0 = success (ACK), <0 = error */
+	}
+	return len; /* data reply */
 }
 
 /* ------------------------------------------------------------------ */
@@ -9679,6 +9768,109 @@ static void test_genetlink(void)
 	} else {
 		printf("  FAIL: GET_VERSION failed (len=%d)\n", len);
 	}
+
+	/* Step 4: GET_ROLE — query current role */
+	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_GET_ROLE,
+			    4, resp, sizeof(resp));
+	if (len > 0) {
+		uint8_t role = genl_get_u8_attr(resp, len, SL_GENL_ATTR_GT_ROLE);
+
+		if (role != 0xFF) {
+			printf("  OK:   GET_ROLE: role=%u (%s)\n", role,
+			       role == 0 ? "TNode" : "GNode");
+		} else {
+			printf("  FAIL: GET_ROLE: missing GT_ROLE attr\n");
+		}
+	} else {
+		printf("  FAIL: GET_ROLE failed (len=%d)\n", len);
+	}
+
+	/* Step 5: SET_ROLE to GNode (1) */
+	len = genl_send_cmd_u8(nlfd, family_id, SL_GENL_CMD_SET_ROLE,
+			       5, SL_GENL_ATTR_GT_ROLE, 1,
+			       resp, sizeof(resp));
+	if (len > 0)
+		printf("  OK:   SET_ROLE(GNode): accepted\n");
+	else
+		printf("  WARN: SET_ROLE(GNode): ret=%d (may need CAP_NET_ADMIN)\n",
+		       len);
+
+	/* Step 6: GET_ROLE again — verify it changed */
+	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_GET_ROLE,
+			    6, resp, sizeof(resp));
+	if (len > 0) {
+		uint8_t role = genl_get_u8_attr(resp, len, SL_GENL_ATTR_GT_ROLE);
+
+		if (role == 1)
+			printf("  OK:   GET_ROLE after SET: GNode confirmed\n");
+		else
+			printf("  WARN: GET_ROLE after SET: role=%u (expected 1)\n",
+			       role);
+	}
+
+	/* Step 7: GET_PM_INFO — power management query */
+	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_GET_PM_INFO,
+			    7, resp, sizeof(resp));
+	if (len > 0) {
+		uint8_t pm_state = genl_get_u8_attr(resp, len,
+						    SL_GENL_ATTR_PM_STATE);
+		if (pm_state != 0xFF)
+			printf("  OK:   GET_PM_INFO: pm_state=%u\n", pm_state);
+		else
+			printf("  FAIL: GET_PM_INFO: missing PM_STATE attr\n");
+	} else {
+		printf("  FAIL: GET_PM_INFO failed (len=%d)\n", len);
+	}
+
+	/* Step 8: GET_DLI_INFO — controller information */
+	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_GET_DLI_INFO,
+			    8, resp, sizeof(resp));
+	if (len > 0) {
+		uint8_t bus = genl_get_u8_attr(resp, len, SL_GENL_ATTR_DLI_BUS);
+
+		if (bus != 0xFF)
+			printf("  OK:   GET_DLI_INFO: bus=%u\n", bus);
+		else
+			printf("  FAIL: GET_DLI_INFO: missing DLI_BUS attr\n");
+	} else {
+		printf("  FAIL: GET_DLI_INFO failed (len=%d)\n", len);
+	}
+
+	/* Step 9: START_ADV via genetlink */
+	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_START_ADV,
+			    9, resp, sizeof(resp));
+	if (len > 0 || len == 0)
+		printf("  OK:   START_ADV (genl): accepted\n");
+	else
+		printf("  WARN: START_ADV (genl): ret=%d\n", len);
+
+	/* Step 10: STOP_ADV via genetlink */
+	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_STOP_ADV,
+			    10, resp, sizeof(resp));
+	if (len > 0 || len == 0)
+		printf("  OK:   STOP_ADV (genl): accepted\n");
+	else
+		printf("  WARN: STOP_ADV (genl): ret=%d\n", len);
+
+	/* Step 11: SET_ROLE back to TNode for scan */
+	genl_send_cmd_u8(nlfd, family_id, SL_GENL_CMD_SET_ROLE,
+			 11, SL_GENL_ATTR_GT_ROLE, 0, resp, sizeof(resp));
+
+	/* Step 12: START_SCAN via genetlink */
+	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_START_SCAN,
+			    12, resp, sizeof(resp));
+	if (len > 0 || len == 0)
+		printf("  OK:   START_SCAN (genl): accepted\n");
+	else
+		printf("  WARN: START_SCAN (genl): ret=%d\n", len);
+
+	/* Step 13: STOP_SCAN via genetlink */
+	len = genl_send_cmd(nlfd, family_id, SL_GENL_CMD_STOP_SCAN,
+			    13, resp, sizeof(resp));
+	if (len > 0 || len == 0)
+		printf("  OK:   STOP_SCAN (genl): accepted\n");
+	else
+		printf("  WARN: STOP_SCAN (genl): ret=%d\n", len);
 
 	close(nlfd);
 }

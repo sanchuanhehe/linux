@@ -100,6 +100,7 @@ static const struct nla_policy sparklink_genl_policy[SPARKLINK_ATTR_MAX + 1] = {
 	[SPARKLINK_ATTR_DEV_BUS]	= { .type = NLA_U8 },
 	[SPARKLINK_ATTR_DEV_COUNT]	= { .type = NLA_U32 },
 	[SPARKLINK_ATTR_PROTO_VERSION]	= { .type = NLA_U32 },
+	[SPARKLINK_ATTR_GT_ROLE]	= { .type = NLA_U8 },
 	[SPARKLINK_ATTR_EVENT_TYPE]	= { .type = NLA_U8 },
 	[SPARKLINK_ATTR_EVENT_PAYLOAD]	= { .type = NLA_BINARY,
 					    .len = 256 },

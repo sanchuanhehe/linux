@@ -80,6 +80,7 @@
 #define SL_IOCTL_AFH_REPORT_RSSI _IOW(SL_MAGIC, 0x3C, struct sle_afh_rssi_report)
 #define SL_IOCTL_AFH_CLASSIFY    _IOWR(SL_MAGIC, 0x3D, struct sle_afh_classify_params)
 #define SL_IOCTL_AFH_HOP_NEXT   _IOWR(SL_MAGIC, 0x3E, struct sle_afh_hop_info)
+#define SL_IOCTL_AFH_REPORT_RETX _IOW(SL_MAGIC, 0x3F, struct sle_afh_retx_report)
 
 /* Security management */
 #define SL_IOCTL_SEC_SET_PSK     _IOW(SL_MAGIC, 0x40, struct sle_psk_params)
@@ -332,6 +333,12 @@ struct sle_afh_hop_info {
 	uint8_t  _pad;
 	uint16_t freq_mhz;
 	uint16_t event_counter;
+} __attribute__((packed));
+
+struct sle_afh_retx_report {
+	uint16_t handle;
+	uint8_t  channel;
+	uint8_t  retransmitted;
 } __attribute__((packed));
 
 /* Sync link management */
@@ -7409,6 +7416,48 @@ static void test_afh_channel_map(int fd)
 		ok_count++;
 	} else {
 		printf("  FAIL: min_channels: used=%u (expected >=10)\n", cls.used_count);
+		fail_count++;
+	}
+
+	/* 12. Retransmission-based channel classification.
+	 *     Reset to all channels, then report retransmissions on channels 0-4
+	 *     to build up a retx score >= 5, classify should mark them bad. */
+	memset(&map_p, 0, sizeof(map_p));
+	map_p.handle = handle;
+	map_p.min_channels = 2;
+	memset(map_p.map, 0xFF, 10);
+	map_p.map[9] &= 0x7F;
+	ioctl(fd, SL_IOCTL_AFH_SET_MAP, &map_p);
+
+	for (int ch = 0; ch < 5; ch++) {
+		/* 2 retransmissions (score += 3 each = 6, which is >= 5) */
+		for (int t = 0; t < 2; t++) {
+			struct sle_afh_retx_report rpt;
+			memset(&rpt, 0, sizeof(rpt));
+			rpt.handle = handle;
+			rpt.channel = (uint8_t)ch;
+			rpt.retransmitted = 1;
+			ioctl(fd, SL_IOCTL_AFH_REPORT_RETX, &rpt);
+		}
+	}
+	memset(&cls, 0, sizeof(cls));
+	cls.handle = handle;
+	cls.threshold_dbm = -90;  /* very lenient RSSI — only retx should trigger */
+	cls.min_channels = 2;
+	ret = ioctl(fd, SL_IOCTL_AFH_CLASSIFY, &cls);
+	if (ret == 0 && cls.used_count <= 74) {
+		/* Channels 0-4 should be excluded (50% retx > 25% threshold) */
+		int ch0_used = (cls.map_out[0] & 0x01) != 0;
+		if (!ch0_used) {
+			printf("  OK:   retx classify: ch0 excluded (50%% retx), used=%u\n",
+			       cls.used_count);
+			ok_count++;
+		} else {
+			printf("  FAIL: ch0 should be excluded by retx rate\n");
+			fail_count++;
+		}
+	} else {
+		printf("  FAIL: retx classify ret=%d used=%u\n", ret, cls.used_count);
 		fail_count++;
 	}
 

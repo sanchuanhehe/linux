@@ -500,6 +500,9 @@ const SL_IOCTL_AFH_CLASSIFY: u32 = _IOWR::<SleAfhClassifyParams>(SL_MAGIC, 0x3D)
 /// Get the next hop channel for a connection.
 const SL_IOCTL_AFH_HOP_NEXT: u32 = _IOWR::<SleAfhHopInfo>(SL_MAGIC, 0x3E);
 
+/// Report a per-channel retransmission event.
+const SL_IOCTL_AFH_REPORT_RETX: u32 = _IOW::<SleAfhRetxReport>(SL_MAGIC, 0x3F);
+
 // --- Security management ioctls ---
 
 /// Set the pre-shared key for PSK pairing.
@@ -1178,6 +1181,18 @@ pub struct SleAfhHopInfo {
     pub event_counter: u16,
 }
 
+/// AFH retransmission report for dynamic channel classification.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleAfhRetxReport {
+    /// Connection handle.
+    pub handle: u16,
+    /// Channel index (0-78).
+    pub channel: u8,
+    /// 1 = retransmission occurred, 0 = first-time success.
+    pub retransmitted: u8,
+}
+
 // SAFETY: repr(C) with only primitive fields.
 unsafe impl FromBytes for SleAfhMapParams {}
 // SAFETY: repr(C) with only primitive fields.
@@ -1186,6 +1201,8 @@ unsafe impl FromBytes for SleAfhRssiReport {}
 unsafe impl FromBytes for SleAfhClassifyParams {}
 // SAFETY: repr(C) with only primitive fields.
 unsafe impl FromBytes for SleAfhHopInfo {}
+// SAFETY: repr(C), all fields are primitives.
+unsafe impl FromBytes for SleAfhRetxReport {}
 
 // ---------------------------------------------------------------------------
 // Sync link management userspace data structures (T/XS 10003-2025 §8.10)
@@ -4146,6 +4163,14 @@ impl MiscDevice for SparkLinkCtl {
                     event_counter: ec,
                 };
                 write_user_struct(arg, &out)?;
+                Ok(0)
+            }
+            SL_IOCTL_AFH_REPORT_RETX => {
+                let rpt: SleAfhRetxReport = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let handle = s.conn.resolve_handle(rpt.handle)?;
+                s.conn.report_retx(handle, rpt.channel, rpt.retransmitted != 0)?;
                 Ok(0)
             }
             // --- Security management ---

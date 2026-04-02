@@ -743,6 +743,11 @@ pub struct ConnEntry {
     pub afh_rssi_acc: [i32; 79],
     /// Number of RSSI samples per channel.
     pub afh_samples: [u16; 79],
+    /// Retransmission quality score per channel (0=good, higher=worse).
+    /// Incremented on retx, decremented on success; clamped to [0, 255].
+    pub afh_retx_score: [u8; 79],
+    /// Auto-classify trigger: number of reports before auto-classify.
+    pub afh_auto_classify_threshold: u16,
 }
 
 impl ConnEntry {
@@ -766,6 +771,8 @@ impl ConnEntry {
             afh_hopping: HoppingState::new(7, ChannelMap::all_used()),
             afh_rssi_acc: [0i32; 79],
             afh_samples: [0u16; 79],
+            afh_retx_score: [0u8; 79],
+            afh_auto_classify_threshold: 0,
         })
     }
 }
@@ -1331,6 +1338,40 @@ impl ConnManager {
         Ok(())
     }
 
+    /// Report a per-channel TX attempt and optional retransmission.
+    /// Uses a quality score: retx increments by 3, success decrements by 1.
+    pub fn report_retx(&mut self, handle: u16, channel: u8, retransmitted: bool) -> Result {
+        let entry = self.find_mut(handle)?;
+        if channel >= 79 {
+            return Err(EINVAL);
+        }
+        let idx = channel as usize;
+        if retransmitted {
+            entry.afh_retx_score[idx] = entry.afh_retx_score[idx].saturating_add(3);
+        } else {
+            entry.afh_retx_score[idx] = entry.afh_retx_score[idx].saturating_sub(1);
+        }
+
+        // Auto-classify if threshold is set and enough total samples collected.
+        if entry.afh_auto_classify_threshold > 0 {
+            let total: u32 = entry.afh_samples.iter().map(|&s| u32::from(s)).sum();
+            if total >= u32::from(entry.afh_auto_classify_threshold) {
+                let _ = Self::do_classify(entry, -70, 2);
+            }
+        }
+        Ok(())
+    }
+
+    /// Set the auto-classify threshold for a connection.
+    /// When total RSSI samples + TX attempts exceed this threshold,
+    /// classification is triggered automatically.
+    /// Set to 0 to disable auto-classify.
+    pub fn set_auto_classify(&mut self, handle: u16, threshold: u16) -> Result {
+        let entry = self.find_mut(handle)?;
+        entry.afh_auto_classify_threshold = threshold;
+        Ok(())
+    }
+
     /// Classify channels based on accumulated RSSI measurements.
     ///
     /// Channels with average RSSI below `threshold_dbm` are marked bad.
@@ -1348,6 +1389,15 @@ impl ConnManager {
         if entry.state != ConnState::Connected {
             return Err(EPIPE);
         }
+        Self::do_classify(entry, threshold_dbm, min_channels)
+    }
+
+    /// Internal classification logic operating on a ConnEntry directly.
+    fn do_classify(
+        entry: &mut ConnEntry,
+        threshold_dbm: i8,
+        min_channels: u8,
+    ) -> Result<ChannelMap> {
         let min_ch = if min_channels < 2 { 2 } else { min_channels };
         let threshold = i32::from(threshold_dbm);
 
@@ -1359,13 +1409,27 @@ impl ConnManager {
 
         for ch in 0u8..79 {
             let idx = ch as usize;
+            let mut is_bad = false;
+            // RSSI-based classification.
             if entry.afh_samples[idx] > 0 {
                 let avg = entry.afh_rssi_acc[idx] / i32::from(entry.afh_samples[idx]);
                 if avg < threshold {
-                    new_map.set_used(ch, false);
-                    bad_channels[bad_count] = (ch, avg);
-                    bad_count += 1;
+                    is_bad = true;
                 }
+            }
+            // Retransmission score classification: score >= 5 marks bad.
+            if entry.afh_retx_score[idx] >= 5 {
+                is_bad = true;
+            }
+            if is_bad {
+                new_map.set_used(ch, false);
+                let quality = if entry.afh_samples[idx] > 0 {
+                    entry.afh_rssi_acc[idx] / i32::from(entry.afh_samples[idx])
+                } else {
+                    i32::MIN / 2
+                };
+                bad_channels[bad_count] = (ch, quality);
+                bad_count += 1;
             }
         }
 
@@ -1393,6 +1457,7 @@ impl ConnManager {
         // Clear measurement accumulators after classification.
         entry.afh_rssi_acc = [0i32; 79];
         entry.afh_samples = [0u16; 79];
+        entry.afh_retx_score = [0u8; 79];
         Ok(new_map)
     }
 

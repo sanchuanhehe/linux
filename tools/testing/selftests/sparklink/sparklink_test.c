@@ -66,6 +66,13 @@
 #define SL_IOCTL_CONN_LIST       _IOR(SL_MAGIC, 0x38, struct sle_conn_list)
 #define SL_IOCTL_SET_CONN_MTU   _IOW(SL_MAGIC, 0x39, struct sle_conn_mtu_params)
 
+/* AFH (Adaptive Frequency Hopping) */
+#define SL_IOCTL_AFH_SET_MAP     _IOW(SL_MAGIC, 0x3A, struct sle_afh_map_params)
+#define SL_IOCTL_AFH_GET_MAP     _IOWR(SL_MAGIC, 0x3B, struct sle_afh_map_params)
+#define SL_IOCTL_AFH_REPORT_RSSI _IOW(SL_MAGIC, 0x3C, struct sle_afh_rssi_report)
+#define SL_IOCTL_AFH_CLASSIFY    _IOWR(SL_MAGIC, 0x3D, struct sle_afh_classify_params)
+#define SL_IOCTL_AFH_HOP_NEXT   _IOWR(SL_MAGIC, 0x3E, struct sle_afh_hop_info)
+
 /* Security management */
 #define SL_IOCTL_SEC_SET_PSK     _IOW(SL_MAGIC, 0x40, struct sle_psk_params)
 #define SL_IOCTL_SEC_PAIR        _IOW(SL_MAGIC, 0x41, struct sle_pair_params)
@@ -240,6 +247,39 @@ struct sle_conn_mtu_params {
 	uint16_t mtu;
 	uint16_t mps;
 	uint16_t _pad;
+} __attribute__((packed));
+
+/* AFH structs */
+struct sle_afh_map_params {
+	uint16_t handle;
+	uint8_t  min_channels;
+	uint8_t  _pad;
+	uint8_t  map[10];
+	uint8_t  used_count;
+	uint8_t  _pad2;
+} __attribute__((packed));
+
+struct sle_afh_rssi_report {
+	uint16_t handle;
+	uint8_t  channel;
+	int8_t   rssi_dbm;
+} __attribute__((packed));
+
+struct sle_afh_classify_params {
+	uint16_t handle;
+	int8_t   threshold_dbm;
+	uint8_t  min_channels;
+	uint8_t  map_out[10];
+	uint8_t  used_count;
+	uint8_t  _pad;
+} __attribute__((packed));
+
+struct sle_afh_hop_info {
+	uint16_t handle;
+	uint8_t  channel;
+	uint8_t  _pad;
+	uint16_t freq_mhz;
+	uint16_t event_counter;
 } __attribute__((packed));
 
 /* Security */
@@ -7019,6 +7059,247 @@ cleanup:
 }
 
 /* ------------------------------------------------------------------ *
+ * test_afh_channel_map — adaptive frequency hopping management       *
+ *                                                                    *
+ * Tests per-connection channel map set/get, RSSI measurement         *
+ * reporting, auto-classification, and per-connection hop sequence.    *
+ * ------------------------------------------------------------------ */
+static void test_afh_channel_map(int fd)
+{
+	test_header("AFH channel map management");
+
+	int ok_count = 0, fail_count = 0;
+	int ret;
+
+	/* Create a connection for AFH testing */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xAF;
+	cp.peer_addr[1] = 0xAF;
+	cp.peer_addr[5] = 0x01;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT returned %d\n", ret);
+		return;
+	}
+	uint16_t handle = (uint16_t)ret;
+
+	struct sle_inject_conn_resp resp;
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = handle;
+	resp.response_type = 0;
+	resp.bandwidth_mhz = 1;
+	resp.mcs_index = 4;
+	resp.supervision_timeout = 3200;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+	if (ret < 0) {
+		printf("  FAIL: INJECT_CONN_RESP: %s\n", strerror(errno));
+		goto cleanup;
+	}
+
+	/* 1. Get default channel map — should be all 79 channels */
+	struct sle_afh_map_params map_p;
+	memset(&map_p, 0, sizeof(map_p));
+	map_p.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_AFH_GET_MAP, &map_p);
+	if (ret == 0 && map_p.used_count == 79) {
+		printf("  OK:   default channel map: %u channels\n", map_p.used_count);
+		ok_count++;
+	} else {
+		printf("  FAIL: default map used_count=%u (expected 79), ret=%d\n",
+		       map_p.used_count, ret);
+		fail_count++;
+	}
+
+	/* 2. Set custom channel map — channels 0-39 only (40 channels) */
+	memset(&map_p, 0, sizeof(map_p));
+	map_p.handle = handle;
+	map_p.min_channels = 2;
+	/* Set bits 0-39 */
+	map_p.map[0] = 0xFF; /* ch 0-7  */
+	map_p.map[1] = 0xFF; /* ch 8-15 */
+	map_p.map[2] = 0xFF; /* ch 16-23 */
+	map_p.map[3] = 0xFF; /* ch 24-31 */
+	map_p.map[4] = 0xFF; /* ch 32-39 */
+	/* map[5]-map[9] = 0 → channels 40-78 disabled */
+	ret = ioctl(fd, SL_IOCTL_AFH_SET_MAP, &map_p);
+	if (ret == 0) {
+		printf("  OK:   set channel map (channels 0-39)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: AFH_SET_MAP: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 3. Verify channel map was updated */
+	memset(&map_p, 0, sizeof(map_p));
+	map_p.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_AFH_GET_MAP, &map_p);
+	if (ret == 0 && map_p.used_count == 40) {
+		printf("  OK:   channel map updated: %u channels\n", map_p.used_count);
+		ok_count++;
+	} else {
+		printf("  FAIL: expected 40 channels, got %u\n", map_p.used_count);
+		fail_count++;
+	}
+
+	/* 4. Hop next — channel should be within 0-39 range */
+	struct sle_afh_hop_info hop;
+	memset(&hop, 0, sizeof(hop));
+	hop.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_AFH_HOP_NEXT, &hop);
+	if (ret == 0 && hop.channel < 40 && hop.freq_mhz >= 2402 && hop.freq_mhz <= 2441) {
+		printf("  OK:   hop ch=%u freq=%u within map\n", hop.channel, hop.freq_mhz);
+		ok_count++;
+	} else {
+		printf("  FAIL: hop ch=%u freq=%u (expected 0-39, 2402-2441)\n",
+		       hop.channel, hop.freq_mhz);
+		fail_count++;
+	}
+
+	/* 5. Reject channel map with too few channels */
+	memset(&map_p, 0, sizeof(map_p));
+	map_p.handle = handle;
+	map_p.min_channels = 5;
+	map_p.map[0] = 0x07; /* only channels 0,1,2 → 3 channels, less than min 5 */
+	ret = ioctl(fd, SL_IOCTL_AFH_SET_MAP, &map_p);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   map with 3 channels rejected (min_channels=5)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EINVAL for insufficient channels, ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 6. Report RSSI measurements for channels */
+	int rssi_ok = 1;
+	for (int ch = 0; ch < 20; ch++) {
+		struct sle_afh_rssi_report rpt;
+		memset(&rpt, 0, sizeof(rpt));
+		rpt.handle = handle;
+		rpt.channel = (uint8_t)ch;
+		rpt.rssi_dbm = -30; /* good signal */
+		ret = ioctl(fd, SL_IOCTL_AFH_REPORT_RSSI, &rpt);
+		if (ret < 0) rssi_ok = 0;
+	}
+	/* Report bad RSSI for channels 20-39 */
+	for (int ch = 20; ch < 40; ch++) {
+		struct sle_afh_rssi_report rpt;
+		memset(&rpt, 0, sizeof(rpt));
+		rpt.handle = handle;
+		rpt.channel = (uint8_t)ch;
+		rpt.rssi_dbm = -90; /* bad signal */
+		ret = ioctl(fd, SL_IOCTL_AFH_REPORT_RSSI, &rpt);
+		if (ret < 0) rssi_ok = 0;
+	}
+	if (rssi_ok) {
+		printf("  OK:   reported RSSI for 40 channels\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: RSSI report failed\n");
+		fail_count++;
+	}
+
+	/* 7. Reject RSSI for invalid channel */
+	{
+		struct sle_afh_rssi_report rpt;
+		memset(&rpt, 0, sizeof(rpt));
+		rpt.handle = handle;
+		rpt.channel = 80; /* invalid */
+		rpt.rssi_dbm = -50;
+		ret = ioctl(fd, SL_IOCTL_AFH_REPORT_RSSI, &rpt);
+		if (ret < 0 && errno == EINVAL) {
+			printf("  OK:   RSSI for ch=80 rejected (EINVAL)\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: expected EINVAL for ch=80, ret=%d\n", ret);
+			fail_count++;
+		}
+	}
+
+	/* 8. Auto-classify channels: threshold=-60 dBm, min 5 channels.
+	 *    Channels 0-19 avg -30 (good), 20-39 avg -90 (bad).
+	 *    Expected: channels 20-39 removed, keeping 0-19 (20 channels). */
+	struct sle_afh_classify_params cls;
+	memset(&cls, 0, sizeof(cls));
+	cls.handle = handle;
+	cls.threshold_dbm = -60;
+	cls.min_channels = 5;
+	ret = ioctl(fd, SL_IOCTL_AFH_CLASSIFY, &cls);
+	if (ret == 0 && cls.used_count == 20) {
+		printf("  OK:   classify: %u good channels (threshold=-60)\n", cls.used_count);
+		ok_count++;
+	} else {
+		printf("  FAIL: classify used_count=%u (expected 20), ret=%d\n",
+		       cls.used_count, ret);
+		fail_count++;
+	}
+
+	/* 9. Verify the classified map is now active */
+	memset(&map_p, 0, sizeof(map_p));
+	map_p.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_AFH_GET_MAP, &map_p);
+	if (ret == 0 && map_p.used_count == 20) {
+		printf("  OK:   classified map active: %u channels\n", map_p.used_count);
+		ok_count++;
+	} else {
+		printf("  FAIL: active map used_count=%u (expected 20)\n", map_p.used_count);
+		fail_count++;
+	}
+
+	/* 10. Hop after classification — should stay within channels 0-19 */
+	memset(&hop, 0, sizeof(hop));
+	hop.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_AFH_HOP_NEXT, &hop);
+	if (ret == 0 && hop.channel < 20) {
+		printf("  OK:   post-classify hop ch=%u (within 0-19)\n", hop.channel);
+		ok_count++;
+	} else {
+		printf("  FAIL: post-classify hop ch=%u (expected 0-19)\n", hop.channel);
+		fail_count++;
+	}
+
+	/* 11. Verify min_channels enforcement in classify.
+	 *     Report very bad RSSI for all channels, classify with min=10. */
+	/* First, set back to all 79 channels so we have RSSI for all */
+	memset(&map_p, 0, sizeof(map_p));
+	map_p.handle = handle;
+	map_p.min_channels = 2;
+	memset(map_p.map, 0xFF, 10);
+	map_p.map[9] &= 0x7F; /* clear bit 79 */
+	ioctl(fd, SL_IOCTL_AFH_SET_MAP, &map_p);
+
+	/* Report terrible RSSI for all 79 channels */
+	for (int ch = 0; ch < 79; ch++) {
+		struct sle_afh_rssi_report rpt = {
+			.handle = handle,
+			.channel = (uint8_t)ch,
+			.rssi_dbm = -100,
+		};
+		ioctl(fd, SL_IOCTL_AFH_REPORT_RSSI, &rpt);
+	}
+	memset(&cls, 0, sizeof(cls));
+	cls.handle = handle;
+	cls.threshold_dbm = -50;
+	cls.min_channels = 10;
+	ret = ioctl(fd, SL_IOCTL_AFH_CLASSIFY, &cls);
+	if (ret == 0 && cls.used_count >= 10) {
+		printf("  OK:   min_channels enforced: kept %u (min 10)\n", cls.used_count);
+		ok_count++;
+	} else {
+		printf("  FAIL: min_channels: used=%u (expected >=10)\n", cls.used_count);
+		fail_count++;
+	}
+
+cleanup:
+	{
+		uint16_t disc = handle;
+		ioctl(fd, SL_IOCTL_DISCONNECT, &disc);
+	}
+	printf("  AFH channel map: %d OK, %d FAIL\n", ok_count, fail_count);
+}
+
+/* ------------------------------------------------------------------ *
  * test_ssap_capacity_stress — SSAP service/property limits          *
  *                                                                    *
  * Registers services until the subsystem refuses, verifying that    *
@@ -7350,6 +7631,7 @@ int main(void)
 	test_supervision_timeout(fd);
 	test_crc12_verification(fd);
 	test_mtu_mps_negotiation(fd);
+	test_afh_channel_map(fd);
 	test_phy_extreme_params(fd);
 	test_genetlink();
 

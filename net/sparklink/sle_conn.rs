@@ -22,6 +22,7 @@ use kernel::alloc::KVec;
 use kernel::prelude::*;
 use kernel::time::msecs_to_jiffies;
 
+use super::sle_phy::{ChannelMap, HoppingState};
 use super::sle_ssap::SsapSession;
 
 /// Read the current kernel jiffies counter.
@@ -622,6 +623,12 @@ pub struct ConnEntry {
     pub rx_bytes: u64,
     /// Jiffies timestamp of most recent data activity (RX or TX).
     pub last_activity: u64,
+    /// Per-connection hopping state (independent from global PhyConfig).
+    pub afh_hopping: HoppingState,
+    /// Accumulated RSSI per channel (dBm x10, for averaging).
+    pub afh_rssi_acc: [i32; 79],
+    /// Number of RSSI samples per channel.
+    pub afh_samples: [u16; 79],
 }
 
 impl ConnEntry {
@@ -642,6 +649,9 @@ impl ConnEntry {
             tx_bytes: 0,
             rx_bytes: 0,
             last_activity: 0,
+            afh_hopping: HoppingState::new(7, ChannelMap::all_used()),
+            afh_rssi_acc: [0i32; 79],
+            afh_samples: [0u16; 79],
         })
     }
 }
@@ -1147,6 +1157,123 @@ impl ConnManager {
             entry.channels.data.mps = mtu;
         }
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Adaptive Frequency Hopping (AFH)
+    // -----------------------------------------------------------------------
+
+    /// Set the channel map for a connection's hopping state.
+    ///
+    /// The map must have at least `min_channels` usable channels (minimum 2).
+    pub fn set_channel_map(&mut self, handle: u16, map: ChannelMap, min_channels: u8) -> Result {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
+            return Err(EPIPE);
+        }
+        let min_ch = if min_channels < 2 { 2 } else { min_channels };
+        if map.used_count() < min_ch {
+            return Err(EINVAL);
+        }
+        entry.afh_hopping.update_map(map);
+        Ok(())
+    }
+
+    /// Get the current channel map for a connection.
+    pub fn get_channel_map(&self, handle: u16) -> Result<ChannelMap> {
+        let entry = self.find(handle)?;
+        Ok(entry.afh_hopping.channel_map)
+    }
+
+    /// Advance the per-connection hopping state and return the next channel.
+    ///
+    /// Returns (channel_index, freq_mhz, event_counter).
+    pub fn hop_next(&mut self, handle: u16) -> Result<(u8, u16, u16)> {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
+            return Err(EPIPE);
+        }
+        let ch = entry.afh_hopping.next_channel();
+        let freq = HoppingState::channel_to_freq(ch);
+        let ec = entry.afh_hopping.event_counter;
+        Ok((ch, freq, ec))
+    }
+
+    /// Record an RSSI measurement for a specific channel on a connection.
+    pub fn report_rssi(&mut self, handle: u16, channel: u8, rssi_dbm: i8) -> Result {
+        let entry = self.find_mut(handle)?;
+        if channel >= 79 {
+            return Err(EINVAL);
+        }
+        let idx = channel as usize;
+        entry.afh_rssi_acc[idx] += i32::from(rssi_dbm);
+        entry.afh_samples[idx] = entry.afh_samples[idx].saturating_add(1);
+        Ok(())
+    }
+
+    /// Classify channels based on accumulated RSSI measurements.
+    ///
+    /// Channels with average RSSI below `threshold_dbm` are marked bad.
+    /// Channels with no measurements are kept as-is (assumed good).
+    /// Ensures at least `min_channels` remain usable (minimum 2).
+    ///
+    /// Returns the new channel map and applies it to the connection.
+    pub fn classify_channels(
+        &mut self,
+        handle: u16,
+        threshold_dbm: i8,
+        min_channels: u8,
+    ) -> Result<ChannelMap> {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
+            return Err(EPIPE);
+        }
+        let min_ch = if min_channels < 2 { 2 } else { min_channels };
+        let threshold = i32::from(threshold_dbm);
+
+        // Build classification starting from the current map.
+        // Channels with no measurements keep their current state.
+        let mut new_map = entry.afh_hopping.channel_map;
+        let mut bad_channels: [(u8, i32); 79] = [(0, 0); 79];
+        let mut bad_count = 0usize;
+
+        for ch in 0u8..79 {
+            let idx = ch as usize;
+            if entry.afh_samples[idx] > 0 {
+                let avg = entry.afh_rssi_acc[idx] / i32::from(entry.afh_samples[idx]);
+                if avg < threshold {
+                    new_map.set_used(ch, false);
+                    bad_channels[bad_count] = (ch, avg);
+                    bad_count += 1;
+                }
+            }
+        }
+
+        // If too many channels removed, re-enable the least-bad ones.
+        if new_map.used_count() < min_ch {
+            // Sort bad channels by RSSI descending (least bad first).
+            let bad_slice = &mut bad_channels[..bad_count];
+            // Simple insertion sort (at most 79 elements).
+            for i in 1..bad_slice.len() {
+                let mut j = i;
+                while j > 0 && bad_slice[j].1 > bad_slice[j - 1].1 {
+                    bad_slice.swap(j, j - 1);
+                    j -= 1;
+                }
+            }
+            for &(ch, _) in bad_slice.iter() {
+                if new_map.used_count() >= min_ch {
+                    break;
+                }
+                new_map.set_used(ch, true);
+            }
+        }
+
+        entry.afh_hopping.update_map(new_map);
+        // Clear measurement accumulators after classification.
+        entry.afh_rssi_acc = [0i32; 79];
+        entry.afh_samples = [0u16; 79];
+        Ok(new_map)
     }
 
     /// Check all Connected entries for supervision timeout expiry.

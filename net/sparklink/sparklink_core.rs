@@ -462,6 +462,23 @@ const SL_IOCTL_CONN_LIST: u32 = _IOR::<SleConnList>(SL_MAGIC, 0x38);
 /// Set per-connection data channel MTU and MPS.
 const SL_IOCTL_SET_CONN_MTU: u32 = _IOW::<SleConnMtuParams>(SL_MAGIC, 0x39);
 
+// --- AFH (Adaptive Frequency Hopping) ioctls ---
+
+/// Set the channel map for a connection.
+const SL_IOCTL_AFH_SET_MAP: u32 = _IOW::<SleAfhMapParams>(SL_MAGIC, 0x3A);
+
+/// Get the channel map for a connection.
+const SL_IOCTL_AFH_GET_MAP: u32 = _IOWR::<SleAfhMapParams>(SL_MAGIC, 0x3B);
+
+/// Report RSSI measurement for a channel on a connection.
+const SL_IOCTL_AFH_REPORT_RSSI: u32 = _IOW::<SleAfhRssiReport>(SL_MAGIC, 0x3C);
+
+/// Classify channels based on RSSI measurements and update the map.
+const SL_IOCTL_AFH_CLASSIFY: u32 = _IOWR::<SleAfhClassifyParams>(SL_MAGIC, 0x3D);
+
+/// Get the next hop channel for a connection.
+const SL_IOCTL_AFH_HOP_NEXT: u32 = _IOWR::<SleAfhHopInfo>(SL_MAGIC, 0x3E);
+
 // --- Security management ioctls ---
 
 /// Set the pre-shared key for PSK pairing.
@@ -961,6 +978,79 @@ pub struct SleConnMtuParams {
 
 // SAFETY: SleConnMtuParams is repr(C) with only primitive fields.
 unsafe impl FromBytes for SleConnMtuParams {}
+
+// ---------------------------------------------------------------------------
+// AFH (Adaptive Frequency Hopping) userspace data structures
+// ---------------------------------------------------------------------------
+
+/// Channel map set/get parameters for a connection.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleAfhMapParams {
+    /// Connection handle.
+    pub handle: u16,
+    /// Minimum number of usable channels (at least 2).
+    pub min_channels: u8,
+    _pad: u8,
+    /// 10-byte channel map bitmask (bit N = channel N usable).
+    pub map: [u8; 10],
+    /// Number of usable channels (output on GET).
+    pub used_count: u8,
+    _pad2: u8,
+}
+
+/// RSSI measurement report for AFH classification.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleAfhRssiReport {
+    /// Connection handle.
+    pub handle: u16,
+    /// Channel index (0-78).
+    pub channel: u8,
+    /// RSSI in dBm (signed).
+    pub rssi_dbm: i8,
+}
+
+/// AFH auto-classification parameters and result.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleAfhClassifyParams {
+    /// Connection handle.
+    pub handle: u16,
+    /// RSSI threshold in dBm — channels below this are classified bad.
+    pub threshold_dbm: i8,
+    /// Minimum channels to keep usable (at least 2).
+    pub min_channels: u8,
+    /// Output: resulting channel map after classification.
+    pub map_out: [u8; 10],
+    /// Output: number of usable channels.
+    pub used_count: u8,
+    _pad: u8,
+}
+
+/// Per-connection hop info (next channel + frequency + event counter).
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct SleAfhHopInfo {
+    /// Connection handle (input).
+    pub handle: u16,
+    /// Channel index (0-78, output).
+    pub channel: u8,
+    _pad: u8,
+    /// RF frequency in MHz (output).
+    pub freq_mhz: u16,
+    /// Event counter after hop (output).
+    pub event_counter: u16,
+}
+
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleAfhMapParams {}
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleAfhRssiReport {}
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleAfhClassifyParams {}
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleAfhHopInfo {}
 
 // ---------------------------------------------------------------------------
 // Security management userspace data structures
@@ -3610,6 +3700,79 @@ impl MiscDevice for SparkLinkCtl {
                 let s = ss.as_mut().ok_or(ENODEV)?;
                 let handle = s.conn.resolve_handle(params.handle)?;
                 s.conn.set_data_mtu(handle, params.mtu, mps)?;
+                Ok(0)
+            }
+            // --- AFH (Adaptive Frequency Hopping) ---
+            SL_IOCTL_AFH_SET_MAP => {
+                let params: SleAfhMapParams = read_user_struct(arg)?;
+                let map = sle_phy::ChannelMap::from_raw(params.map);
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let handle = s.conn.resolve_handle(params.handle)?;
+                let min_ch = if params.min_channels > 0 { params.min_channels } else { 2 };
+                s.conn.set_channel_map(handle, map, min_ch)?;
+                Ok(0)
+            }
+            SL_IOCTL_AFH_GET_MAP => {
+                let params: SleAfhMapParams = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let handle = s.conn.resolve_handle(params.handle)?;
+                let map = s.conn.get_channel_map(handle)?;
+                drop(ss);
+                let out = SleAfhMapParams {
+                    handle,
+                    min_channels: 0,
+                    _pad: 0,
+                    map: map.map,
+                    used_count: map.used_count(),
+                    _pad2: 0,
+                };
+                write_user_struct(arg, &out)?;
+                Ok(0)
+            }
+            SL_IOCTL_AFH_REPORT_RSSI => {
+                let rpt: SleAfhRssiReport = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let handle = s.conn.resolve_handle(rpt.handle)?;
+                s.conn.report_rssi(handle, rpt.channel, rpt.rssi_dbm)?;
+                Ok(0)
+            }
+            SL_IOCTL_AFH_CLASSIFY => {
+                let params: SleAfhClassifyParams = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let handle = s.conn.resolve_handle(params.handle)?;
+                let min_ch = if params.min_channels > 0 { params.min_channels } else { 2 };
+                let map = s.conn.classify_channels(handle, params.threshold_dbm, min_ch)?;
+                drop(ss);
+                let out = SleAfhClassifyParams {
+                    handle,
+                    threshold_dbm: params.threshold_dbm,
+                    min_channels: min_ch,
+                    map_out: map.map,
+                    used_count: map.used_count(),
+                    _pad: 0,
+                };
+                write_user_struct(arg, &out)?;
+                Ok(0)
+            }
+            SL_IOCTL_AFH_HOP_NEXT => {
+                let params: SleAfhHopInfo = read_user_struct(arg)?;
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                let handle = s.conn.resolve_handle(params.handle)?;
+                let (ch, freq, ec) = s.conn.hop_next(handle)?;
+                drop(ss);
+                let out = SleAfhHopInfo {
+                    handle,
+                    channel: ch,
+                    _pad: 0,
+                    freq_mhz: freq,
+                    event_counter: ec,
+                };
+                write_user_struct(arg, &out)?;
                 Ok(0)
             }
             // --- Security management ---

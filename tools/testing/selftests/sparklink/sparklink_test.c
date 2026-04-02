@@ -3191,6 +3191,26 @@ static uint8_t genl_get_u8_attr(char *msg, int msg_len, uint16_t attr_type)
 	return 0xFF;
 }
 
+static uint16_t genl_get_u16_attr(char *msg, int msg_len, uint16_t attr_type)
+{
+	char *attr_start = msg + NLMSG_HDRLEN + GENL_HDRLEN;
+	int remaining = msg_len - NLMSG_HDRLEN - GENL_HDRLEN;
+
+	while (remaining >= (int)NLA_HDRLEN) {
+		struct nlattr *nla = (struct nlattr *)attr_start;
+
+		if (nla->nla_len < NLA_HDRLEN || (int)nla->nla_len > remaining)
+			break;
+		if (nla->nla_type == attr_type && nla->nla_len >= NLA_HDRLEN + 2)
+			return *(uint16_t *)((char *)nla + NLA_HDRLEN);
+		int step = NLA_ALIGN(nla->nla_len);
+
+		attr_start += step;
+		remaining -= step;
+	}
+	return 0xDEAD;
+}
+
 static int genl_send_cmd_u8(int nlfd, uint16_t family_id, uint8_t cmd,
 			    uint32_t seq, uint16_t attr_type, uint8_t val,
 			    char *resp, int resp_size)
@@ -5990,7 +6010,7 @@ static void test_channel_tcid_standard(int fd)
  * ------------------------------------------------------------------ */
 static void test_dli_info_consistency(int fd)
 {
-	test_header("DLI info cross-check (ioctl vs debugfs)");
+	test_header("DLI info cross-check (ioctl vs debugfs vs genetlink)");
 
 	/* Read DLI info via ioctl */
 	struct sle_dli_info dli;
@@ -6003,82 +6023,122 @@ static void test_dli_info_consistency(int fd)
 		return;
 	}
 
-	/* Read DLI info via debugfs */
+	/* --- debugfs cross-check --- */
 	int dbg_fd = open("/sys/kernel/debug/sparklink/dli_controller",
 			  O_RDONLY);
 	if (dbg_fd < 0) {
 		printf("  WARN: cannot open debugfs dli_controller: %s\n",
 		       strerror(errno));
+	} else {
+		char buf[1024];
+		int n = read(dbg_fd, buf, sizeof(buf) - 1);
+
+		close(dbg_fd);
+		if (n > 0) {
+			buf[n] = '\0';
+			unsigned int dbg_max_conn = 0, dbg_max_mtu = 0;
+			unsigned int dbg_max_mps = 0;
+			unsigned int dbg_transport = 0, dbg_meas = 0;
+			unsigned int dbg_sec = 0;
+			char *line = buf;
+
+			while (line && *line) {
+				sscanf(line, "max_connections: %u",
+				       &dbg_max_conn);
+				sscanf(line, "max_mtu: %u", &dbg_max_mtu);
+				sscanf(line, "max_mps: %u", &dbg_max_mps);
+				sscanf(line, "transport_modes: 0x%x",
+				       &dbg_transport);
+				sscanf(line, "measurement_cap: 0x%x",
+				       &dbg_meas);
+				sscanf(line, "security_cap: 0x%x", &dbg_sec);
+				line = strchr(line, '\n');
+				if (line)
+					line++;
+			}
+
+			if (dli.max_connections == dbg_max_conn &&
+			    dli.max_mtu == dbg_max_mtu &&
+			    dli.max_mps == dbg_max_mps &&
+			    dli.transport_modes == dbg_transport &&
+			    dli.measurement_cap == dbg_meas &&
+			    dli.security_cap == dbg_sec)
+				printf("  OK:   ioctl vs debugfs: 6/6 fields consistent\n");
+			else
+				printf("  FAIL: ioctl vs debugfs mismatch\n");
+		}
+	}
+
+	/* --- genetlink cross-check --- */
+	int nlfd = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
+
+	if (nlfd < 0) {
+		printf("  WARN: cannot open genetlink socket\n");
 		return;
 	}
 
-	char buf[1024];
-	int n = read(dbg_fd, buf, sizeof(buf) - 1);
+	struct sockaddr_nl sa;
 
-	close(dbg_fd);
-	if (n <= 0) {
-		printf("  FAIL: debugfs read returned %d\n", n);
+	memset(&sa, 0, sizeof(sa));
+	sa.nl_family = AF_NETLINK;
+	if (bind(nlfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+		printf("  WARN: genetlink bind failed\n");
+		close(nlfd);
 		return;
 	}
-	buf[n] = '\0';
 
-	/* Parse key fields from debugfs output */
-	unsigned int dbg_max_conn = 0, dbg_max_mtu = 0, dbg_max_mps = 0;
-	unsigned int dbg_transport = 0, dbg_meas = 0, dbg_sec = 0;
-	char *line = buf;
+	int family_id = genl_resolve_family(nlfd, SL_GENL_NAME);
 
-	while (line && *line) {
-		sscanf(line, "max_connections: %u", &dbg_max_conn);
-		sscanf(line, "max_mtu: %u", &dbg_max_mtu);
-		sscanf(line, "max_mps: %u", &dbg_max_mps);
-		sscanf(line, "transport_modes: 0x%x", &dbg_transport);
-		sscanf(line, "measurement_cap: 0x%x", &dbg_meas);
-		sscanf(line, "security_cap: 0x%x", &dbg_sec);
-		line = strchr(line, '\n');
-		if (line)
-			line++;
+	if (family_id < 0) {
+		printf("  WARN: cannot resolve sparklink genetlink family\n");
+		close(nlfd);
+		return;
 	}
 
-	/* Cross-check */
-	if (dli.max_connections == dbg_max_conn)
-		printf("  OK:   max_connections=%u consistent\n",
-		       dli.max_connections);
-	else
-		printf("  FAIL: max_connections ioctl=%u debugfs=%u\n",
-		       dli.max_connections, dbg_max_conn);
+	char resp[4096];
+	int len = genl_send_cmd(nlfd, family_id, SPARKLINK_CMD_GET_DLI_INFO,
+				100, resp, sizeof(resp));
+	close(nlfd);
 
-	if (dli.max_mtu == dbg_max_mtu)
-		printf("  OK:   max_mtu=%u consistent\n", dli.max_mtu);
-	else
-		printf("  FAIL: max_mtu ioctl=%u debugfs=%u\n",
-		       dli.max_mtu, dbg_max_mtu);
+	if (len <= 0) {
+		printf("  FAIL: GET_DLI_INFO genetlink failed (len=%d)\n", len);
+		return;
+	}
 
-	if (dli.max_mps == dbg_max_mps)
-		printf("  OK:   max_mps=%u consistent\n", dli.max_mps);
-	else
-		printf("  FAIL: max_mps ioctl=%u debugfs=%u\n",
-		       dli.max_mps, dbg_max_mps);
+	uint8_t gnl_bus = genl_get_u8_attr(resp, len, SPARKLINK_ATTR_DLI_BUS);
+	uint8_t gnl_max_conn = genl_get_u8_attr(resp, len,
+						 SPARKLINK_ATTR_DLI_MAX_CONN);
+	uint16_t gnl_max_mtu = genl_get_u16_attr(resp, len,
+						  SPARKLINK_ATTR_DLI_MAX_MTU);
+	uint16_t gnl_max_mps = genl_get_u16_attr(resp, len,
+						  SPARKLINK_ATTR_DLI_MAX_MPS);
+	uint8_t gnl_transport = genl_get_u8_attr(resp, len,
+					SPARKLINK_ATTR_DLI_TRANSPORT_MODES);
+	uint8_t gnl_meas = genl_get_u8_attr(resp, len,
+					SPARKLINK_ATTR_DLI_MEASUREMENT_CAP);
+	uint16_t gnl_sec = genl_get_u16_attr(resp, len,
+					SPARKLINK_ATTR_DLI_SECURITY_CAP);
 
-	if (dli.transport_modes == dbg_transport)
-		printf("  OK:   transport_modes=0x%02x consistent\n",
-		       dli.transport_modes);
-	else
-		printf("  FAIL: transport_modes ioctl=0x%02x debugfs=0x%02x\n",
-		       dli.transport_modes, dbg_transport);
+	int ok = 0, fail = 0;
 
-	if (dli.measurement_cap == dbg_meas)
-		printf("  OK:   measurement_cap=0x%02x consistent\n",
-		       dli.measurement_cap);
-	else
-		printf("  FAIL: measurement_cap ioctl=0x%02x debugfs=0x%02x\n",
-		       dli.measurement_cap, dbg_meas);
+	if (dli.bus == gnl_bus) ok++; else fail++;
+	if (dli.max_connections == gnl_max_conn) ok++; else fail++;
+	if (dli.max_mtu == gnl_max_mtu) ok++; else fail++;
+	if (dli.max_mps == gnl_max_mps) ok++; else fail++;
+	if (dli.transport_modes == gnl_transport) ok++; else fail++;
+	if (dli.measurement_cap == gnl_meas) ok++; else fail++;
+	if (dli.security_cap == gnl_sec) ok++; else fail++;
 
-	if (dli.security_cap == dbg_sec)
-		printf("  OK:   security_cap=0x%04x consistent\n",
-		       dli.security_cap);
+	if (fail == 0)
+		printf("  OK:   ioctl vs genetlink: %d/%d fields consistent\n",
+		       ok, ok);
 	else
-		printf("  FAIL: security_cap ioctl=0x%04x debugfs=0x%04x\n",
-		       dli.security_cap, dbg_sec);
+		printf("  FAIL: ioctl vs genetlink: %d OK, %d mismatch "
+		       "(bus=%u/%u conn=%u/%u mtu=%u/%u mps=%u/%u)\n",
+		       ok, fail, dli.bus, gnl_bus,
+		       dli.max_connections, gnl_max_conn,
+		       dli.max_mtu, gnl_max_mtu,
+		       dli.max_mps, gnl_max_mps);
 }
 
 /* ------------------------------------------------------------------ *

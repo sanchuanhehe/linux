@@ -103,13 +103,14 @@ pub const CREDIT_GRANT_PDU_TYPE: u8 = 0xFC;
 
 impl TransportChannel {
     /// Create a channel with standard defaults.
+    /// MPS is clamped to MTU per T/XS 20002-2025.
     const fn new(tcid: u16, mode: TransportMode, mtu: u16) -> Self {
         Self {
             tcid,
             state: ChannelState::Closed,
             mode,
             mtu,
-            mps: 247,
+            mps: mtu,
             tx_credits: 0,
             rx_credits: 0,
         }
@@ -208,7 +209,8 @@ impl ChannelSet {
         self.data.mtu = effective_mtu;
         self.data.mps = effective_mtu;
         // Service management inherits the same MTU ceiling.
-        self.svc_mgmt.mtu = effective_mtu.min(self.svc_mgmt.mtu.max(effective_mtu));
+        self.svc_mgmt.mtu = effective_mtu;
+        self.svc_mgmt.mps = self.svc_mgmt.mps.min(self.svc_mgmt.mtu);
     }
 
     /// Find channel by TCID, returning mutable reference.

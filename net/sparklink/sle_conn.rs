@@ -20,8 +20,15 @@
 
 use kernel::alloc::KVec;
 use kernel::prelude::*;
+use kernel::time::msecs_to_jiffies;
 
 use super::sle_ssap::SsapSession;
+
+/// Read the current kernel jiffies counter.
+pub fn jiffies_now() -> u64 {
+    // SAFETY: reading jiffies_64 is always safe.
+    unsafe { kernel::bindings::jiffies_64 }
+}
 
 // ---------------------------------------------------------------------------
 // Transport Channel abstraction (T/XS 20002-2025)
@@ -613,6 +620,8 @@ pub struct ConnEntry {
     pub tx_bytes: u64,
     /// Total bytes received.
     pub rx_bytes: u64,
+    /// Jiffies timestamp of most recent data activity (RX or TX).
+    pub last_activity: u64,
 }
 
 impl ConnEntry {
@@ -632,6 +641,7 @@ impl ConnEntry {
             queue_max: QUEUE_DEPTH,
             tx_bytes: 0,
             rx_bytes: 0,
+            last_activity: 0,
         })
     }
 }
@@ -877,6 +887,7 @@ impl ConnManager {
                 entry.channels.open_all();
                 entry.ssap_session = Some(SsapSession::new(handle));
                 entry.state = ConnState::Connected;
+                entry.last_activity = jiffies_now();
                 pr_info!(
                     "sparklink: handle {} connected (bw={}MHz mcs={} timeout={}0ms)\n",
                     handle,
@@ -957,6 +968,7 @@ impl ConnManager {
         entry.tx_queue.enqueue(data)?;
         entry.seq.advance_tx();
         entry.tx_bytes += data.len() as u64;
+        entry.last_activity = jiffies_now();
         Ok(data.len())
     }
 
@@ -975,6 +987,7 @@ impl ConnManager {
         entry.rx_queue.enqueue(data)?;
         entry.seq.advance_rx();
         entry.rx_bytes += data.len() as u64;
+        entry.last_activity = jiffies_now();
         Ok(())
     }
 
@@ -1076,8 +1089,12 @@ impl ConnManager {
     pub fn consume_rx_credit(&mut self, handle: u16, tcid: u16) -> bool {
         self.find_mut(handle)
             .ok()
-            .and_then(|e| e.channels.by_tcid_mut(tcid))
-            .map(|ch| ch.consume_rx_credit())
+            .map(|e| {
+                e.last_activity = jiffies_now();
+                e.channels.by_tcid_mut(tcid)
+                    .map(|ch| ch.consume_rx_credit())
+                    .unwrap_or(false)
+            })
             .unwrap_or(false)
     }
 
@@ -1100,5 +1117,49 @@ impl ConnManager {
     pub fn channel_credits(&self, handle: u16, tcid: u16) -> Option<(u16, u16)> {
         let entry = self.find(handle).ok()?;
         entry.channels.by_tcid(tcid).map(|ch| (ch.tx_credits, ch.rx_credits))
+    }
+
+    /// Check all Connected entries for supervision timeout expiry.
+    ///
+    /// Returns a vector of handles whose `last_activity` jiffies exceed the
+    /// negotiated supervision timeout. The caller should disconnect these.
+    pub fn check_supervision_timeouts(&self) -> KVec<u16> {
+        let now = jiffies_now();
+        let mut timed_out = KVec::new();
+        for entry in self.connections.iter() {
+            if entry.state != ConnState::Connected {
+                continue;
+            }
+            if entry.last_activity == 0 {
+                continue;
+            }
+            let timeout_ms = u64::from(entry.params.supervision_timeout) * 10;
+            if timeout_ms == 0 {
+                continue;
+            }
+            let timeout_jiffies = msecs_to_jiffies(timeout_ms as u32) as u64;
+            let elapsed = now.wrapping_sub(entry.last_activity);
+            if elapsed > timeout_jiffies {
+                let _ = timed_out.push(entry.handle, GFP_KERNEL);
+            }
+        }
+        timed_out
+    }
+
+    /// Force-disconnect a connection due to supervision timeout.
+    ///
+    /// Closes channels, resets state, and returns the peer address for
+    /// event notification purposes.
+    pub fn timeout_disconnect(&mut self, handle: u16) -> Result<[u8; 6]> {
+        let entry = self.find_mut(handle)?;
+        let peer = entry.peer_addr;
+        entry.channels.close_all();
+        entry.state = ConnState::Idle;
+        entry.ssap_session = None;
+        pr_warn!(
+            "sparklink: handle {} supervision timeout (peer {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})\n",
+            handle, peer[0], peer[1], peer[2], peer[3], peer[4], peer[5]
+        );
+        Ok(peer)
     }
 }

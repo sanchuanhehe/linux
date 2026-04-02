@@ -2462,6 +2462,22 @@ impl WorkItem for EventPump {
                     pr_warn!("sparklink: {} pending command(s) timed out\n", expired);
                 }
                 shared.cmd_pending.gc();
+
+                // Check supervision timeouts on all connected entries.
+                let timed_out = shared.conn.check_supervision_timeouts();
+                for &h in timed_out.iter() {
+                    if let Ok(peer) = shared.conn.timeout_disconnect(h) {
+                        shared.broadcast.publish(
+                            sle_event::SleWireEvent::conn_state(
+                                h,
+                                sle_conn::ConnState::Connected as u8,
+                                sle_conn::ConnState::Idle as u8,
+                                peer,
+                                0x08, // supervision timeout
+                            ),
+                        );
+                    }
+                }
             }
         }
         // Re-arm the delayed work for the next cycle.

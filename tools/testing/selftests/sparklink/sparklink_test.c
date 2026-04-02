@@ -6467,6 +6467,174 @@ cleanup:
 }
 
 /* ------------------------------------------------------------------ *
+ * test_supervision_timeout — supervision timeout enforcement        *
+ *                                                                    *
+ * Verifies that the kernel automatically disconnects a connection   *
+ * when no data activity occurs within the supervision timeout       *
+ * window. Also verifies that data activity resets the timer.        *
+ * ------------------------------------------------------------------ */
+static void test_supervision_timeout(int fd)
+{
+	test_header("Supervision timeout enforcement");
+
+	int ret;
+	int ok_count = 0;
+	int fail_count = 0;
+
+	/* Step 1: Create connection with short supervision timeout.
+	 * timeout_10ms=10 → 100ms. EventPump polls every 100ms, so the
+	 * timeout should fire within a few pump cycles.
+	 */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xDD;
+	cp.peer_addr[1] = 0xDD;
+	cp.peer_addr[5] = 0x01;
+	cp.timeout_10ms = 10; /* 100ms */
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT returned %d\n", ret);
+		return;
+	}
+	uint16_t handle = (uint16_t)ret;
+
+	struct sle_inject_conn_resp resp;
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = handle;
+	resp.response_type = 0;
+	resp.bandwidth_mhz = 1;
+	resp.mcs_index = 4;
+	resp.supervision_timeout = 10; /* 100ms */
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+	if (ret < 0) {
+		printf("  FAIL: INJECT_CONN_RESP: %s\n", strerror(errno));
+		return;
+	}
+
+	/* Step 2: Verify connection is active */
+	struct sle_conn_info info;
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret == 0 && info.state == 2) { /* Connected */
+		printf("  OK:   connection active (state=%u)\n", info.state);
+		ok_count++;
+	} else {
+		printf("  FAIL: expected Connected(2), got state=%u ret=%d\n",
+		       info.state, ret);
+		fail_count++;
+		goto cleanup;
+	}
+
+	/* Step 3: Keep alive by sending data, verify no timeout */
+	usleep(60000); /* 60ms — under the 100ms timeout */
+	{
+		struct sle_conn_data ud;
+		memset(&ud, 0, sizeof(ud));
+		ud.handle = handle;
+		memcpy(ud.data, "keepalive", 9);
+		ud.length = 9;
+		ret = ioctl(fd, SL_IOCTL_CONN_SEND, &ud);
+		if (ret >= 0) {
+			printf("  OK:   keepalive send resets activity timer\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: keepalive send: %s\n", strerror(errno));
+			fail_count++;
+		}
+	}
+
+	/* Still alive after keepalive */
+	usleep(60000); /* 60ms more — 120ms total but only 60ms since last activity */
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret == 0 && info.state == 2) {
+		printf("  OK:   connection still alive after keepalive\n");
+		ok_count++;
+	} else {
+		/* May have already timed out due to EventPump scheduling */
+		printf("  WARN: connection state=%u after keepalive (timing-sensitive)\n",
+		       info.state);
+	}
+
+	/* Step 4: Wait for timeout to expire (no more data activity).
+	 * Sleep 400ms to ensure the 100ms timeout fires
+	 * (EventPump runs every 100ms, so worst case 200ms latency).
+	 */
+	usleep(400000);
+
+	/* Step 5: Verify connection was disconnected by supervision timeout */
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret < 0) {
+		/* Connection entry went to Idle and info() returns EPIPE — expected */
+		printf("  OK:   supervision timeout disconnected handle %u\n", handle);
+		ok_count++;
+	} else if (info.state == 0) {
+		printf("  OK:   supervision timeout: state=Idle\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected disconnected, got state=%u\n", info.state);
+		fail_count++;
+	}
+
+	/* Step 6: Create another connection with long timeout to verify no spurious timeout */
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xEE;
+	cp.peer_addr[1] = 0xEE;
+	cp.peer_addr[5] = 0x02;
+	cp.timeout_10ms = 3200; /* 32 seconds */
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret <= 0) {
+		printf("  FAIL: second CONNECT returned %d\n", ret);
+		goto done;
+	}
+	uint16_t handle2 = (uint16_t)ret;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = handle2;
+	resp.response_type = 0;
+	resp.bandwidth_mhz = 1;
+	resp.mcs_index = 4;
+	resp.supervision_timeout = 3200;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+	if (ret < 0) {
+		printf("  FAIL: second INJECT_CONN_RESP: %s\n", strerror(errno));
+		goto done;
+	}
+
+	usleep(200000); /* 200ms — well under 32s timeout */
+	memset(&info, 0, sizeof(info));
+	info.handle = handle2;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret == 0 && info.state == 2) {
+		printf("  OK:   long-timeout connection still alive after 200ms\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: long-timeout state=%u (expected Connected)\n",
+		       info.state);
+		fail_count++;
+	}
+
+	{
+		uint16_t disc = handle2;
+		ioctl(fd, SL_IOCTL_DISCONNECT, &disc);
+	}
+
+done:
+	printf("  Supervision timeout: %d OK, %d FAIL\n", ok_count, fail_count);
+	return;
+
+cleanup:
+	;
+	uint16_t disc = handle;
+	ioctl(fd, SL_IOCTL_DISCONNECT, &disc);
+	printf("  Supervision timeout: %d OK, %d FAIL\n", ok_count, fail_count);
+}
+
+/* ------------------------------------------------------------------ *
  * test_ssap_capacity_stress — SSAP service/property limits          *
  *                                                                    *
  * Registers services until the subsystem refuses, verifying that    *
@@ -6795,6 +6963,7 @@ int main(void)
 	test_ssap_capacity_stress(fd);
 	test_ssap_air_interface(fd);
 	test_credit_flow_control(fd);
+	test_supervision_timeout(fd);
 	test_phy_extreme_params(fd);
 	test_genetlink();
 

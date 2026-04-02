@@ -91,6 +91,12 @@ pub(crate) const SL_IOCTL_SCAN_RESULT_COUNT: u32 = _IO(SL_MAGIC, 0x21);
 /// and is rejected with EINVAL if CRC-12 does not match.
 pub(crate) const SL_IOCTL_INJECT_RAW_ADV: u32 = _IOW::<SleInjectRawAdv>(SL_MAGIC, 0x22);
 
+/// Set extended scan filter (service UUID matching, T/XS 20001-2025 §6.4).
+pub(crate) const SL_IOCTL_SET_SCAN_FILTER: u32 = _IOW::<SleScanFilter>(SL_MAGIC, 0x23);
+
+/// Clear extended scan filter (accept all matching discovery level).
+pub(crate) const SL_IOCTL_CLEAR_SCAN_FILTER: u32 = _IO(SL_MAGIC, 0x24);
+
 // --- Connection management ioctls ---
 
 /// Initiate an SLE connection to a peer device.
@@ -359,6 +365,20 @@ pub(crate) const SL_IOCTL_RPA_ENABLE: u32 = _IOW::<u8>(SL_MAGIC, 0xB6);
 
 /// Set RPA timeout in seconds.
 pub(crate) const SL_IOCTL_RPA_SET_TIMEOUT: u32 = _IOW::<u16>(SL_MAGIC, 0xB7);
+
+// --- Narrowband AFH measurement ioctls (T/XS 10003-2025 §8.7) ---
+
+/// Read local measurement capabilities (DLI opcode 0x2001).
+pub(crate) const SL_IOCTL_MEAS_READ_CAP: u32 = _IOR::<SleMeasCap>(SL_MAGIC, 0xC0);
+
+/// Set measurement link parameters (DLI opcode 0x2003).
+pub(crate) const SL_IOCTL_MEAS_SET_LINK_PARAM: u32 = _IOW::<SleMeasLinkParam>(SL_MAGIC, 0xC1);
+
+/// Start or stop a measurement action (DLI opcode 0x2005).
+pub(crate) const SL_IOCTL_MEAS_ACTION: u32 = _IOW::<SleMeasAction>(SL_MAGIC, 0xC2);
+
+/// Enable or disable measurement reporting (DLI opcode 0x200B).
+pub(crate) const SL_IOCTL_MEAS_ENABLE: u32 = _IOW::<u8>(SL_MAGIC, 0xC3);
 
 // ---------------------------------------------------------------------------
 // SparkLink address (6 bytes, same as SLE MAC layer identifier)
@@ -2320,6 +2340,87 @@ unsafe impl FromBytes for SlePhyHopInfo {}
 unsafe impl FromBytes for SlePhyBwCmd {}
 // SAFETY: repr(C), all fields are primitives.
 unsafe impl FromBytes for SleSinrThresholds {}
+
+// ---------------------------------------------------------------------------
+// Extended scan filter (T/XS 20001-2025 §6.4)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of service UUIDs in a single scan filter.
+pub(crate) const SCAN_FILTER_MAX_UUIDS: usize = 4;
+
+/// Extended scan filter for device discovery.
+///
+/// Allows filtering scan results by 16-bit standard service UUIDs
+/// found in advertising data TLV types 0x05-0x08 (service lists).
+/// A result passes the filter if its advertising data contains at
+/// least one of the specified UUIDs.  An empty list (count == 0)
+/// disables UUID filtering.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub(crate) struct SleScanFilter {
+    /// Number of valid UUIDs in the list (0..4).
+    pub uuid_count: u8,
+    pub _reserved: [u8; 3],
+    /// Target 16-bit standard service UUIDs to match.
+    pub uuids: [u16; SCAN_FILTER_MAX_UUIDS],
+}
+
+// SAFETY: SleScanFilter is repr(C) with only primitive fields, all bit patterns valid.
+unsafe impl FromBytes for SleScanFilter {}
+
+// ---------------------------------------------------------------------------
+// Narrowband AFH measurement (T/XS 10003-2025 §8.7)
+// ---------------------------------------------------------------------------
+
+/// Local measurement capabilities returned by MEAS_READ_CAP.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub(crate) struct SleMeasCap {
+    /// Supported measurement types bitmask.
+    pub meas_types: u8,
+    /// Maximum concurrent measurement instances.
+    pub max_instances: u8,
+    /// Antenna count available for measurements.
+    pub antenna_count: u8,
+    pub _reserved: u8,
+}
+
+// SAFETY: SleMeasCap is repr(C) with only primitive fields, all bit patterns valid.
+unsafe impl FromBytes for SleMeasCap {}
+
+/// Measurement link parameter configuration.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub(crate) struct SleMeasLinkParam {
+    /// Connection handle for the measurement link.
+    pub handle: u16,
+    /// Measurement type to configure.
+    pub meas_type: u8,
+    /// Configuration index (0-based).
+    pub config_index: u8,
+    /// Measurement interval in 10 ms units.
+    pub interval: u16,
+    /// Duration in 10 ms units (0 = continuous).
+    pub duration: u16,
+}
+
+// SAFETY: SleMeasLinkParam is repr(C) with only primitive fields, all bit patterns valid.
+unsafe impl FromBytes for SleMeasLinkParam {}
+
+/// Measurement action command (start/stop).
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub(crate) struct SleMeasAction {
+    /// Connection handle.
+    pub handle: u16,
+    /// Action: 0 = stop, 1 = start.
+    pub action: u8,
+    /// Configuration index.
+    pub config_index: u8,
+}
+
+// SAFETY: SleMeasAction is repr(C) with only primitive fields, all bit patterns valid.
+unsafe impl FromBytes for SleMeasAction {}
 
 // ---------------------------------------------------------------------------
 // SCI bus types

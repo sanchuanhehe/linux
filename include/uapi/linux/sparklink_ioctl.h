@@ -47,6 +47,17 @@ struct sle_scan_params {
 	__u8  _reserved[9];
 } __attribute__((packed));
 
+/* Extended scan filter for service UUID matching (T/XS 20001-2025 §6.4).
+ * Up to 4 standard 16-bit service UUIDs; a result passes if its
+ * advertising TLV data (types 0x05/0x07) contains at least one match.
+ * uuid_count == 0 disables UUID filtering.
+ */
+struct sle_scan_filter {
+	__u8  uuid_count;
+	__u8  _reserved[3];
+	__u16 uuids[4];
+} __attribute__((packed));
+
 struct sle_ext_adv_config {
 	__u8  handle;
 	__u8  discovery_level;
@@ -297,6 +308,29 @@ struct sle_ral_query_params {
 	__u8  id[6];
 	__u8  rpa[6];
 	__u8  _pad[2];
+} __attribute__((packed));
+
+/* --- Narrowband AFH measurement (T/XS 10003-2025 §8.7) ----------------- */
+
+struct sle_meas_cap {
+	__u8  meas_types;
+	__u8  max_instances;
+	__u8  antenna_count;
+	__u8  _reserved;
+} __attribute__((packed));
+
+struct sle_meas_link_param {
+	__u16 handle;
+	__u8  meas_type;
+	__u8  config_index;
+	__u16 interval;
+	__u16 duration;
+} __attribute__((packed));
+
+struct sle_meas_action {
+	__u16 handle;
+	__u8  action;
+	__u8  config_index;
 } __attribute__((packed));
 
 /* --- SSAP service layer ------------------------------------------------- */
@@ -612,6 +646,11 @@ struct sle_event_stats {
 #define SL_IOCTL_SCAN_RESULT_COUNT	_IO(SL_MAGIC, 0x21)
 #define SL_IOCTL_INJECT_RAW_ADV		_IOW(SL_MAGIC, 0x22, struct sle_inject_raw_adv)
 
+/* --- Extended scan filter (T/XS 20001-2025 §6.4) ------------------------ */
+
+#define SL_IOCTL_SET_SCAN_FILTER	_IOW(SL_MAGIC, 0x23, struct sle_scan_filter)
+#define SL_IOCTL_CLEAR_SCAN_FILTER	_IO(SL_MAGIC, 0x24)
+
 /* --- Connection management ---------------------------------------------- */
 
 #define SL_IOCTL_CONNECT		_IOW(SL_MAGIC, 0x30, struct sle_connect_params)
@@ -730,6 +769,13 @@ struct sle_event_stats {
 #define SL_IOCTL_RPA_ENABLE		_IOW(SL_MAGIC, 0xB6, __u8)
 #define SL_IOCTL_RPA_SET_TIMEOUT	_IOW(SL_MAGIC, 0xB7, __u16)
 
+/* --- Narrowband AFH measurement (T/XS 10003-2025 §8.7) ----------------- */
+
+#define SL_IOCTL_MEAS_READ_CAP		_IOR(SL_MAGIC, 0xC0, struct sle_meas_cap)
+#define SL_IOCTL_MEAS_SET_LINK_PARAM	_IOW(SL_MAGIC, 0xC1, struct sle_meas_link_param)
+#define SL_IOCTL_MEAS_ACTION		_IOW(SL_MAGIC, 0xC2, struct sle_meas_action)
+#define SL_IOCTL_MEAS_ENABLE		_IOW(SL_MAGIC, 0xC3, __u8)
+
 /* =========================================================================
  * Event type constants
  * =========================================================================
@@ -741,5 +787,14 @@ struct sle_event_stats {
 #define SLE_EVT_SEC_CHANGED	0x04
 #define SLE_EVT_PWR_CHANGED	0x05
 #define SLE_EVT_HW_ERROR	0x06
+
+/* Narrowband / measurement events (§9.1.33–§9.1.39) */
+#define SLE_EVT_NB_MEAS_INFO		0x22
+#define SLE_EVT_NB_MEAS_STATE		0x23
+#define SLE_EVT_NB_MEAS_PARAM		0x24
+#define SLE_EVT_LOCAL_NB_MEAS_CAP	0x25
+#define SLE_EVT_PEER_NB_MEAS_CAP	0x26
+#define SLE_EVT_MEAS_STATE_CHANGE	0x27
+#define SLE_EVT_MEAS_QUANTITY		0x28
 
 #endif /* _UAPI_LINUX_SPARKLINK_IOCTL_H */

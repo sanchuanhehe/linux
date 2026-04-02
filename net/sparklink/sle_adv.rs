@@ -71,6 +71,81 @@ impl Default for ScanParams {
 }
 
 // ---------------------------------------------------------------------------
+// Extended scan filter (T/XS 20001-2025 §6.4)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of service UUIDs in a scan filter.
+pub const SCAN_FILTER_MAX_UUIDS: usize = 4;
+
+/// Extended scan filter for device discovery.
+///
+/// When active, scan results are additionally filtered by checking
+/// advertising data TLV entries for 16-bit standard service UUIDs
+/// (types 0x05/0x07 per T/XS 20001-2025).  A result passes if its
+/// advertising data contains at least one of the target UUIDs.
+#[derive(Copy, Clone)]
+pub struct ScanFilter {
+    /// Number of valid entries in `uuids`.
+    pub uuid_count: u8,
+    /// Target 16-bit service UUIDs to match against.
+    pub uuids: [u16; SCAN_FILTER_MAX_UUIDS],
+}
+
+impl Default for ScanFilter {
+    fn default() -> Self {
+        Self {
+            uuid_count: 0,
+            uuids: [0u16; SCAN_FILTER_MAX_UUIDS],
+        }
+    }
+}
+
+impl ScanFilter {
+    /// Returns true if the filter is active (has at least one UUID).
+    pub fn is_active(&self) -> bool {
+        self.uuid_count > 0
+    }
+
+    /// Check whether the given advertising TLV data matches this filter.
+    ///
+    /// Scans TLV entries of types 0x05 (FullStdServiceList) and 0x07
+    /// (PartialStdServiceList) for 16-bit UUIDs.  Returns true if any
+    /// target UUID is found, or if the filter is inactive.
+    pub fn matches_adv_data(&self, data: &[u8], data_len: usize) -> bool {
+        if !self.is_active() {
+            return true;
+        }
+        let count = self.uuid_count.min(SCAN_FILTER_MAX_UUIDS as u8) as usize;
+        let mut pos = 0;
+        let end = data_len.min(data.len());
+        while pos + 1 < end {
+            let tlv_len = data[pos] as usize;
+            let tlv_type = data[pos + 1];
+            if tlv_len == 0 {
+                break;
+            }
+            // Standard service list types: 0x05 (full) and 0x07 (partial)
+            if tlv_type == 0x05 || tlv_type == 0x07 {
+                let value_start = pos + 2;
+                let value_end = (pos + 1 + tlv_len).min(end);
+                let mut i = value_start;
+                while i + 1 < value_end {
+                    let uuid = u16::from_le_bytes([data[i], data[i + 1]]);
+                    for j in 0..count {
+                        if self.uuids[j] == uuid {
+                            return true;
+                        }
+                    }
+                    i += 2;
+                }
+            }
+            pos += 1 + tlv_len;
+        }
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Scan result entry
 // ---------------------------------------------------------------------------
 
@@ -305,6 +380,8 @@ pub struct AdvScanInner {
     pub scan_results_max: usize,
     /// Extended advertising sets.
     pub ext_adv_sets: [Option<ExtAdvSet>; EXT_ADV_MAX_SETS],
+    /// Extended scan filter for service UUID matching.
+    pub scan_filter: ScanFilter,
 }
 
 impl AdvScanInner {
@@ -323,6 +400,7 @@ impl AdvScanInner {
             scan_results: KVec::new(),
             scan_results_max: 64,
             ext_adv_sets: [None, None, None, None],
+            scan_filter: ScanFilter::default(),
         }
     }
 
@@ -498,6 +576,11 @@ impl AdvScanInner {
             return Ok(());
         }
 
+        // Apply extended service UUID filter (T/XS 20001-2025 §6.4)
+        if !self.scan_filter.matches_adv_data(&result.adv_data, result.adv_data_len) {
+            return Ok(());
+        }
+
         // Add to results (evict oldest if full)
         if self.scan_results.len() >= self.scan_results_max {
             let _ = self.scan_results.remove(0);
@@ -524,6 +607,10 @@ impl AdvScanInner {
         if discovery_level < self.scan_params.filter_level {
             return Ok(());
         }
+        // Apply extended service UUID filter (T/XS 20001-2025 §6.4)
+        if !self.scan_filter.matches_adv_data(data, data.len()) {
+            return Ok(());
+        }
         let mut result = ScanResult {
             addr: *addr,
             rssi,
@@ -544,6 +631,16 @@ impl AdvScanInner {
     /// Get the number of available scan results.
     pub fn scan_result_count(&self) -> usize {
         self.scan_results.len()
+    }
+
+    /// Set an extended scan filter for service UUID matching.
+    pub fn set_scan_filter(&mut self, filter: ScanFilter) {
+        self.scan_filter = filter;
+    }
+
+    /// Clear the extended scan filter.
+    pub fn clear_scan_filter(&mut self) {
+        self.scan_filter = ScanFilter::default();
     }
 
     // -----------------------------------------------------------------------

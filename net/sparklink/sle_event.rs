@@ -1129,6 +1129,77 @@ impl EventQueue {
         self.enqueue(SleEventType::EncryptionParamReq, &payload);
     }
 
+    /// Enqueue a narrowband measurement info event (§9.1.33).
+    pub fn push_narrowband_meas_info(
+        &mut self,
+        handle: u16,
+        meas_type: u16,
+        status: u8,
+        config_index: u8,
+    ) {
+        let payload = NarrowbandMeasInfoEvent {
+            handle,
+            meas_type,
+            status,
+            config_index,
+            _pad: [0u8; 2],
+        };
+        self.enqueue(SleEventType::NarrowbandMeasInfo, &payload);
+    }
+
+    /// Enqueue a narrowband measurement state change event (§9.1.34).
+    pub fn push_narrowband_meas_state_change(
+        &mut self,
+        status: u8,
+        config_index: u8,
+        meas_state: u8,
+    ) {
+        let payload = NarrowbandMeasStateChangeEvent {
+            status,
+            config_index,
+            meas_state,
+            _pad: 0,
+        };
+        self.enqueue(SleEventType::NarrowbandMeasStateChange, &payload);
+    }
+
+    /// Enqueue a measurement state change event (§9.1.38).
+    pub fn push_meas_state_change(
+        &mut self,
+        source: u16,
+        status: u8,
+        instance_handle: u8,
+        instance_state: u8,
+    ) {
+        let payload = MeasStateChangeEvent {
+            source,
+            status,
+            instance_handle,
+            instance_state,
+            _pad: [0u8; 3],
+        };
+        self.enqueue(SleEventType::MeasStateChange, &payload);
+    }
+
+    /// Enqueue a measurement quantity report event (§9.1.39).
+    pub fn push_meas_quantity_report(
+        &mut self,
+        source: u16,
+        meas_source: u16,
+        seq: u16,
+        instance_handle: u8,
+        meas_count: u8,
+    ) {
+        let payload = MeasQuantityReportEvent {
+            source,
+            meas_source,
+            seq,
+            instance_handle,
+            meas_count,
+        };
+        self.enqueue(SleEventType::MeasQuantityReport, &payload);
+    }
+
     /// Dequeue the oldest event. Returns None if the queue is empty.
     ///
     /// O(1) — advances the ring buffer head pointer.

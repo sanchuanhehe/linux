@@ -1343,6 +1343,10 @@ struct SparkLinkCtl {
     dev: ARef<Device>,
     /// Broadcast ring cursor: sequence number of the last event this fd has seen.
     last_seq: core::sync::atomic::AtomicU64,
+    /// Per-fd device affinity.  -1 means "follow the global active_dev_id".
+    /// A non-negative value means this fd is bound to a specific controller
+    /// (auto-switch on ioctl entry).
+    target_dev_id: core::sync::atomic::AtomicI32,
 }
 
 /// Advertising, scanning, device management ioctl sub-dispatcher.
@@ -1387,6 +1391,41 @@ fn ioctl_dev_switch(arg: usize) -> Result<isize> {
     }
     s.switch_to_device(target_id)?;
     pr_info!("sparklink: switched active device to sle{}\n", target_id);
+    Ok(0)
+}
+
+/// DEV_SELECT ioctl — per-fd device affinity.
+///
+/// Sets which controller this fd targets.  -1 means follow the global
+/// active_dev_id; ≥0 binds the fd to that specific controller.  On each
+/// subsequent ioctl the handler will auto-switch if needed.
+#[inline(never)]
+fn ioctl_dev_select(me: Pin<&SparkLinkCtl>, arg: usize) -> Result<isize> {
+    let val: i16 = read_user_struct(arg)?;
+    if val >= 0 {
+        let target = val as u16;
+        let ss = SUBSYSTEM.lock();
+        let s = ss.as_ref().ok_or(ENODEV)?;
+        if s.dev_registry.get(target).is_none() {
+            return Err(ENODEV);
+        }
+    }
+    me.target_dev_id.store(val as i32, core::sync::atomic::Ordering::Relaxed);
+    Ok(0)
+}
+
+/// DEV_GET_ACTIVE ioctl — return the effective device for this fd.
+#[inline(never)]
+fn ioctl_dev_get_active(me: Pin<&SparkLinkCtl>, arg: usize) -> Result<isize> {
+    let fd_target = me.target_dev_id.load(core::sync::atomic::Ordering::Relaxed);
+    let effective: u16 = if fd_target >= 0 {
+        fd_target as u16
+    } else {
+        let ss = SUBSYSTEM.lock();
+        let s = ss.as_ref().ok_or(ENODEV)?;
+        s.active_dev_id.unwrap_or(0xFFFF)
+    };
+    write_user_struct(arg, &effective)?;
     Ok(0)
 }
 
@@ -3196,6 +3235,7 @@ impl MiscDevice for SparkLinkCtl {
                     last_seq: core::sync::atomic::AtomicU64::new(
                         sle_event::BroadcastRing::current_seq()
                     ),
+                    target_dev_id: core::sync::atomic::AtomicI32::new(-1),
                 }
             },
             GFP_KERNEL,
@@ -3240,6 +3280,20 @@ impl MiscDevice for SparkLinkCtl {
     fn ioctl(me: Pin<&SparkLinkCtl>, _file: &FsFile, cmd: u32, arg: usize) -> Result<isize> {
         // Sync power mode from configfs on every ioctl.
         Self::sync_power_mode(me.as_ref());
+
+        // Per-fd device routing: DEV_SELECT and DEV_GET_ACTIVE are handled
+        // before auto-switch so they can query/set the affinity itself.
+        match cmd {
+            SL_IOCTL_DEV_SELECT => return ioctl_dev_select(me, arg),
+            SL_IOCTL_DEV_GET_ACTIVE => return ioctl_dev_get_active(me, arg),
+            _ => {}
+        }
+
+        // Auto-switch to this fd's target device if bound via DEV_SELECT.
+        // Skipped for DEV_SWITCH (which sets the global active device).
+        if cmd != SL_IOCTL_DEV_SWITCH {
+            Self::ensure_target_device(me.as_ref())?;
+        }
 
         match cmd {
             // --- Advertising, scanning, device management ---
@@ -3375,6 +3429,38 @@ impl MiscDevice for SparkLinkCtl {
 }
 
 impl SparkLinkCtl {
+    /// If this fd has a per-fd device affinity (`target_dev_id >= 0`),
+    /// ensure the global active controller is switched to that device.
+    /// Called at the top of `ioctl()` so all subsequent operations in
+    /// the call see the correct per-device state.
+    ///
+    /// Returns `Ok(())` if:
+    /// - The fd follows the global active device (`target_dev_id == -1`).
+    /// - The target device is already active (no switch needed).
+    /// - The switch completed successfully.
+    ///
+    /// Returns `Err(ENODEV)` if the target device is no longer registered.
+    fn ensure_target_device(me: Pin<&Self>) -> Result {
+        let target = me.target_dev_id.load(core::sync::atomic::Ordering::Relaxed);
+        if target < 0 {
+            return Ok(()); // follow global
+        }
+        let target_id = target as u16;
+        let mut ss = SUBSYSTEM.lock();
+        let s = ss.as_mut().ok_or(ENODEV)?;
+        // Already active?
+        if s.active_dev_id == Some(target_id) {
+            return Ok(());
+        }
+        // Target still registered?
+        if s.dev_registry.get(target_id).is_none() {
+            // Device gone: reset affinity to global.
+            me.target_dev_id.store(-1, core::sync::atomic::Ordering::Relaxed);
+            return Err(ENODEV);
+        }
+        s.switch_to_device(target_id)
+    }
+
     /// Synchronize configfs power_mode into SubsystemShared.
     /// Called at the beginning of ioctls that initiate active operations.
     fn sync_power_mode(_me: Pin<&SparkLinkCtl>) {

@@ -5200,6 +5200,187 @@ static void test_dev_switch_isolation(int fd)
  * Tests boundary conditions: zero-length write, max-length write,
  * write to read-only property, read-after-write consistency.
  */
+
+/*
+ * Per-fd device affinity (DEV_SELECT / DEV_GET_ACTIVE).
+ *
+ * Validates that:
+ *   Phase 1 — DEV_SELECT basic semantics.
+ *   Phase 2 — Per-fd auto-switch (role isolation across fds).
+ *   Phase 3 — Reset affinity back to global.
+ */
+static void test_per_fd_device_select(int fd)
+{
+	test_header("Per-fd device affinity: DEV_SELECT / DEV_GET_ACTIVE");
+
+	int ok = 0;
+
+	/* Phase 1: DEV_GET_ACTIVE before any DEV_SELECT (should follow global) */
+	__u16 active = 0xBEEF;
+	int ret = ioctl(fd, SL_IOCTL_DEV_GET_ACTIVE, &active);
+
+	if (ret < 0) {
+		printf("  FAIL: DEV_GET_ACTIVE: %s\n", strerror(errno));
+		return;
+	}
+	printf("  OK:   DEV_GET_ACTIVE (initial) = sle%u\n", active);
+	ok++;
+
+	/* DEV_SELECT to non-existent device → ENODEV */
+	__s16 bad = 15;
+
+	ret = ioctl(fd, SL_IOCTL_DEV_SELECT, &bad);
+	if (ret < 0 && (errno == ENODEV || errno == EINVAL)) {
+		printf("  OK:   DEV_SELECT(15) rejected\n");
+		ok++;
+	} else {
+		printf("  FAIL: DEV_SELECT(15) should fail, ret=%d errno=%d\n",
+		       ret, errno);
+	}
+
+	/* DEV_SELECT(-1) should always succeed (reset to global) */
+	__s16 neg = -1;
+
+	ret = ioctl(fd, SL_IOCTL_DEV_SELECT, &neg);
+	if (ret == 0) {
+		printf("  OK:   DEV_SELECT(-1) accepted (follow global)\n");
+		ok++;
+	} else {
+		printf("  FAIL: DEV_SELECT(-1): %s\n", strerror(errno));
+	}
+
+	/* DEV_SELECT to current global device works */
+	__s16 cur = (__s16)active;
+
+	ret = ioctl(fd, SL_IOCTL_DEV_SELECT, &cur);
+	if (ret == 0) {
+		printf("  OK:   DEV_SELECT(sle%d) accepted\n", (int)cur);
+		ok++;
+	} else {
+		printf("  FAIL: DEV_SELECT(sle%d): %s\n", (int)cur, strerror(errno));
+	}
+
+	/* DEV_GET_ACTIVE should now return the bound device */
+	__u16 check = 0xBEEF;
+
+	ret = ioctl(fd, SL_IOCTL_DEV_GET_ACTIVE, &check);
+	if (ret == 0 && check == (__u16)cur) {
+		printf("  OK:   DEV_GET_ACTIVE = sle%u (matches DEV_SELECT)\n", check);
+		ok++;
+	} else {
+		printf("  FAIL: DEV_GET_ACTIVE = %u, expected %u\n",
+		       check, (__u16)cur);
+	}
+
+	/* Phase 2: multi-device role isolation via per-fd affinity */
+	__u16 mask = 0;
+
+	ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
+	if (ret < 0 || __builtin_popcount(mask) < 2) {
+		printf("  OK:   Skipped multi-dev phase (need 2+ controllers)\n");
+		printf("  OK:   Per-fd select: %d/5 basic tests passed\n", ok);
+		/* Reset to global */
+		ioctl(fd, SL_IOCTL_DEV_SELECT, &neg);
+		return;
+	}
+
+	/* Find two device IDs */
+	int id_a = __builtin_ctz(mask);
+	int id_b = __builtin_ctz(mask & ~(1u << id_a));
+
+	/* Bind this fd to device A, set role GNode */
+	__s16 sel_a = (__s16)id_a;
+
+	ioctl(fd, SL_IOCTL_DEV_SELECT, &sel_a);
+	__u8 role_g = 1;
+
+	ioctl(fd, SL_IOCTL_SET_ROLE, &role_g);
+
+	/* Bind this fd to device B, set role TNode */
+	__s16 sel_b = (__s16)id_b;
+
+	ioctl(fd, SL_IOCTL_DEV_SELECT, &sel_b);
+	__u8 role_t = 0;
+
+	ioctl(fd, SL_IOCTL_SET_ROLE, &role_t);
+
+	/* Read role on device B → should be TNode */
+	__u8 r = 0xFF;
+
+	ret = ioctl(fd, SL_IOCTL_GET_ROLE, &r);
+	if (ret == 0 && r == 0) {
+		printf("  OK:   sle%d role=TNode (via DEV_SELECT)\n", id_b);
+		ok++;
+	} else {
+		printf("  FAIL: sle%d role=%u (expected TNode=0)\n", id_b, r);
+	}
+
+	/* Switch affinity to device A → role should be GNode */
+	ioctl(fd, SL_IOCTL_DEV_SELECT, &sel_a);
+	r = 0xFF;
+	ret = ioctl(fd, SL_IOCTL_GET_ROLE, &r);
+	if (ret == 0 && r == 1) {
+		printf("  OK:   sle%d role=GNode (preserved via DEV_SELECT)\n", id_a);
+		ok++;
+	} else {
+		printf("  FAIL: sle%d role=%u (expected GNode=1)\n", id_a, r);
+	}
+
+	/* Create connection on device A */
+	struct sle_connect_params cp;
+
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xE1;
+	cp.peer_addr[5] = 0x0E;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	__u16 h_a = 0;
+
+	if (ret > 0) {
+		h_a = (__u16)ret;
+		printf("  OK:   sle%d connection handle=%u\n", id_a, h_a);
+		ok++;
+	} else {
+		printf("  WARN: sle%d CONNECT failed\n", id_a);
+	}
+
+	/* Switch to device B: should see 0 connections */
+	ioctl(fd, SL_IOCTL_DEV_SELECT, &sel_b);
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 0) {
+		printf("  OK:   sle%d CONN_COUNT=0 (isolated via DEV_SELECT)\n", id_b);
+		ok++;
+	} else {
+		printf("  FAIL: sle%d CONN_COUNT=%d (expected 0)\n", id_b, ret);
+	}
+
+	/* Back to device A: connection still there */
+	ioctl(fd, SL_IOCTL_DEV_SELECT, &sel_a);
+	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+	if (ret == 1) {
+		printf("  OK:   sle%d CONN_COUNT=1 (preserved via DEV_SELECT)\n", id_a);
+		ok++;
+	} else {
+		printf("  FAIL: sle%d CONN_COUNT=%d (expected 1)\n", id_a, ret);
+	}
+
+	/* Phase 3: reset to global */
+	ioctl(fd, SL_IOCTL_DEV_SELECT, &neg);
+	__u16 final_active = 0xBEEF;
+
+	ioctl(fd, SL_IOCTL_DEV_GET_ACTIVE, &final_active);
+	printf("  OK:   Reset to global, active=sle%u\n", final_active);
+	ok++;
+
+	/* Cleanup: ensure sle0 is active, disconnect */
+	__u16 target0 = 0;
+
+	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target0);
+	if (h_a > 0)
+		ioctl(fd, SL_IOCTL_DISCONNECT, &h_a);
+
+	printf("  OK:   Per-fd device affinity: %d checks passed\n", ok);
+}
+
 static void test_ssap_prop_edge_cases(int fd)
 {
 	test_header("SSAP: property operation edge cases");
@@ -10518,6 +10699,7 @@ int main(void)
 	test_ssap_indication(fd);
 	test_ssap_service_discovery(fd);
 	test_dev_switch_isolation(fd);
+	test_per_fd_device_select(fd);
 	test_ssap_prop_edge_cases(fd);
 	test_scan_filter_reject(fd);
 	test_scan_uuid_filter(fd);

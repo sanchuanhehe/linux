@@ -622,6 +622,27 @@ struct sle_event_stats {
 #define SL_IOCTL_DEV_SWITCH		_IOW(SL_MAGIC, 0x05, __u16)
 #define SL_IOCTL_DEV_LIST		_IOR(SL_MAGIC, 0x06, __u16)
 
+/**
+ * SL_IOCTL_DEV_SELECT - Set per-fd device affinity.
+ *
+ * Unlike DEV_SWITCH (which changes the global active controller),
+ * DEV_SELECT only affects the calling fd.  Subsequent ioctls on this
+ * fd auto-switch to the bound device.
+ *
+ * @arg: __s16  -1 = follow global active, >= 0 = bind to device id.
+ */
+#define SL_IOCTL_DEV_SELECT		_IOW(SL_MAGIC, 0x07, __s16)
+
+/**
+ * SL_IOCTL_DEV_GET_ACTIVE - Get the effective device for this fd.
+ *
+ * Returns the per-fd target if set, otherwise the global active_dev_id.
+ * 0xFFFF means no device is active.
+ *
+ * @arg: __u16 (output)
+ */
+#define SL_IOCTL_DEV_GET_ACTIVE		_IOR(SL_MAGIC, 0x08, __u16)
+
 /* --- Advertising / scanning --------------------------------------------- */
 
 #define SL_IOCTL_START_ADV		_IOW(SL_MAGIC, 0x10, struct sle_adv_params)

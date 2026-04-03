@@ -39,6 +39,18 @@ pub(crate) const SL_IOCTL_DEV_SWITCH: u32 = _IOW::<u16>(SL_MAGIC, 0x05);
 /// List all registered device IDs (returns bitmask u16).
 pub(crate) const SL_IOCTL_DEV_LIST: u32 = _IOR::<u16>(SL_MAGIC, 0x06);
 
+/// Select per-fd device affinity (i16: -1 = follow global, ≥0 = bind to device).
+///
+/// Unlike DEV_SWITCH (which changes the global active controller),
+/// DEV_SELECT only affects the calling fd.  On each subsequent ioctl,
+/// the handler auto-switches to the fd's target device if needed.
+pub(crate) const SL_IOCTL_DEV_SELECT: u32 = _IOW::<i16>(SL_MAGIC, 0x07);
+
+/// Query the effective device for this fd (returns u16).
+/// If the fd has a per-fd affinity, returns that; otherwise returns
+/// the global active_dev_id (or 0xFFFF if no device is active).
+pub(crate) const SL_IOCTL_DEV_GET_ACTIVE: u32 = _IOR::<u16>(SL_MAGIC, 0x08);
+
 /// Start SLE advertising (device discovery - discoverable side).
 pub(crate) const SL_IOCTL_START_ADV: u32 = _IOW::<SleAdvParams>(SL_MAGIC, 0x10);
 

@@ -1660,9 +1660,12 @@ impl ConnManager {
     ///
     /// Returns a vector of handles whose `last_activity` jiffies exceed the
     /// negotiated supervision timeout. The caller should disconnect these.
-    pub fn check_supervision_timeouts(&self) -> KVec<u16> {
+    ///
+    /// Uses a caller-provided stack buffer to avoid heap allocation in
+    /// the hot path. Returns the number of timed-out handles written.
+    pub fn check_supervision_timeouts(&self, out: &mut [u16; MAX_CONNECTIONS]) -> usize {
         let now = jiffies_now();
-        let mut timed_out = KVec::new();
+        let mut count = 0usize;
         for entry in self.connections.iter() {
             if entry.state != ConnState::Connected {
                 continue;
@@ -1676,11 +1679,12 @@ impl ConnManager {
             }
             let timeout_jiffies = msecs_to_jiffies(timeout_ms as u32) as u64;
             let elapsed = now.wrapping_sub(entry.last_activity);
-            if elapsed > timeout_jiffies {
-                let _ = timed_out.push(entry.handle, GFP_KERNEL);
+            if elapsed > timeout_jiffies && count < MAX_CONNECTIONS {
+                out[count] = entry.handle;
+                count += 1;
             }
         }
-        timed_out
+        count
     }
 
     /// Return the number of jiffies until the next supervision

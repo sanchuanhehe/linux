@@ -50,11 +50,23 @@ fn set_event_pump_ref(pump: &Arc<EventPump>) {
 ///
 /// Safe to call from any context including USB soft-IRQ completion
 /// callbacks.  If no EventPump is registered yet, this is a no-op.
+///
+/// Uses an atomic flag to avoid redundant Mutex acquisitions when
+/// multiple producers (USB completions) kick in rapid succession.
 pub(crate) fn kick_event_pump() {
+    // Fast path: if already scheduled, skip the lock entirely.
+    if KICK_SCHEDULED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
     if let Some(ref pump) = *EVENT_PUMP_REF.lock() {
         let _ = workqueue::system().enqueue_delayed(pump.clone(), 0);
     }
 }
+
+/// Atomic flag to avoid redundant EVENT_PUMP_REF lock acquisitions.
+/// Set by `kick_event_pump()`, cleared by `EventPump::run()`.
+static KICK_SCHEDULED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 /// Fast-poll countdown. When events are processed, this is set to a
 /// positive value. Each subsequent run() that finds no events decrements
@@ -553,8 +565,9 @@ impl WorkItem for EventPump {
                         }
                         shared.cmd_pending.gc();
 
-                        let timed_out = shared.conn.check_supervision_timeouts();
-                        for &h in timed_out.iter() {
+                        let mut timeout_buf = [0u16; sle_conn::MAX_CONNECTIONS];
+                        let n = shared.conn.check_supervision_timeouts(&mut timeout_buf);
+                        for &h in &timeout_buf[..n] {
                             if let Ok(peer) = shared.conn.timeout_disconnect(h) {
                                 shared
                                     .broadcast
@@ -596,6 +609,8 @@ impl WorkItem for EventPump {
                 rearm_jiffies = 1;
             }
         }
+        // Clear the kick-scheduled flag so new producers can kick again.
+        KICK_SCHEDULED.store(false, core::sync::atomic::Ordering::Release);
         let _ = workqueue::system()
             .enqueue_delayed(this, rearm_jiffies as kernel::time::Jiffies);
     }

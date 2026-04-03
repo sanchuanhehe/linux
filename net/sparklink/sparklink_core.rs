@@ -2993,16 +2993,18 @@ fn ioctl_dispatch_infra(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<
             if sle_dli::sle_opcode_from_u16(cmd_data.opcode).is_none() {
                 return Err(EINVAL);
             }
-            let mut ss = SUBSYSTEM.lock();
-            let s = ss.as_mut().ok_or(ENODEV)?;
-            s.cmd_queue
-                .push(cmd_data.opcode, &cmd_data.params[..param_len])?;
-            let seq = s.cmd_pending.submit(cmd_data.opcode)?;
-            if let Some(ref w) = s._cmd_worker {
+            let worker;
+            {
+                let mut ss = SUBSYSTEM.lock();
+                let s = ss.as_mut().ok_or(ENODEV)?;
+                s.cmd_queue
+                    .push(cmd_data.opcode, &cmd_data.params[..param_len])?;
+                cmd_data.seq = s.cmd_pending.submit(cmd_data.opcode)?;
+                worker = s._cmd_worker.clone();
+            }
+            if let Some(ref w) = worker {
                 w.kick();
             }
-            cmd_data.seq = seq;
-            drop(ss);
             write_user_struct(arg, &cmd_data)?;
             Ok(0)
         }

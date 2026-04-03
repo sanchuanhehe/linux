@@ -82,6 +82,16 @@
 #define DLI_OP_CONN_PARAM_UPDATE  0x1807
 #define DLI_OP_READ_RSSI          0x180C
 
+/* Security opcodes (§8.6) */
+#define DLI_OP_HASH_COMPUTE       0x1C01
+#define DLI_OP_GEN_SECURE_RANDOM  0x1C02
+#define DLI_OP_START_ENCRYPT      0x1C03
+#define DLI_OP_REQUEST_PAIR       0x1C04
+#define DLI_OP_REPLY_ENC_PARAM    0x1C05
+#define DLI_OP_REJECT_ENC_PARAM   0x1C06
+#define DLI_OP_READ_ENC_ALGO      0x1C07
+#define DLI_OP_START_PAIRING      0x1C08
+
 /* DLI event codes */
 #define DLI_EVT_CMD_STATUS        0x0001
 #define DLI_EVT_CMD_COMPLETE      0x0002
@@ -169,6 +179,8 @@ typedef struct SleDliConn {
     /* Data length */
     uint16_t max_tx_octets;
     uint16_t max_rx_octets;
+    /* Security state */
+    bool     encrypted;
 } SleDliConn;
 
 struct USBSleDliState {
@@ -1297,6 +1309,175 @@ static void sle_dli_process_command(USBSleDliState *s,
         rp[2] = 0x00;         /* status */
         rp[3] = (uint8_t)-50; /* RSSI: -50 dBm */
         sle_dli_cmd_complete(s, opcode, 0x00, rp, 4);
+        break;
+    }
+
+    /* ----------------------------------------------------------------
+     * Security commands (§8.6)
+     * ---------------------------------------------------------------- */
+
+    case DLI_OP_HASH_COMPUTE: {
+        /* params: [key:16] [plaintext:16] [algo:1] → CmdComplete with hash */
+        if (plen < 33) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        /* Simulated hash: XOR key with plaintext (not cryptographic!) */
+        uint8_t rp[17];
+        rp[0] = 0x00; /* status */
+        for (int i = 0; i < 16; i++) {
+            rp[1 + i] = params[i] ^ params[16 + i];
+        }
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 17);
+        break;
+    }
+
+    case DLI_OP_GEN_SECURE_RANDOM: {
+        /* no params → CmdComplete with 16-byte random */
+        uint8_t rp[17];
+        rp[0] = 0x00; /* status */
+        /* Deterministic "random" for reproducible test results */
+        for (int i = 0; i < 16; i++) {
+            rp[1 + i] = (uint8_t)(0x42 + i * 7 + s->mac_addr[5]);
+        }
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 17);
+        break;
+    }
+
+    case DLI_OP_START_ENCRYPT: {
+        /* Standard: [handle:2][key:16][algo:1][kdf:1][integrity:1]
+         * Driver sends: no params (handle inferred from first active conn)
+         * Accept both. */
+        uint16_t handle;
+        SleDliConn *conn = NULL;
+        if (plen >= 2) {
+            handle = params[0] | ((uint16_t)params[1] << 8);
+            conn = sle_dli_find_conn(s, handle);
+        } else {
+            /* Find first active connection */
+            for (int i = 0; i < MAX_CONNECTIONS; i++) {
+                if (s->connections[i].active) {
+                    conn = &s->connections[i];
+                    handle = conn->handle;
+                    break;
+                }
+            }
+        }
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        conn->encrypted = true;
+        /* Queue EncStatusChange event (0x0011): [handle:2][enabled:1] */
+        {
+            uint8_t buf[7];
+            buf[0] = DLI_EVT_ENC_CHANGED & 0xFF;
+            buf[1] = (DLI_EVT_ENC_CHANGED >> 8) & 0xFF;
+            buf[2] = 3;
+            buf[3] = 0;
+            buf[4] = handle & 0xFF;
+            buf[5] = (handle >> 8) & 0xFF;
+            buf[6] = 1; /* enabled */
+            sle_dli_queue_event(s, buf, 7);
+        }
+        break;
+    }
+
+    case DLI_OP_REQUEST_PAIR: {
+        /* Driver: [method:1], Standard: [handle:2][auth_req:1]
+         * Accept both. */
+        sle_dli_cmd_status(s, opcode, 0x00);
+        /* If connected to a remote device, send PairRequest event there */
+        for (int i = 0; i < MAX_CONNECTIONS; i++) {
+            if (s->connections[i].active && s->connections[i].remote_dev) {
+                USBSleDliState *remote = s->connections[i].remote_dev;
+                uint8_t method = (plen >= 1) ? params[0] : 1;
+                /* Queue PairRequest event on remote: [addr:6][method:1] */
+                uint8_t buf[11];
+                buf[0] = DLI_EVT_PAIR_REQUEST & 0xFF;
+                buf[1] = (DLI_EVT_PAIR_REQUEST >> 8) & 0xFF;
+                buf[2] = 7;
+                buf[3] = 0;
+                memcpy(&buf[4], s->mac_addr, 6);
+                buf[10] = method;
+                sle_dli_queue_event(remote, buf, 11);
+                break;
+            }
+        }
+        break;
+    }
+
+    case DLI_OP_REPLY_ENC_PARAM: {
+        /* params: [handle:2][key:16][algo:1][kdf:1] → CmdComplete */
+        if (plen < 2) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        uint8_t rp[3];
+        rp[0] = handle & 0xFF;
+        rp[1] = (handle >> 8) & 0xFF;
+        rp[2] = 0x00;
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 3);
+        break;
+    }
+
+    case DLI_OP_REJECT_ENC_PARAM: {
+        /* params: [handle:2] → CmdComplete */
+        if (plen < 2) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        uint8_t rp[3];
+        rp[0] = handle & 0xFF;
+        rp[1] = (handle >> 8) & 0xFF;
+        rp[2] = 0x00;
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 3);
+        break;
+    }
+
+    case DLI_OP_READ_ENC_ALGO: {
+        /* no params → CmdComplete with algo_bitmap(4) */
+        uint8_t rp[5];
+        rp[0] = 0x00; /* status */
+        /* Support AC1(SM4-CCM) + AC2(AES-CCM) = bits 0,1 */
+        rp[1] = 0x03;
+        rp[2] = 0x00;
+        rp[3] = 0x00;
+        rp[4] = 0x00;
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 5);
+        break;
+    }
+
+    case DLI_OP_START_PAIRING: {
+        /* params: [handle:2][io_cap:1][oob:1][auth:1][max_key:1]
+         *         [sec_dist:1][crypto:4][psk:1] → CmdStatus */
+        if (plen < 3) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        /* In simulation, immediately mark encryption as enabled */
+        conn->encrypted = true;
+        {
+            uint8_t buf[7];
+            buf[0] = DLI_EVT_ENC_CHANGED & 0xFF;
+            buf[1] = (DLI_EVT_ENC_CHANGED >> 8) & 0xFF;
+            buf[2] = 3;
+            buf[3] = 0;
+            buf[4] = handle & 0xFF;
+            buf[5] = (handle >> 8) & 0xFF;
+            buf[6] = 1;
+            sle_dli_queue_event(s, buf, 7);
+        }
         break;
     }
 

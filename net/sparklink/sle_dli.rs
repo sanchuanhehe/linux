@@ -1151,6 +1151,8 @@ pub struct VirtualController {
     pending_events: RefCell<[Option<SleEvent>; CTRL_EVENT_RING_SIZE]>,
     event_head: Cell<usize>,
     event_tail: Cell<usize>,
+    /// Pairing method hint from the most recent RequestPair command.
+    pair_method_hint: Cell<u8>,
 }
 
 // SAFETY: VirtualController is only used inside Mutex<ControllerBackend> in
@@ -1169,6 +1171,7 @@ impl VirtualController {
             pending_events: RefCell::new([const { None }; CTRL_EVENT_RING_SIZE]),
             event_head: Cell::new(0),
             event_tail: Cell::new(0),
+            pair_method_hint: Cell::new(0),
         }
     }
 
@@ -1252,6 +1255,92 @@ impl SleController for VirtualController {
                     handle,
                     reason: 0, // success
                 });
+            }
+
+            // --- Pairing simulation (T/XS 10003-2025 §8.6) ---
+            // Each command triggers the next event in the pairing sequence.
+            SleOpcode::RequestPair if params.len() >= 3 => {
+                let handle = u16::from_le_bytes([params[0], params[1]]);
+                let auth_req = params[2];
+                // Save method hint (4th byte) for PairOptionReport
+                let method_hint = if params.len() >= 4 { params[3] } else { 0 };
+                self.pair_method_hint.set(method_hint);
+                self.enqueue_event(SleEvent::PairInfoExchange {
+                    handle,
+                    io_cap: 0x01,        // DisplayYesNo
+                    oob_flag: 0x00,
+                    auth_req,
+                    max_key_len: 16,
+                    sec_dist: 0x03,      // IRK + identity
+                    psk_ind: 0x00,
+                    crypto_cap: [0x03, 0x03, 0x01, 0x02], // AC1|AC2, AC1|AC2, HA1, KE2
+                });
+            }
+            SleOpcode::PairInfoExchange => {
+                // Reply received: produce PairOptionReport
+                let handle = if params.len() >= 2 {
+                    u16::from_le_bytes([params[0], params[1]])
+                } else {
+                    0
+                };
+                let mut pubkey = KVec::new();
+                for _ in 0..32 {
+                    let _ = pubkey.push(0xAB, GFP_KERNEL);
+                }
+                // Map method_hint to DLI auth_method code
+                let auth_method = match self.pair_method_hint.get() {
+                    1 => 0x01, // JustWorks
+                    2 => 0x05, // PSK
+                    3 => 0x00, // NumericComparison
+                    4 => 0x02, // PasskeyEntry
+                    5 => 0x04, // OOB
+                    6 => 0x03, // Password
+                    _ => 0x01, // default: JustWorks
+                };
+                self.enqueue_event(SleEvent::PairOptionReport {
+                    handle,
+                    key_len: 16,
+                    auth_method,
+                    crypto_alg: [0x01, 0x01, 0x01, 0x02],
+                    public_key: pubkey,
+                });
+            }
+            SleOpcode::PairOptionAccept => {
+                let handle = if params.len() >= 2 {
+                    u16::from_le_bytes([params[0], params[1]])
+                } else {
+                    0
+                };
+                self.enqueue_event(SleEvent::PairRandom {
+                    handle,
+                    random: [0x11; 16],
+                });
+            }
+            SleOpcode::PairRandom => {
+                let handle = if params.len() >= 2 {
+                    u16::from_le_bytes([params[0], params[1]])
+                } else {
+                    0
+                };
+                self.enqueue_event(SleEvent::PairConfirm {
+                    handle,
+                    confirm: [0x22; 16],
+                });
+            }
+            SleOpcode::PairConfirm => {
+                let handle = if params.len() >= 2 {
+                    u16::from_le_bytes([params[0], params[1]])
+                } else {
+                    0
+                };
+                self.enqueue_event(SleEvent::DHKeyCheck {
+                    handle,
+                    dhkey_check: [0x33; 16],
+                });
+            }
+            SleOpcode::DhkeyVerify => {
+                // Final step: no further events needed, security state
+                // machine transitions to Paired in on_dhkey_verify().
             }
             _ => {}
         }
@@ -1516,12 +1605,42 @@ impl ControllerBackend {
         self.send_command(SleOpcode::Disconnect, &h)
     }
 
-    /// Request pairing with the given method byte (section 8.6.1).
-    pub fn request_pair(&self, method: u8) -> Result {
-        self.send_command(SleOpcode::RequestPair, &[method])
+    /// Request pairing with the given method byte (§8.6.4).
+    ///
+    /// Standard format: [handle:2(LE16)][auth_req:1]
+    /// The handle is the connection handle; auth_req encodes security
+    /// attribute (bits 0-1), MITM flag (bit 2), and keyboard hint (bit 3).
+    pub fn request_pair(&self, handle: u16, auth_req: u8, method_hint: u8) -> Result {
+        let h = handle.to_le_bytes();
+        self.send_command(SleOpcode::RequestPair, &[h[0], h[1], auth_req, method_hint])
     }
 
-    /// Start link encryption (section 8.6.4).
+    /// Send PairInfoExchangeReply command (§8.6.9, opcode 0x1C09).
+    pub fn pair_info_exchange_reply(&self, params: &[u8]) -> Result {
+        self.send_command(SleOpcode::PairInfoExchange, params)
+    }
+
+    /// Send PairOptionAccept command (§8.6.11, opcode 0x1C0B).
+    pub fn pair_option_accept(&self, params: &[u8]) -> Result {
+        self.send_command(SleOpcode::PairOptionAccept, params)
+    }
+
+    /// Send PairRandom command (§8.6.14, opcode 0x1C0E).
+    pub fn pair_random(&self, params: &[u8]) -> Result {
+        self.send_command(SleOpcode::PairRandom, params)
+    }
+
+    /// Send PairConfirm command (§8.6.15, opcode 0x1C0F).
+    pub fn pair_confirm(&self, params: &[u8]) -> Result {
+        self.send_command(SleOpcode::PairConfirm, params)
+    }
+
+    /// Send DHKeyVerify command (§8.6.16, opcode 0x1C10).
+    pub fn dhkey_verify(&self, params: &[u8]) -> Result {
+        self.send_command(SleOpcode::DhkeyVerify, params)
+    }
+
+    /// Start link encryption (§8.6.3).
     pub fn start_encrypt(&self) -> Result {
         self.send_command(SleOpcode::StartEncrypt, &[])
     }

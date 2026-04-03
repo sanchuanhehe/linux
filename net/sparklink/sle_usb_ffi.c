@@ -438,7 +438,7 @@ int sle_usb_dev_register(int dev_id, void *intf_ptr)
 		d->ep_bulk_out = SLE_EP_CMD_OUT;
 		d->ep_intr_in  = SLE_EP_EVENT_IN;
 		d->ep_bulk_in_size  = 64;
-		d->ep_intr_in_size  = 16;
+		d->ep_intr_in_size  = SLE_EVENT_BUF_SIZE;
 		d->ep_intr_in_interval = 4;
 		d->endpoints_valid = false;
 		pr_warn("sparklink-usb: endpoints not found in descriptors, using defaults\n");

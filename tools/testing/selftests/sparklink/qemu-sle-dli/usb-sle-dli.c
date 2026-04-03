@@ -240,6 +240,19 @@ typedef struct SleDliRalEntry {
 } SleDliRalEntry;
 
 /* Per-connection state in the controller */
+/* Pairing state machine phases (T/XS 10003-2025 §8.6) */
+enum {
+    PAIR_IDLE = 0,
+    PAIR_REQUESTED,        /* T-node sent RequestPair, awaiting G-node response */
+    PAIR_INFO_EXCHANGED,   /* Info exchange complete, awaiting option decision */
+    PAIR_OPTION_DECIDED,   /* G-node chose method, awaiting T-node accept */
+    PAIR_PUBKEY_EXCHANGED, /* Public keys exchanged */
+    PAIR_RANDOM_SENT,      /* Random nonces exchanged */
+    PAIR_CONFIRM_SENT,     /* Confirm values exchanged */
+    PAIR_DHKEY_VERIFIED,   /* DHKey verification done */
+    PAIR_COMPLETE,         /* Pairing complete, link key derived */
+};
+
 typedef struct SleDliConn {
     bool     active;
     uint16_t handle;
@@ -262,6 +275,18 @@ typedef struct SleDliConn {
     /* Power management */
     int8_t   tx_power;       /* dBm, default 0 */
     bool     power_report;   /* auto power reporting enabled */
+    /* Pairing state machine */
+    int      pair_state;
+    uint8_t  pair_method;    /* authentication method (0x00-0x05) */
+    uint8_t  pair_auth_req;  /* authentication request field */
+    uint8_t  local_pubkey[32];  /* simulated local public key */
+    uint8_t  peer_pubkey[32];   /* received peer public key */
+    uint8_t  local_random[16];  /* local random nonce */
+    uint8_t  peer_random[16];   /* peer random nonce */
+    uint8_t  local_confirm[16]; /* local confirm value */
+    uint8_t  peer_confirm[16];  /* peer confirm value */
+    uint8_t  dhkey_check[16];   /* DHKey verification value */
+    uint8_t  link_key[16];      /* derived link key */
 } SleDliConn;
 
 struct USBSleDliState {
@@ -583,7 +608,7 @@ static const USBDescIface desc_iface_sle_dli = {
         {
             .bEndpointAddress = USB_DIR_IN | 0x11,  /* 0x91: interrupt IN (events) */
             .bmAttributes     = USB_ENDPOINT_XFER_INT,
-            .wMaxPacketSize   = 16,
+            .wMaxPacketSize   = 64,
             .bInterval        = 4,
         },
         {
@@ -1713,25 +1738,68 @@ static void sle_dli_process_command(USBSleDliState *s,
     }
 
     case DLI_OP_REQUEST_PAIR: {
-        /* Driver: [method:1], Standard: [handle:2][auth_req:1]
-         * Accept both. */
+        /* T-node host requests pairing (§8.6.4).
+         * Standard params: [handle:2][auth_req:1]
+         * Legacy params:   [method:1]
+         * Controller ACKs, then simulates G-node response by queuing
+         * PairInfoExchange event (0x001E) back to T-node host. */
         sle_dli_cmd_status(s, opcode, 0x00);
-        /* If connected to a remote device, send PairRequest event there */
-        for (int i = 0; i < MAX_CONNECTIONS; i++) {
-            if (s->connections[i].active && s->connections[i].remote_dev) {
-                USBSleDliState *remote = s->connections[i].remote_dev;
-                uint8_t method = (plen >= 1) ? params[0] : 1;
-                /* Queue PairRequest event on remote: [addr:6][method:1] */
-                uint8_t buf[11];
-                buf[0] = DLI_EVT_PAIR_REQUEST & 0xFF;
-                buf[1] = (DLI_EVT_PAIR_REQUEST >> 8) & 0xFF;
-                buf[2] = 7;
-                buf[3] = 0;
-                memcpy(&buf[4], s->mac_addr, 6);
-                buf[10] = method;
-                sle_dli_queue_event(remote, buf, 11);
-                break;
+
+        /* Find the connection (use handle from params or first active) */
+        uint16_t handle = 0;
+        uint8_t auth_req = 0;
+        SleDliConn *conn = NULL;
+        if (plen >= 3) {
+            /* Standard format: [handle:2][auth_req:1] */
+            handle = params[0] | ((uint16_t)params[1] << 8);
+            auth_req = params[2];
+            conn = sle_dli_find_conn(s, handle);
+        } else {
+            /* Legacy: [method:1] or no params — use first active conn */
+            for (int i = 0; i < MAX_CONNECTIONS; i++) {
+                if (s->connections[i].active) {
+                    conn = &s->connections[i];
+                    handle = conn->handle;
+                    break;
+                }
             }
+        }
+
+        if (conn) {
+            conn->pair_state = PAIR_REQUESTED;
+            conn->pair_auth_req = auth_req;
+
+            /* Simulate G-node response: send PairInfoExchange event
+             * (0x001E) to T-node host with G-node's capabilities.
+             * Format: [handle:2][io_cap:1][oob:1][auth_req:1]
+             *         [max_key:1][sec_dist:1][crypto_cap:4][psk:1] */
+            uint8_t buf[4 + 12];
+            buf[0] = DLI_EVT_PAIR_INFO_EXCH & 0xFF;
+            buf[1] = (DLI_EVT_PAIR_INFO_EXCH >> 8) & 0xFF;
+            buf[2] = 12;  /* param length */
+            buf[3] = 0;
+            /* handle */
+            buf[4] = handle & 0xFF;
+            buf[5] = (handle >> 8) & 0xFF;
+            /* G-node I/O capability: 0x01 = Display+YesNo */
+            buf[6] = 0x01;
+            /* OOB data flag: 0x00 = no OOB */
+            buf[7] = 0x00;
+            /* Auth request: mirror T-node's request */
+            buf[8] = auth_req;
+            /* Max encryption key length: 16 */
+            buf[9] = 16;
+            /* Security info distribution: 0x03 = IRK+identity */
+            buf[10] = 0x03;
+            /* Crypto algorithm capability: AC1+AC2 enc, AC1+AC2 int,
+             * HA1 KDF, KE2(ECDH P256) key exchange */
+            buf[11] = 0x03; /* enc: AC1|AC2 */
+            buf[12] = 0x03; /* int: AC1|AC2 */
+            buf[13] = 0x01; /* kdf: HA1 */
+            buf[14] = 0x02; /* kex: KE2 */
+            /* PSK indicator: 0x00 = no PSK */
+            buf[15] = 0x00;
+            sle_dli_queue_event(s, buf, 16);
         }
         break;
     }
@@ -1780,8 +1848,11 @@ static void sle_dli_process_command(USBSleDliState *s,
     }
 
     case DLI_OP_START_PAIRING: {
-        /* params: [handle:2][io_cap:1][oob:1][auth:1][max_key:1]
-         *         [sec_dist:1][crypto:4][psk:1] → CmdStatus */
+        /* G-node: start pairing with its capabilities (§8.6.8).
+         * params: [handle:2][io_cap:1][oob:1][auth:1][max_key:1]
+         *         [sec_dist:1][crypto:4][psk:1] → CmdStatus
+         * Just ACK — the pairing sequence is driven by the
+         * REQUEST_PAIR → INFO_EXCH → OPT → random/confirm/DHKey flow. */
         if (plen < 3) {
             sle_dli_cmd_status(s, opcode, 0x12);
             break;
@@ -1793,30 +1864,29 @@ static void sle_dli_process_command(USBSleDliState *s,
             break;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
-        /* In simulation, immediately mark encryption as enabled */
-        conn->encrypted = true;
-        {
-            uint8_t buf[7];
-            buf[0] = DLI_EVT_ENC_CHANGED & 0xFF;
-            buf[1] = (DLI_EVT_ENC_CHANGED >> 8) & 0xFF;
-            buf[2] = 3;
-            buf[3] = 0;
-            buf[4] = handle & 0xFF;
-            buf[5] = (handle >> 8) & 0xFF;
-            buf[6] = 1;
-            sle_dli_queue_event(s, buf, 7);
-        }
         break;
     }
 
     /* ----------------------------------------------------------------
      * Pairing exchange commands (§8.6.9–§8.6.17)
+     *
+     * The QEMU controller acts as a simulated G-node, automatically
+     * driving the pairing sequence back to the T-node host:
+     *
+     *   Host 0x1C04 (RequestPair) → Controller sends evt 0x001E
+     *   Host 0x1C09 (InfoExchReply) → Controller sends evt 0x0020 + pubkey
+     *   Host 0x1C0B (OptAccept+pubkey) → Controller sends evt 0x0024 (random)
+     *   Host 0x1C0E (Random) → Controller sends evt 0x0025 (confirm)
+     *   Host 0x1C0F (Confirm) → Controller sends evt 0x0026 (DHKey)
+     *   Host 0x1C10 (DHKeyVerify) → pair_state = COMPLETE
      * ---------------------------------------------------------------- */
 
     case DLI_OP_PAIR_INFO_EXCH_RPL: {
-        /* params: [handle:2][io_cap:1][oob:1][auth_req:1][max_key:1]
-         *         [sec_dist:1][cipher_cap:4][psk:1] → CmdStatus
-         * Then queue PairInfoReport event on remote. */
+        /* T-node host replies with its I/O capabilities (§8.6.9).
+         * params: [handle:2][io_cap:1][oob:1][auth_req:1][max_key:1]
+         *         [sec_dist:1][cipher_cap:4][psk:1]
+         * Controller (as G-node) decides pairing method and sends
+         * PairOptionReport (0x0020) with chosen method + simulated pubkey. */
         if (plen < 3) {
             sle_dli_cmd_status(s, opcode, 0x12);
             break;
@@ -1828,50 +1898,67 @@ static void sle_dli_process_command(USBSleDliState *s,
             break;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
-        /* Queue PairInfoReport on remote */
-        if (conn->remote_dev) {
-            uint8_t buf[4 + 12];
-            buf[0] = DLI_EVT_PAIR_INFO_REPORT & 0xFF;
-            buf[1] = (DLI_EVT_PAIR_INFO_REPORT >> 8) & 0xFF;
-            int elen = MIN(plen, 12);
-            buf[2] = elen & 0xFF;
-            buf[3] = (elen >> 8) & 0xFF;
-            memcpy(&buf[4], params, elen);
-            sle_dli_queue_event(conn->remote_dev, buf, 4 + elen);
+
+        conn->pair_state = PAIR_INFO_EXCHANGED;
+
+        /* Decide pairing method based on capabilities:
+         * Default: JustWorks (0x01). If MITM requested, use
+         * NumericComparison (0x00). If PSK available, use PSK (0x05). */
+        uint8_t auth_req = (plen >= 5) ? params[4] : 0;
+        uint8_t psk_ind = (plen >= 12) ? params[11] : 0;
+        uint8_t method = 0x01; /* JustWorks */
+        if (psk_ind != 0) {
+            method = 0x05; /* PSK */
+        } else if (auth_req & 0x04) {
+            method = 0x00; /* NumericComparison (MITM required) */
         }
+        conn->pair_method = method;
+
+        /* Generate simulated G-node public key (deterministic for test) */
+        for (int i = 0; i < 32; i++) {
+            conn->local_pubkey[i] = (uint8_t)((handle * 7 + i * 13 + 0xA5) & 0xFF);
+        }
+
+        /* Send PairOptionReport (0x0020) to T-node host:
+         * [handle:2][key_len:1][auth_method:1][crypto_alg:4][pubkey:32] */
+        uint8_t buf[4 + 40];
+        buf[0] = DLI_EVT_PAIR_OPT_REPORT & 0xFF;
+        buf[1] = (DLI_EVT_PAIR_OPT_REPORT >> 8) & 0xFF;
+        buf[2] = 40; /* param len */
+        buf[3] = 0;
+        buf[4] = handle & 0xFF;
+        buf[5] = (handle >> 8) & 0xFF;
+        buf[6] = 16;     /* key length */
+        buf[7] = method;  /* auth method */
+        /* Selected algorithms: AC1 enc, AC1 int, HA1 kdf, KE2 kex */
+        buf[8] = 0x00;
+        buf[9] = 0x00;
+        buf[10] = 0x00;
+        buf[11] = 0x01;
+        /* G-node's public key */
+        memcpy(&buf[12], conn->local_pubkey, 32);
+        sle_dli_queue_event(s, buf, 44);
+
+        conn->pair_state = PAIR_OPTION_DECIDED;
         break;
     }
 
     case DLI_OP_PAIR_OPT_CONFIRM: {
-        /* params: [handle:2][key_len:1][auth_method:1][cipher:4][pubkey:32]
-         * → CmdStatus + PairOptionReport event on remote */
+        /* G-node side command — not used in T-node flow.
+         * Just ACK it. */
         if (plen < 4) {
             sle_dli_cmd_status(s, opcode, 0x12);
             break;
         }
-        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
-        SleDliConn *conn = sle_dli_find_conn(s, handle);
-        if (!conn) {
-            sle_dli_cmd_status(s, opcode, 0x02);
-            break;
-        }
         sle_dli_cmd_status(s, opcode, 0x00);
-        if (conn->remote_dev) {
-            uint8_t buf[4 + 40];
-            buf[0] = DLI_EVT_PAIR_OPT_REPORT & 0xFF;
-            buf[1] = (DLI_EVT_PAIR_OPT_REPORT >> 8) & 0xFF;
-            int elen = MIN(plen, 40);
-            buf[2] = elen & 0xFF;
-            buf[3] = (elen >> 8) & 0xFF;
-            memcpy(&buf[4], params, elen);
-            sle_dli_queue_event(conn->remote_dev, buf, 4 + elen);
-        }
         break;
     }
 
     case DLI_OP_PAIR_OPT_ACCEPT: {
-        /* params: [handle:2][pubkey:32] → CmdStatus
-         * + RemotePublicKey event on remote */
+        /* T-node accepts pairing option and provides its public key (§8.6.11).
+         * params: [handle:2][pubkey:32]
+         * Controller stores T-node's pubkey, then sends back a simulated
+         * G-node random nonce via PairRandom event (0x0024). */
         if (plen < 2) {
             sle_dli_cmd_status(s, opcode, 0x12);
             break;
@@ -1883,103 +1970,58 @@ static void sle_dli_process_command(USBSleDliState *s,
             break;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
-        if (conn->remote_dev && plen > 2) {
-            uint8_t buf[4 + 34];
-            buf[0] = DLI_EVT_REMOTE_PUBKEY & 0xFF;
-            buf[1] = (DLI_EVT_REMOTE_PUBKEY >> 8) & 0xFF;
-            int elen = MIN(plen, 34);
-            buf[2] = elen & 0xFF;
-            buf[3] = (elen >> 8) & 0xFF;
-            memcpy(&buf[4], params, elen);
-            sle_dli_queue_event(conn->remote_dev, buf, 4 + elen);
-        }
-        break;
-    }
 
-    case DLI_OP_PAIR_EXT_DATA: {
-        /* params: [handle:2][ext_pubkey_x:32][ext_pubkey_y:32]
-         * → CmdStatus + PairExtData event on remote */
-        if (plen < 2) {
-            sle_dli_cmd_status(s, opcode, 0x12);
-            break;
+        /* Store T-node public key */
+        if (plen >= 34) {
+            memcpy(conn->peer_pubkey, &params[2], 32);
         }
-        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
-        SleDliConn *conn = sle_dli_find_conn(s, handle);
-        if (!conn) {
-            sle_dli_cmd_status(s, opcode, 0x02);
-            break;
-        }
-        sle_dli_cmd_status(s, opcode, 0x00);
-        if (conn->remote_dev) {
-            int elen = MIN(plen, 66);
-            uint8_t buf[4 + 66];
-            buf[0] = DLI_EVT_PAIR_EXT_DATA & 0xFF;
-            buf[1] = (DLI_EVT_PAIR_EXT_DATA >> 8) & 0xFF;
-            buf[2] = elen & 0xFF;
-            buf[3] = (elen >> 8) & 0xFF;
-            memcpy(&buf[4], params, elen);
-            sle_dli_queue_event(conn->remote_dev, buf, 4 + elen);
-        }
-        break;
-    }
+        conn->pair_state = PAIR_PUBKEY_EXCHANGED;
 
-    case DLI_OP_PAIR_PASSKEY_KEY: {
-        /* params: [handle:2][key_type:1] → CmdStatus
-         * + PasskeyNotify event on remote */
-        if (plen < 3) {
-            sle_dli_cmd_status(s, opcode, 0x12);
-            break;
+        /* Generate simulated G-node random nonce (deterministic) */
+        for (int i = 0; i < 16; i++) {
+            conn->local_random[i] = (uint8_t)((handle * 11 + i * 17 + 0x3C) & 0xFF);
         }
-        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
-        SleDliConn *conn = sle_dli_find_conn(s, handle);
-        if (!conn) {
-            sle_dli_cmd_status(s, opcode, 0x02);
-            break;
-        }
-        sle_dli_cmd_status(s, opcode, 0x00);
-        if (conn->remote_dev) {
-            uint8_t buf[7];
-            buf[0] = DLI_EVT_PASSKEY_NOTIFY & 0xFF;
-            buf[1] = (DLI_EVT_PASSKEY_NOTIFY >> 8) & 0xFF;
-            buf[2] = 3;
-            buf[3] = 0;
-            buf[4] = handle & 0xFF;
-            buf[5] = (handle >> 8) & 0xFF;
-            buf[6] = params[2]; /* key_type */
-            sle_dli_queue_event(conn->remote_dev, buf, 7);
-        }
-        break;
-    }
 
-    case DLI_OP_PAIR_RANDOM: {
-        /* params: [handle:2][random:16] → CmdStatus
-         * + PairRandomReport on remote */
-        if (plen < 18) {
-            sle_dli_cmd_status(s, opcode, 0x12);
-            break;
-        }
-        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
-        SleDliConn *conn = sle_dli_find_conn(s, handle);
-        if (!conn) {
-            sle_dli_cmd_status(s, opcode, 0x02);
-            break;
-        }
-        sle_dli_cmd_status(s, opcode, 0x00);
-        if (conn->remote_dev) {
+        /* Send PairRandom event (0x0024): [handle:2][random:16] */
+        {
             uint8_t buf[4 + 18];
             buf[0] = DLI_EVT_PAIR_RANDOM & 0xFF;
             buf[1] = (DLI_EVT_PAIR_RANDOM >> 8) & 0xFF;
             buf[2] = 18;
             buf[3] = 0;
-            memcpy(&buf[4], params, 18);
-            sle_dli_queue_event(conn->remote_dev, buf, 22);
+            buf[4] = handle & 0xFF;
+            buf[5] = (handle >> 8) & 0xFF;
+            memcpy(&buf[6], conn->local_random, 16);
+            sle_dli_queue_event(s, buf, 22);
         }
         break;
     }
 
-    case DLI_OP_PAIR_CONFIRM: {
-        /* params: [handle:2][confirm:16] → CmdStatus
-         * + PairConfirmReport on remote */
+    case DLI_OP_PAIR_EXT_DATA: {
+        /* SM2-2 extended public key data (§8.6.12). ACK only. */
+        if (plen < 2) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        break;
+    }
+
+    case DLI_OP_PAIR_PASSKEY_KEY: {
+        /* Passkey digit action (§8.6.13). ACK only. */
+        if (plen < 3) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        break;
+    }
+
+    case DLI_OP_PAIR_RANDOM: {
+        /* T-node sends its random nonce (§8.6.14).
+         * params: [handle:2][random:16]
+         * Controller stores it, then responds with simulated G-node
+         * confirm value via PairConfirm event (0x0025). */
         if (plen < 18) {
             sle_dli_cmd_status(s, opcode, 0x12);
             break;
@@ -1991,21 +2033,39 @@ static void sle_dli_process_command(USBSleDliState *s,
             break;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
-        if (conn->remote_dev) {
+
+        /* Store T-node's random */
+        memcpy(conn->peer_random, &params[2], 16);
+        conn->pair_state = PAIR_RANDOM_SENT;
+
+        /* Generate simulated G-node confirm value (deterministic).
+         * In real hardware this would be:
+         * Confirm = f4(PKb, PKa, Nb, 0) using the negotiated KDF. */
+        for (int i = 0; i < 16; i++) {
+            conn->local_confirm[i] = conn->local_random[i] ^
+                                     conn->local_pubkey[i] ^ 0x55;
+        }
+
+        /* Send PairConfirm event (0x0025): [handle:2][confirm:16] */
+        {
             uint8_t buf[4 + 18];
             buf[0] = DLI_EVT_PAIR_CONFIRM & 0xFF;
             buf[1] = (DLI_EVT_PAIR_CONFIRM >> 8) & 0xFF;
             buf[2] = 18;
             buf[3] = 0;
-            memcpy(&buf[4], params, 18);
-            sle_dli_queue_event(conn->remote_dev, buf, 22);
+            buf[4] = handle & 0xFF;
+            buf[5] = (handle >> 8) & 0xFF;
+            memcpy(&buf[6], conn->local_confirm, 16);
+            sle_dli_queue_event(s, buf, 22);
         }
         break;
     }
 
-    case DLI_OP_DHKEY_VERIFY: {
-        /* params: [handle:2][dhkey_check:16] → CmdStatus
-         * + DhkeyVerifyReport on remote */
+    case DLI_OP_PAIR_CONFIRM: {
+        /* T-node sends its confirm value (§8.6.15).
+         * params: [handle:2][confirm:16]
+         * Controller stores it, then responds with simulated G-node
+         * DHKey verify via DHKeyVerify event (0x0026). */
         if (plen < 18) {
             sle_dli_cmd_status(s, opcode, 0x12);
             break;
@@ -2017,21 +2077,66 @@ static void sle_dli_process_command(USBSleDliState *s,
             break;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
-        if (conn->remote_dev) {
+
+        /* Store T-node's confirm */
+        memcpy(conn->peer_confirm, &params[2], 16);
+        conn->pair_state = PAIR_CONFIRM_SENT;
+
+        /* Generate simulated G-node DHKey check (deterministic).
+         * In real hardware: f6(W, N1, N2, r, IOcap, A1, A2). */
+        for (int i = 0; i < 16; i++) {
+            conn->dhkey_check[i] = conn->local_random[i] ^
+                                   conn->peer_random[i] ^ 0xAA;
+        }
+
+        /* Send DHKeyVerify event (0x0026): [handle:2][dhkey_check:16] */
+        {
             uint8_t buf[4 + 18];
             buf[0] = DLI_EVT_DHKEY_VERIFY & 0xFF;
             buf[1] = (DLI_EVT_DHKEY_VERIFY >> 8) & 0xFF;
             buf[2] = 18;
             buf[3] = 0;
-            memcpy(&buf[4], params, 18);
-            sle_dli_queue_event(conn->remote_dev, buf, 22);
+            buf[4] = handle & 0xFF;
+            buf[5] = (handle >> 8) & 0xFF;
+            memcpy(&buf[6], conn->dhkey_check, 16);
+            sle_dli_queue_event(s, buf, 22);
+        }
+        break;
+    }
+
+    case DLI_OP_DHKEY_VERIFY: {
+        /* T-node sends DHKey verification (§8.6.16).
+         * params: [handle:2][dhkey_check:16]
+         * Controller verifies (always accepts in simulation) and
+         * marks pairing as complete. Sends EncryptionChanged event
+         * to confirm link encryption is enabled. */
+        if (plen < 18) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+
+        conn->pair_state = PAIR_COMPLETE;
+
+        /* Derive simulated link key from exchanged material */
+        for (int i = 0; i < 16; i++) {
+            conn->link_key[i] = conn->local_random[i] ^
+                                conn->peer_random[i] ^
+                                conn->local_pubkey[i] ^ 0xCC;
         }
         break;
     }
 
     case DLI_OP_PAIR_FAIL: {
-        /* params: [handle:2][reason:1] → CmdStatus
-         * + PairFailReport on remote */
+        /* Pairing failure notification (§8.6.17).
+         * params: [handle:2][reason:1]
+         * Reset pairing state on the connection. */
         if (plen < 3) {
             sle_dli_cmd_status(s, opcode, 0x12);
             break;
@@ -2043,17 +2148,7 @@ static void sle_dli_process_command(USBSleDliState *s,
             break;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
-        if (conn->remote_dev) {
-            uint8_t buf[7];
-            buf[0] = DLI_EVT_PAIR_FAIL & 0xFF;
-            buf[1] = (DLI_EVT_PAIR_FAIL >> 8) & 0xFF;
-            buf[2] = 3;
-            buf[3] = 0;
-            buf[4] = handle & 0xFF;
-            buf[5] = (handle >> 8) & 0xFF;
-            buf[6] = params[2]; /* reason */
-            sle_dli_queue_event(conn->remote_dev, buf, 7);
-        }
+        conn->pair_state = PAIR_IDLE;
         break;
     }
 

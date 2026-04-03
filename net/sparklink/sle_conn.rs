@@ -1317,6 +1317,13 @@ impl ConnManager {
         (handles, count)
     }
 
+    /// Return the handle of the first connected connection, if any.
+    pub fn first_active_handle(&self) -> Option<u16> {
+        self.connections.iter()
+            .find(|e| e.state == ConnState::Connected)
+            .map(|e| e.handle)
+    }
+
     // --- Legacy single-connection compatibility layer ---
     // These methods operate on the most recently created connection
     // for backward compatibility with handle=0 (auto-select).

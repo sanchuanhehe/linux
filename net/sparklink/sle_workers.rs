@@ -265,6 +265,58 @@ pub(crate) fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dl
                 let _ = shared.conn.receive_data(*handle, payload, seq);
             }
         }
+        // -----------------------------------------------------------------
+        // Pairing events — drive the security state machine and
+        // send response commands back to the controller.
+        // -----------------------------------------------------------------
+        sle_dli::SleEvent::PairInfoExchange {
+            handle,
+            io_cap,
+            oob_flag,
+            auth_req,
+            max_key_len,
+            sec_dist,
+            psk_ind,
+            crypto_cap,
+        } => {
+            if let Ok(reply) = shared.security.on_pair_info_exchange(
+                *handle, *io_cap, *oob_flag, *auth_req,
+                *max_key_len, *sec_dist, *psk_ind, crypto_cap,
+            ) {
+                let _ = shared.controller.pair_info_exchange_reply(&reply);
+            }
+        }
+        sle_dli::SleEvent::PairOptionReport {
+            handle,
+            key_len,
+            auth_method,
+            crypto_alg,
+            public_key,
+        } => {
+            if let Ok(accept) = shared.security.on_pair_option_report(
+                *handle, *key_len, *auth_method, crypto_alg, public_key.as_slice(),
+            ) {
+                let _ = shared.controller.pair_option_accept(&accept);
+            }
+        }
+        sle_dli::SleEvent::PairRandom { handle, random } => {
+            if let Ok(resp) = shared.security.on_pair_random(*handle, random) {
+                let _ = shared.controller.pair_random(&resp);
+            }
+        }
+        sle_dli::SleEvent::PairConfirm { handle, confirm } => {
+            if let Ok(resp) = shared.security.on_pair_confirm(*handle, confirm) {
+                let _ = shared.controller.pair_confirm(&resp);
+            }
+        }
+        sle_dli::SleEvent::DHKeyCheck { handle, dhkey_check } => {
+            if let Ok(resp) = shared.security.on_dhkey_verify(*handle, dhkey_check) {
+                let _ = shared.controller.dhkey_verify(&resp);
+            }
+        }
+        sle_dli::SleEvent::PairFailure { handle, reason } => {
+            shared.security.on_pair_failure(*handle, *reason);
+        }
         _ => {}
     }
 
@@ -279,14 +331,44 @@ pub(crate) fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dl
 ///
 /// Used after ioctl commands to handle synchronous controller responses
 /// (VirtualController, UartController) inline without waiting for the
-/// next EventPump cycle. For real hardware backends (USB, serdev),
-/// events arrive asynchronously and this function is a no-op.
+/// next EventPump cycle. Also drains USB event ring entries so that
+/// multi-step protocol exchanges (e.g. pairing) can complete within
+/// a single ioctl call.
 pub(crate) fn drain_controller_events(shared: &mut SubsystemShared) {
-    let mut drained = 0u32;
-    while let Some(ev) = shared.controller.poll_event() {
-        process_controller_event(shared, &ev);
-        drained += 1;
-        if drained >= 64 {
+    // Multiple rounds: each round may generate new DLI commands whose
+    // responses arrive in a subsequent round. Limit total iterations
+    // to avoid infinite loops.
+    let mut total = 0u32;
+    for _round in 0..16 {
+        let mut drained_this_round = 0u32;
+
+        // 1. VirtualController events
+        while let Some(ev) = shared.controller.poll_event() {
+            process_controller_event(shared, &ev);
+            drained_this_round += 1;
+            total += 1;
+            if total >= 256 {
+                return;
+            }
+        }
+
+        // 2. USB event ring entries
+        let mut tagged: [(Option<u16>, Option<sle_dli::SleEvent>); 64] =
+            [const { (None, None) }; 64];
+        let count = sle_usb::drain_usb_events(&mut tagged);
+        for item in tagged.iter_mut().take(count) {
+            let (_dev_id, ev_opt) = core::mem::take(item);
+            if let Some(ev) = ev_opt {
+                process_controller_event(shared, &ev);
+                drained_this_round += 1;
+                total += 1;
+                if total >= 256 {
+                    return;
+                }
+            }
+        }
+
+        if drained_this_round == 0 {
             break;
         }
     }

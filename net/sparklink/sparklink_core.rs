@@ -2276,6 +2276,7 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
             let params: SlePairParams = read_user_struct(arg)?;
             let mut ss = SUBSYSTEM.lock();
             let s = ss.as_mut().ok_or(ENODEV)?;
+            // Set security state machine to Pairing
             match params.method {
                 1 => s.security.pair_just_works()?,
                 2 => s.security.pair_psk()?,
@@ -2285,7 +2286,13 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
                 6 => s.security.pair_password()?,
                 _ => return Err(EINVAL),
             }
-            let _ = s.controller.request_pair(params.method);
+            // Find first active connection handle for the DLI command
+            let handle = s.conn.first_active_handle().unwrap_or(0);
+            // Send DLI RequestPair command to controller
+            let auth_req: u8 = if params.method == 3 { 0x04 } else { 0x00 };
+            let _ = s.controller.request_pair(handle, auth_req, params.method);
+            // Process controller events to drive the pairing sequence
+            drain_controller_events(s);
             Ok(0)
         }
         SL_IOCTL_SEC_INFO => {

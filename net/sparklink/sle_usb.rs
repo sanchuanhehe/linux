@@ -15,7 +15,7 @@
 //!
 //! Endpoint mapping (host perspective, T/XS 10003-2025 Table 3):
 //!   EP0  Control           DLI instructions (standard path)
-//!   INT  Interrupt IN 0x91 DLI events from controller (16B)
+//!   INT  Interrupt IN 0x91 DLI events from controller (64B)
 //!   BLK  Bulk IN      0x92 Async data from controller
 //!   BLK  Bulk OUT     0x12 Async data and commands to controller
 
@@ -419,7 +419,7 @@ pub const EP_DATA_IN: u8 = 0x92;
 pub const EP_CMD_DATA_OUT: u8 = 0x12;
 
 /// Interrupt endpoint max packet size.
-pub const EP_EVENT_MAX_PKT: usize = 16;
+pub const EP_EVENT_MAX_PKT: usize = 64;
 /// Bulk endpoint max packet size (full-speed).
 pub const EP_BULK_FS_MAX_PKT: usize = 64;
 /// Bulk endpoint max packet size (high-speed).
@@ -728,6 +728,153 @@ pub fn event_to_sle(evt: &DliUsbEvent) -> Option<SleEvent> {
             Some(SleEvent::PairRequest {
                 addr,
                 method: evt.params[6],
+            })
+        }
+        // PairInfoExchange (0x001E): [handle:2][io_cap:1][oob:1][auth_req:1]
+        //   [max_key:1][sec_dist:1][crypto_cap:4][psk:1]
+        0x001E => {
+            if evt.params.len() < 12 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let mut crypto_cap = [0u8; 4];
+            crypto_cap.copy_from_slice(&evt.params[7..11]);
+            Some(SleEvent::PairInfoExchange {
+                handle,
+                io_cap: evt.params[2],
+                oob_flag: evt.params[3],
+                auth_req: evt.params[4],
+                max_key_len: evt.params[5],
+                sec_dist: evt.params[6],
+                psk_ind: evt.params[11],
+                crypto_cap,
+            })
+        }
+        // PairInfoReport (0x001F): same layout as 0x001E
+        0x001F => {
+            if evt.params.len() < 12 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let mut crypto_cap = [0u8; 4];
+            crypto_cap.copy_from_slice(&evt.params[7..11]);
+            Some(SleEvent::PairInfoReport {
+                handle,
+                io_cap: evt.params[2],
+                oob_flag: evt.params[3],
+                auth_req: evt.params[4],
+                max_key_len: evt.params[5],
+                sec_dist: evt.params[6],
+                psk_ind: evt.params[11],
+                crypto_cap,
+            })
+        }
+        // PairOptionReport (0x0020): [handle:2][key_len:1][auth_method:1]
+        //   [crypto_alg:4][pubkey:N]
+        0x0020 => {
+            if evt.params.len() < 8 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let key_len = evt.params[2];
+            let auth_method = evt.params[3];
+            let mut crypto_alg = [0u8; 4];
+            crypto_alg.copy_from_slice(&evt.params[4..8]);
+            let mut public_key = KVec::new();
+            for &b in &evt.params[8..] {
+                let _ = public_key.push(b, GFP_KERNEL);
+            }
+            Some(SleEvent::PairOptionReport {
+                handle,
+                key_len,
+                auth_method,
+                crypto_alg,
+                public_key,
+            })
+        }
+        // RemotePublicKey (0x0021): [handle:2][pubkey:N]
+        0x0021 => {
+            if evt.params.len() < 2 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let mut public_key = KVec::new();
+            for &b in &evt.params[2..] {
+                let _ = public_key.push(b, GFP_KERNEL);
+            }
+            Some(SleEvent::PeerPublicKey { handle, public_key })
+        }
+        // PairExtData (0x0022): [handle:2][ext_x:N/2][ext_y:N/2]
+        0x0022 => {
+            if evt.params.len() < 2 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let rest = &evt.params[2..];
+            let half = rest.len() / 2;
+            let mut ext_pubkey_x = KVec::new();
+            for &b in &rest[..half] {
+                let _ = ext_pubkey_x.push(b, GFP_KERNEL);
+            }
+            let mut ext_pubkey_y = KVec::new();
+            for &b in &rest[half..] {
+                let _ = ext_pubkey_y.push(b, GFP_KERNEL);
+            }
+            Some(SleEvent::PairExtData {
+                handle,
+                ext_pubkey_x,
+                ext_pubkey_y,
+            })
+        }
+        // KeypressNotify (0x0023): [handle:2][action:4]
+        0x0023 => {
+            if evt.params.len() < 6 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let mut action = [0u8; 4];
+            action.copy_from_slice(&evt.params[2..6]);
+            Some(SleEvent::KeypressNotify { handle, action })
+        }
+        // PairRandom (0x0024): [handle:2][random:16]
+        0x0024 => {
+            if evt.params.len() < 18 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let mut random = [0u8; 16];
+            random.copy_from_slice(&evt.params[2..18]);
+            Some(SleEvent::PairRandom { handle, random })
+        }
+        // PairConfirm (0x0025): [handle:2][confirm:16]
+        0x0025 => {
+            if evt.params.len() < 18 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let mut confirm = [0u8; 16];
+            confirm.copy_from_slice(&evt.params[2..18]);
+            Some(SleEvent::PairConfirm { handle, confirm })
+        }
+        // DHKeyCheck (0x0026): [handle:2][dhkey_check:16]
+        0x0026 => {
+            if evt.params.len() < 18 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let mut dhkey_check = [0u8; 16];
+            dhkey_check.copy_from_slice(&evt.params[2..18]);
+            Some(SleEvent::DHKeyCheck { handle, dhkey_check })
+        }
+        // PairFailure (0x0027): [handle:2][reason:1]
+        0x0027 => {
+            if evt.params.len() < 3 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            Some(SleEvent::PairFailure {
+                handle,
+                reason: evt.params[2],
             })
         }
         // PeerFeatures (0x0016): [handle:2] [status:1] [pad:1] [features:10]

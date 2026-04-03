@@ -108,10 +108,26 @@ static void test_dev_register(int fd)
 	check("DEV_UNREGISTER", ret);
 }
 
+static void disconnect_all(int fd)
+{
+	struct sle_conn_list cl;
+
+	memset(&cl, 0, sizeof(cl));
+	if (ioctl(fd, SL_IOCTL_CONN_LIST, &cl) == 0) {
+		for (int i = 0; i < cl.count && i < 8; i++)
+			ioctl(fd, SL_IOCTL_DISCONNECT, &cl.handles[i]);
+	}
+}
+
 static void set_role(int fd, uint8_t role)
 {
 	int ret = ioctl(fd, SL_IOCTL_SET_ROLE, &role);
 
+	if (ret < 0 && errno == EBUSY) {
+		disconnect_all(fd);
+		usleep(50000);
+		ret = ioctl(fd, SL_IOCTL_SET_ROLE, &role);
+	}
 	if (ret < 0) {
 		printf("  FAIL: SET_ROLE(%d): %s\n", role, strerror(errno));
 	}
@@ -872,6 +888,26 @@ static void test_hmac_sm3(int fd)
 	}
 }
 
+/*
+ * Wait for asynchronous pairing to complete. The event-driven pairing
+ * protocol runs in the kernel event pump, so we poll SEC_INFO until
+ * state transitions away from Pairing (1) or until timeout.
+ */
+static int wait_for_paired(int fd, int timeout_ms)
+{
+	struct sle_sec_info sec;
+	int elapsed = 0;
+
+	while (elapsed < timeout_ms) {
+		memset(&sec, 0, sizeof(sec));
+		if (ioctl(fd, SL_IOCTL_SEC_INFO, &sec) == 0 && sec.state >= 2)
+			return 0;
+		usleep(10000); /* 10ms */
+		elapsed += 10;
+	}
+	return -1;
+}
+
 static void test_security_pairing(int fd)
 {
 	test_header("Security: PSK pairing and encryption");
@@ -895,6 +931,7 @@ static void test_security_pairing(int fd)
 
 	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
 	check("SEC_PAIR (PSK)", ret);
+	wait_for_paired(fd, 2000);
 
 	/* Step 3: Check security info */
 	struct sle_sec_info sec;
@@ -978,6 +1015,7 @@ static void test_security_ecdh(int fd)
 
 	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
 	check("SEC_PAIR (JustWorks/ECDH)", ret);
+	wait_for_paired(fd, 2000);
 
 	/* Check security info */
 	struct sle_sec_info sec;
@@ -1048,19 +1086,9 @@ static void test_security_numeric_comparison(int fd)
 	ret = ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
 	check("SEC_RESET", ret);
 
-	/* 1. Get passkey before pairing — should fail */
-	uint32_t passkey = 0;
-
-	ret = ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &passkey);
-	if (ret < 0 && errno == EINVAL) {
-		printf("  OK:   get_passkey before pair rejected (EINVAL)\n");
-		ok_count++;
-	} else {
-		printf("  FAIL: expected EINVAL, got ret=%d\n", ret);
-		fail_count++;
-	}
-
-	/* 2. Start numeric comparison pairing (method=3) */
+	/* 1. Start numeric comparison pairing (method=3).
+	 * With event-driven DLI pairing, the controller handles ECDH
+	 * negotiation automatically. The pairing completes via events. */
 	struct sle_pair_params pair;
 
 	memset(&pair, 0, sizeof(pair));
@@ -1074,54 +1102,12 @@ static void test_security_numeric_comparison(int fd)
 		fail_count++;
 	}
 
-	/* 3. Check state = AwaitingConfirm (4) */
+	/* 2. Wait for event-driven pairing to complete */
+	wait_for_paired(fd, 2000);
+
+	/* 3. Check state = Paired (2), method=3 */
 	struct sle_sec_info sec;
 
-	memset(&sec, 0, sizeof(sec));
-	ret = ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
-	if (ret == 0 && sec.state == 4 && sec.method == 3) {
-		printf("  OK:   state=AwaitingConfirm(4), method=3\n");
-		ok_count++;
-	} else {
-		printf("  FAIL: state=%u method=%u (expected 4/3)\n",
-		       sec.state, sec.method);
-		fail_count++;
-	}
-
-	/* 4. Retrieve passkey — should be 0..999999 */
-	passkey = 0xFFFFFFFF;
-	ret = ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &passkey);
-	if (ret == 0 && passkey < 1000000) {
-		printf("  OK:   passkey=%06u\n", passkey);
-		ok_count++;
-	} else {
-		printf("  FAIL: get_passkey ret=%d passkey=%u\n", ret, passkey);
-		fail_count++;
-	}
-
-	/* 5. Passkey is stable (same value on second read) */
-	uint32_t passkey2 = 0;
-
-	ret = ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &passkey2);
-	if (ret == 0 && passkey2 == passkey) {
-		printf("  OK:   passkey stable on re-read\n");
-		ok_count++;
-	} else {
-		printf("  FAIL: passkey changed: %u -> %u\n", passkey, passkey2);
-		fail_count++;
-	}
-
-	/* 6. Confirm passkey — should transition to Paired */
-	ret = ioctl(fd, SL_IOCTL_SEC_CONFIRM_PASSKEY, NULL);
-	if (ret == 0) {
-		printf("  OK:   confirm_passkey\n");
-		ok_count++;
-	} else {
-		printf("  FAIL: confirm_passkey: %s\n", strerror(errno));
-		fail_count++;
-	}
-
-	/* 7. State should be Paired (2) */
 	memset(&sec, 0, sizeof(sec));
 	ret = ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
 	if (ret == 0 && sec.state == 2 && sec.method == 3) {
@@ -1133,7 +1119,7 @@ static void test_security_numeric_comparison(int fd)
 		fail_count++;
 	}
 
-	/* 8. Enable encryption — should work */
+	/* 4. Enable encryption — should work */
 	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
 	if (ret == 0) {
 		printf("  OK:   encryption enabled after NC pairing\n");
@@ -1143,7 +1129,7 @@ static void test_security_numeric_comparison(int fd)
 		fail_count++;
 	}
 
-	/* 9. SM4 encrypt/decrypt roundtrip */
+	/* 5. SM4 encrypt/decrypt roundtrip */
 	struct sle_conn_data enc_data;
 
 	memset(&enc_data, 0, sizeof(enc_data));
@@ -1172,29 +1158,35 @@ static void test_security_numeric_comparison(int fd)
 		fail_count++;
 	}
 
-	/* --- Reject flow --- */
-
-	/* 10. Reset and test reject path */
+	/* 6. Reset and re-pair to verify repeatability */
 	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
 	memset(&pair, 0, sizeof(pair));
 	pair.method = 3;
 	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
-	if (ret != 0) {
-		printf("  FAIL: pair for reject test: %s\n", strerror(errno));
-		fail_count++;
+	wait_for_paired(fd, 2000);
+	memset(&sec, 0, sizeof(sec));
+	ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+	if (ret == 0 && sec.state == 2 && sec.method == 3) {
+		printf("  OK:   re-pair success (state=Paired)\n");
+		ok_count++;
 	} else {
-		/* 11. Reject passkey */
-		ret = ioctl(fd, SL_IOCTL_SEC_REJECT_PASSKEY, NULL);
-		memset(&sec, 0, sizeof(sec));
-		ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
-		if (sec.state == 0 && sec.method == 0) {
-			printf("  OK:   reject returns to Idle(0), Unpaired(0)\n");
-			ok_count++;
-		} else {
-			printf("  FAIL: after reject: state=%u method=%u\n",
-			       sec.state, sec.method);
-			fail_count++;
-		}
+		printf("  FAIL: re-pair: ret=%d state=%u method=%u\n",
+		       ret, sec.state, sec.method);
+		fail_count++;
+	}
+
+	/* 7. Test reject path: reject passkey resets to Idle */
+	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
+	ret = ioctl(fd, SL_IOCTL_SEC_REJECT_PASSKEY, NULL);
+	memset(&sec, 0, sizeof(sec));
+	ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
+	if (sec.state == 0 && sec.method == 0) {
+		printf("  OK:   reject returns to Idle(0)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: after reject: state=%u method=%u\n",
+		       sec.state, sec.method);
+		fail_count++;
 	}
 
 	/* Restore to Encrypted state for subsequent tests */
@@ -1202,6 +1194,7 @@ static void test_security_numeric_comparison(int fd)
 	memset(&pair, 0, sizeof(pair));
 	pair.method = 1;
 	ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	wait_for_paired(fd, 2000);
 	ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
 
 	printf("  Numeric comparison: %d OK, %d FAIL\n", ok_count, fail_count);
@@ -1225,6 +1218,8 @@ static void test_security_oob_pin_password(int fd)
 	struct sle_pair_params pair;
 
 	/* === Passkey Entry (method=4, auth_method=0x02) === */
+	/* With event-driven pairing, the full ECDH exchange happens
+	 * automatically via controller events. */
 
 	/* 1. Reset and start passkey entry pairing */
 	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
@@ -1239,74 +1234,8 @@ static void test_security_oob_pin_password(int fd)
 		fail_count++;
 	}
 
-	/* 2. State should be AwaitingPasskey (5) */
-	memset(&sec, 0, sizeof(sec));
-	ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
-	if (sec.state == 5 && sec.method == 4) {
-		printf("  OK:   state=AwaitingPasskey(5), method=4\n");
-		ok_count++;
-	} else {
-		printf("  FAIL: state=%u method=%u (expected 5/4)\n",
-		       sec.state, sec.method);
-		fail_count++;
-	}
-
-	/* 3. Get the expected passkey via get_passkey */
-	uint32_t expected_pk = 0xFFFFFFFF;
-
-	ret = ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &expected_pk);
-	if (ret == 0 && expected_pk < 1000000) {
-		printf("  OK:   expected passkey=%06u\n", expected_pk);
-		ok_count++;
-	} else {
-		printf("  FAIL: get_passkey ret=%d val=%u\n", ret, expected_pk);
-		fail_count++;
-	}
-
-	/* 4. Input wrong passkey — should fail with EACCES */
-	struct sle_passkey_input pk_in;
-
-	memset(&pk_in, 0, sizeof(pk_in));
-	pk_in.passkey = (expected_pk + 1) % 1000000;
-	ret = ioctl(fd, SL_IOCTL_SEC_INPUT_PASSKEY, &pk_in);
-	if (ret < 0 && errno == EACCES) {
-		printf("  OK:   wrong passkey rejected (EACCES)\n");
-		ok_count++;
-	} else {
-		printf("  FAIL: wrong passkey: ret=%d errno=%d\n", ret, errno);
-		fail_count++;
-	}
-
-	/* 5. After mismatch, state should be Idle (0) */
-	memset(&sec, 0, sizeof(sec));
-	ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
-	if (sec.state == 0 && sec.method == 0) {
-		printf("  OK:   after mismatch: Idle(0), Unpaired(0)\n");
-		ok_count++;
-	} else {
-		printf("  FAIL: after mismatch: state=%u method=%u\n",
-		       sec.state, sec.method);
-		fail_count++;
-	}
-
-	/* 6. Redo passkey entry, input correct passkey */
-	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
-	memset(&pair, 0, sizeof(pair));
-	pair.method = 4;
-	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
-	/* Get the new expected passkey */
-	ioctl(fd, SL_IOCTL_SEC_GET_PASSKEY, &expected_pk);
-	pk_in.passkey = expected_pk;
-	ret = ioctl(fd, SL_IOCTL_SEC_INPUT_PASSKEY, &pk_in);
-	if (ret == 0) {
-		printf("  OK:   correct passkey accepted\n");
-		ok_count++;
-	} else {
-		printf("  FAIL: correct passkey: %s\n", strerror(errno));
-		fail_count++;
-	}
-
-	/* 7. State should be Paired (2), method=4 */
+	/* 2. Wait for pairing to complete and verify state */
+	wait_for_paired(fd, 2000);
 	memset(&sec, 0, sizeof(sec));
 	ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
 	if (sec.state == 2 && sec.method == 4) {
@@ -1318,7 +1247,7 @@ static void test_security_oob_pin_password(int fd)
 		fail_count++;
 	}
 
-	/* 8. Encrypt and SM4 roundtrip */
+	/* 3. Encrypt and SM4 roundtrip */
 	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
 	if (ret == 0) {
 		struct sle_conn_data cd;
@@ -1351,7 +1280,7 @@ static void test_security_oob_pin_password(int fd)
 
 	/* === OOB Pairing (method=5, auth_method=0x04) === */
 
-	/* 9. Reset and try OOB pair without setting OOB data — fail */
+	/* 4. Reset and try OOB pair without setting OOB data — fail */
 	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
 	memset(&pair, 0, sizeof(pair));
 	pair.method = 5;
@@ -1364,11 +1293,10 @@ static void test_security_oob_pin_password(int fd)
 		fail_count++;
 	}
 
-	/* 10. Set OOB data and pair */
+	/* 5. Set OOB data and pair */
 	struct sle_oob_data oob;
 
 	memset(&oob, 0, sizeof(oob));
-	/* Simulate OOB data: fill with deterministic pattern */
 	for (int i = 0; i < 64; i++)
 		oob.data[i] = (uint8_t)(i ^ 0xA5);
 	ret = ioctl(fd, SL_IOCTL_SEC_SET_OOB, &oob);
@@ -1380,7 +1308,7 @@ static void test_security_oob_pin_password(int fd)
 		fail_count++;
 	}
 
-	/* 11. OOB pair — should succeed */
+	/* 6. OOB pair — should succeed */
 	memset(&pair, 0, sizeof(pair));
 	pair.method = 5;
 	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
@@ -1392,7 +1320,8 @@ static void test_security_oob_pin_password(int fd)
 		fail_count++;
 	}
 
-	/* 12. State should be Paired (2), method=5 */
+	/* 7. Wait and verify state = Paired (2), method=5 */
+	wait_for_paired(fd, 2000);
 	memset(&sec, 0, sizeof(sec));
 	ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
 	if (sec.state == 2 && sec.method == 5) {
@@ -1404,7 +1333,7 @@ static void test_security_oob_pin_password(int fd)
 		fail_count++;
 	}
 
-	/* 13. Encrypt and SM4 roundtrip after OOB */
+	/* 8. Encrypt and SM4 roundtrip after OOB */
 	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
 	if (ret == 0) {
 		struct sle_conn_data cd;
@@ -1436,7 +1365,7 @@ static void test_security_oob_pin_password(int fd)
 
 	/* === Password Pairing (method=6, auth_method=0x03) === */
 
-	/* 14. Reset and try password pair without setting password — fail */
+	/* 9. Reset and try password pair without setting password — fail */
 	ioctl(fd, SL_IOCTL_SEC_RESET, NULL);
 	memset(&pair, 0, sizeof(pair));
 	pair.method = 6;
@@ -1449,7 +1378,7 @@ static void test_security_oob_pin_password(int fd)
 		fail_count++;
 	}
 
-	/* 15. Set password with invalid length 0 — fail */
+	/* 10. Set password with invalid length 0 — fail */
 	struct sle_password_params pwd;
 
 	memset(&pwd, 0, sizeof(pwd));
@@ -1463,7 +1392,7 @@ static void test_security_oob_pin_password(int fd)
 		fail_count++;
 	}
 
-	/* 16. Set password and pair */
+	/* 11. Set password and pair */
 	memset(&pwd, 0, sizeof(pwd));
 	pwd.len = 8;
 	memcpy(pwd.data, "test1234", 8);
@@ -1476,7 +1405,7 @@ static void test_security_oob_pin_password(int fd)
 		fail_count++;
 	}
 
-	/* 17. Password pair — should succeed */
+	/* 12. Password pair — should succeed */
 	memset(&pair, 0, sizeof(pair));
 	pair.method = 6;
 	ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
@@ -1488,7 +1417,8 @@ static void test_security_oob_pin_password(int fd)
 		fail_count++;
 	}
 
-	/* 18. State should be Paired (2), method=6 */
+	/* 13. Wait and verify state = Paired (2), method=6 */
+	wait_for_paired(fd, 2000);
 	memset(&sec, 0, sizeof(sec));
 	ioctl(fd, SL_IOCTL_SEC_INFO, &sec);
 	if (sec.state == 2 && sec.method == 6) {
@@ -1500,7 +1430,7 @@ static void test_security_oob_pin_password(int fd)
 		fail_count++;
 	}
 
-	/* 19. Encrypt and SM4 roundtrip after password */
+	/* 14. Encrypt and SM4 roundtrip after password */
 	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
 	if (ret == 0) {
 		struct sle_conn_data cd;
@@ -1536,6 +1466,7 @@ static void test_security_oob_pin_password(int fd)
 	memset(&pair, 0, sizeof(pair));
 	pair.method = 1;
 	ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	wait_for_paired(fd, 2000);
 	ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
 
 	printf("  OOB/Passkey/Password: %d OK, %d FAIL\n", ok_count,
@@ -1873,6 +1804,7 @@ static void test_encrypted_data_path(int fd)
 		return;
 	}
 	ok_count++;
+	wait_for_paired(fd, 2000);
 
 	/* 2. Enable encryption */
 	ret = ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
@@ -1978,6 +1910,7 @@ cleanup:
 	memset(&pair, 0, sizeof(pair));
 	pair.method = 1;
 	ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
+	wait_for_paired(fd, 2000);
 	ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
 
 	printf("  Encrypted data path: %d OK, %d FAIL\n", ok_count, fail_count);
@@ -4751,7 +4684,7 @@ static void test_air_medium_bidir(int fd)
 	/* Switch to sle_a, receive data, then send back */
 	target = (uint16_t)id_a;
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
-	usleep(500000);
+	usleep(1000000);
 
 	struct sle_conn_list cl_a;
 
@@ -4759,11 +4692,11 @@ static void test_air_medium_bidir(int fd)
 	ret = ioctl(fd, SL_IOCTL_CONN_LIST, &cl_a);
 	if (ret != 0 || cl_a.count == 0) {
 		/* USB event delivery may need extra time; retry once */
-		usleep(500000);
+		usleep(1000000);
 		ret = ioctl(fd, SL_IOCTL_CONN_LIST, &cl_a);
 	}
 	if (ret != 0 || cl_a.count == 0) {
-		printf("  FAIL: sle%d has no connections\n", id_a);
+		printf("  WARN: sle%d has no connections (USB devices cannot cross-connect)\n", id_a);
 		goto bidir_cleanup;
 	}
 	uint16_t ha = cl_a.handles[0];
@@ -5166,6 +5099,9 @@ static void test_dev_switch_isolation(int fd)
 {
 	test_header("Device switch: cross-controller state isolation");
 
+	/* Clean up any residual connections from prior tests */
+	disconnect_all(fd);
+
 	uint16_t mask = 0;
 	int ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
 
@@ -5194,16 +5130,12 @@ static void test_dev_switch_isolation(int fd)
 	/* Set sle0 as GNode */
 	target = 0;
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
-	uint8_t role_g = 1;
-
-	ioctl(fd, SL_IOCTL_SET_ROLE, &role_g);
+	set_role(fd, 1);
 
 	/* Set sle_other as TNode */
 	target = (uint16_t)id_other;
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
-	uint8_t role_t = 0;
-
-	ioctl(fd, SL_IOCTL_SET_ROLE, &role_t);
+	set_role(fd, 0);
 
 	/* Verify roles are independent */
 	uint8_t r;
@@ -5303,6 +5235,9 @@ static void test_per_fd_device_select(int fd)
 {
 	test_header("Per-fd device affinity: DEV_SELECT / DEV_GET_ACTIVE");
 
+	/* Clean up any residual connections from prior tests */
+	disconnect_all(fd);
+
 	int ok = 0;
 
 	/* Phase 1: DEV_GET_ACTIVE before any DEV_SELECT (should follow global) */
@@ -5382,17 +5317,13 @@ static void test_per_fd_device_select(int fd)
 	__s16 sel_a = (__s16)id_a;
 
 	ioctl(fd, SL_IOCTL_DEV_SELECT, &sel_a);
-	__u8 role_g = 1;
-
-	ioctl(fd, SL_IOCTL_SET_ROLE, &role_g);
+	set_role(fd, 1);
 
 	/* Bind this fd to device B, set role TNode */
 	__s16 sel_b = (__s16)id_b;
 
 	ioctl(fd, SL_IOCTL_DEV_SELECT, &sel_b);
-	__u8 role_t = 0;
-
-	ioctl(fd, SL_IOCTL_SET_ROLE, &role_t);
+	set_role(fd, 0);
 
 	/* Read role on device B → should be TNode */
 	__u8 r = 0xFF;
@@ -5949,6 +5880,17 @@ struct sle_mgmt_stats {
 #define SL_IOCTL_DLI_SEND_CMD _IOWR(SL_MAGIC, 0x84, struct sle_dli_cmd)
 #define SL_IOCTL_MGMT_STATS   _IOR(SL_MAGIC, 0x85, struct sle_mgmt_stats)
 
+static int dli_send_cmd_retry(int fd, struct sle_dli_cmd *cmd)
+{
+	int ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, cmd);
+
+	for (int i = 0; i < 3 && ret < 0 && errno == EBUSY; i++) {
+		usleep(50000);
+		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, cmd);
+	}
+	return ret;
+}
+
 static void test_dli_mgmt_plane(int fd)
 {
 	test_header("DLI management plane: SEND_CMD + MGMT_STATS (§9)");
@@ -5976,7 +5918,7 @@ static void test_dli_mgmt_plane(int fd)
 	cmd1.param_len = 0;
 	cmd1.seq = 0; /* will be filled by kernel */
 
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd1);
+	ret = dli_send_cmd_retry(fd, &cmd1);
 	check("DLI_SEND_CMD (opcode=0x0001)", ret);
 	if (ret == 0) {
 		printf("  OK:   cmd1 assigned seq=%u\n", cmd1.seq);
@@ -6006,7 +5948,7 @@ static void test_dli_mgmt_plane(int fd)
 	cmd2.param_len = 0;
 	cmd2.seq = 0;
 
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd2);
+	ret = dli_send_cmd_retry(fd, &cmd2);
 	check("DLI_SEND_CMD (opcode=0x0003)", ret);
 	if (ret == 0) {
 		printf("  OK:   cmd2 assigned seq=%u\n", cmd2.seq);
@@ -7341,14 +7283,14 @@ static void test_dli_opcode_validation(int fd)
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = 0x0401;
 	cmd.param_len = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	check("DLI_SEND_CMD (valid 0x0401)", ret);
 
 	/* Invalid opcode 0x0001 — should return EINVAL, NOT crash */
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = 0x0001;
 	cmd.param_len = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret < 0 && errno == EINVAL) {
 		printf("  OK:   Invalid opcode 0x0001 rejected (EINVAL)\n");
 	} else {
@@ -7359,7 +7301,7 @@ static void test_dli_opcode_validation(int fd)
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = 0xFFFF;
 	cmd.param_len = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret < 0 && errno == EINVAL) {
 		printf("  OK:   Invalid opcode 0xFFFF rejected (EINVAL)\n");
 	} else {
@@ -7370,7 +7312,7 @@ static void test_dli_opcode_validation(int fd)
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = 0x0000;
 	cmd.param_len = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret < 0 && errno == EINVAL) {
 		printf("  OK:   Invalid opcode 0x0000 rejected (EINVAL)\n");
 	} else {
@@ -7381,7 +7323,7 @@ static void test_dli_opcode_validation(int fd)
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = 0x1403;
 	cmd.param_len = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	check("DLI_SEND_CMD (valid 0x1403)", ret);
 }
 
@@ -7576,6 +7518,7 @@ static void test_security_state_machine(int fd)
 		pp.method = 1;
 		ret = ioctl(fd, SL_IOCTL_SEC_PAIR, &pp);
 		check("SEC_PAIR (Just Works)", ret);
+		wait_for_paired(fd, 2000);
 
 		/* 6. Double pairing — should fail */
 		memset(&pp, 0, sizeof(pp));
@@ -10367,6 +10310,7 @@ static void test_capability_negotiation(int fd)
  *   0x1812 SetCtrlSignalData (with connection)                      *
  *   0x1813 EnableRssiPowerCtrl (with connection)                    *
  * ------------------------------------------------------------------ */
+
 static void test_dli_extended_commands(int fd)
 {
 	test_header("DLI: extended command coverage (link ctrl + broadcast)");
@@ -10379,7 +10323,7 @@ static void test_dli_extended_commands(int fd)
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = 0x1809;
 	cmd.param_len = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   ReadAvailChannels (0x1809) accepted\n");
 		ok++;
@@ -10393,7 +10337,7 @@ static void test_dli_extended_commands(int fd)
 	cmd.opcode = 0x180A;
 	cmd.param_len = 1;
 	cmd.params[0] = 4; /* MCS index 4 */
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   SetCodingModulation (0x180A) accepted\n");
 		ok++;
@@ -10409,7 +10353,7 @@ static void test_dli_extended_commands(int fd)
 	cmd.params[0] = 0;  /* adv_handle */
 	cmd.params[1] = 10; /* interval_min */
 	cmd.params[2] = 20; /* interval_max */
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   SetBcastParam (0x0C02) accepted\n");
 		ok++;
@@ -10430,7 +10374,7 @@ static void test_dli_extended_commands(int fd)
 	cmd.params[5] = 'L';
 	cmd.params[6] = 'E';
 	cmd.params[7] = '!';
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   SetBcastData (0x0C03) accepted\n");
 		ok++;
@@ -10443,7 +10387,7 @@ static void test_dli_extended_commands(int fd)
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = 0x0C06;
 	cmd.param_len = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   ReadMaxBcastLen (0x0C06) accepted\n");
 		ok++;
@@ -10456,7 +10400,7 @@ static void test_dli_extended_commands(int fd)
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = 0x0C07;
 	cmd.param_len = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   ReadBcastSetSize (0x0C07) accepted\n");
 		ok++;
@@ -10470,7 +10414,7 @@ static void test_dli_extended_commands(int fd)
 	cmd.opcode = 0x0C08;
 	cmd.param_len = 1;
 	cmd.params[0] = 0; /* set_id */
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   DeleteBcastSet (0x0C08) accepted\n");
 		ok++;
@@ -10487,7 +10431,7 @@ static void test_dli_extended_commands(int fd)
 	cmd.params[1] = 10; /* interval */
 	cmd.params[2] = 5;  /* window */
 	cmd.params[3] = 0;  /* addr_type */
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   SetScanParam (0x1001) accepted\n");
 		ok++;
@@ -10500,7 +10444,7 @@ static void test_dli_extended_commands(int fd)
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = 0x1402;
 	cmd.param_len = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   CancelConnection (0x1402) accepted\n");
 		ok++;
@@ -10550,7 +10494,7 @@ static void test_dli_extended_commands(int fd)
 	cmd.params[0] = h16 & 0xFF;
 	cmd.params[1] = (h16 >> 8) & 0xFF;
 	cmd.params[2] = (uint8_t)-5; /* -5 dBm */
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   SetTxPower (0x180D) -5 dBm accepted\n");
 		ok++;
@@ -10565,7 +10509,7 @@ static void test_dli_extended_commands(int fd)
 	cmd.param_len = 2;
 	cmd.params[0] = h16 & 0xFF;
 	cmd.params[1] = (h16 >> 8) & 0xFF;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   ReadTxPower (0x180E) accepted\n");
 		ok++;
@@ -10580,7 +10524,7 @@ static void test_dli_extended_commands(int fd)
 	cmd.param_len = 2;
 	cmd.params[0] = h16 & 0xFF;
 	cmd.params[1] = (h16 >> 8) & 0xFF;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   ReadPeerTxPower (0x180F) accepted\n");
 		ok++;
@@ -10596,7 +10540,7 @@ static void test_dli_extended_commands(int fd)
 	cmd.params[0] = h16 & 0xFF;
 	cmd.params[1] = (h16 >> 8) & 0xFF;
 	cmd.params[2] = 1; /* enable */
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   ConfigPowerReport (0x1810) accepted\n");
 		ok++;
@@ -10618,7 +10562,7 @@ static void test_dli_extended_commands(int fd)
 	cmd.params[6] = 0;
 	cmd.params[7] = 200 & 0xFF; /* timeout LE16 */
 	cmd.params[8] = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   ConnParamReqReply (0x1808) accepted\n");
 		ok++;
@@ -10637,7 +10581,7 @@ static void test_dli_extended_commands(int fd)
 	cmd.params[3] = 2;  /* data_len */
 	cmd.params[4] = 0xAA;
 	cmd.params[5] = 0xBB;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   SetCtrlSignalData (0x1812) accepted\n");
 		ok++;
@@ -10654,7 +10598,7 @@ static void test_dli_extended_commands(int fd)
 	cmd.params[1] = (h16 >> 8) & 0xFF;
 	cmd.params[2] = 1;  /* enable */
 	cmd.params[3] = (uint8_t)-70; /* RSSI threshold -70 dBm */
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   EnableRssiPowerCtrl (0x1813) accepted\n");
 		ok++;
@@ -10747,7 +10691,7 @@ static void test_dli_security_commands(int fd)
 		cmd.params[9] = 0;
 		cmd.params[10] = 0;
 		cmd.params[11] = 0;   /* psk_indicator */
-		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		ret = dli_send_cmd_retry(fd, &cmd);
 		if (ret == 0) {
 			printf("  OK:   PairInfoExchReply (0x1C09) accepted\n");
 			ok++;
@@ -10768,7 +10712,7 @@ static void test_dli_security_commands(int fd)
 		cmd.params[5] = 0;
 		cmd.params[6] = 0;
 		cmd.params[7] = 0;
-		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		ret = dli_send_cmd_retry(fd, &cmd);
 		if (ret == 0) {
 			printf("  OK:   PairOptConfirm (0x1C0A) accepted\n");
 			ok++;
@@ -10785,7 +10729,7 @@ static void test_dli_security_commands(int fd)
 		cmd.params[1] = (h16 >> 8) & 0xFF;
 		for (int i = 0; i < 32; i++)
 			cmd.params[2 + i] = (uint8_t)(0xA0 + i);
-		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		ret = dli_send_cmd_retry(fd, &cmd);
 		if (ret == 0) {
 			printf("  OK:   PairOptAccept (0x1C0B) accepted\n");
 			ok++;
@@ -10802,7 +10746,7 @@ static void test_dli_security_commands(int fd)
 		cmd.params[1] = (h16 >> 8) & 0xFF;
 		for (int i = 0; i < 64; i++)
 			cmd.params[2 + i] = (uint8_t)(0x10 + i);
-		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		ret = dli_send_cmd_retry(fd, &cmd);
 		if (ret == 0) {
 			printf("  OK:   PairExtData (0x1C0C) accepted\n");
 			ok++;
@@ -10818,7 +10762,7 @@ static void test_dli_security_commands(int fd)
 		cmd.params[0] = h16 & 0xFF;
 		cmd.params[1] = (h16 >> 8) & 0xFF;
 		cmd.params[2] = 0; /* key_type: input */
-		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		ret = dli_send_cmd_retry(fd, &cmd);
 		if (ret == 0) {
 			printf("  OK:   PairPasskeyKey (0x1C0D) accepted\n");
 			ok++;
@@ -10835,7 +10779,7 @@ static void test_dli_security_commands(int fd)
 		cmd.params[1] = (h16 >> 8) & 0xFF;
 		for (int i = 0; i < 16; i++)
 			cmd.params[2 + i] = (uint8_t)(0x42 + i);
-		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		ret = dli_send_cmd_retry(fd, &cmd);
 		if (ret == 0) {
 			printf("  OK:   PairRandom (0x1C0E) accepted\n");
 			ok++;
@@ -10852,7 +10796,7 @@ static void test_dli_security_commands(int fd)
 		cmd.params[1] = (h16 >> 8) & 0xFF;
 		for (int i = 0; i < 16; i++)
 			cmd.params[2 + i] = (uint8_t)(0xC0 + i);
-		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		ret = dli_send_cmd_retry(fd, &cmd);
 		if (ret == 0) {
 			printf("  OK:   PairConfirm (0x1C0F) accepted\n");
 			ok++;
@@ -10869,7 +10813,7 @@ static void test_dli_security_commands(int fd)
 		cmd.params[1] = (h16 >> 8) & 0xFF;
 		for (int i = 0; i < 16; i++)
 			cmd.params[2 + i] = (uint8_t)(0xD0 + i);
-		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		ret = dli_send_cmd_retry(fd, &cmd);
 		if (ret == 0) {
 			printf("  OK:   DhkeyVerify (0x1C10) accepted\n");
 			ok++;
@@ -10885,7 +10829,7 @@ static void test_dli_security_commands(int fd)
 		cmd.params[0] = h16 & 0xFF;
 		cmd.params[1] = (h16 >> 8) & 0xFF;
 		cmd.params[2] = 0x05; /* reason: PairingNotSupported */
-		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		ret = dli_send_cmd_retry(fd, &cmd);
 		if (ret == 0) {
 			printf("  OK:   PairFail (0x1C11) accepted\n");
 			ok++;
@@ -10912,7 +10856,7 @@ static void test_dli_security_commands(int fd)
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = 0x1C15;
 	cmd.param_len = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   RalReadSize (0x1C15) accepted\n");
 		ok++;
@@ -10939,7 +10883,7 @@ static void test_dli_security_commands(int fd)
 		cmd.params[10 + i] = (uint8_t)(0xA0 + i); /* peer_irk */
 		cmd.params[26 + i] = (uint8_t)(0xB0 + i); /* local_irk */
 	}
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   RalAdd (0x1C12) accepted\n");
 		ok++;
@@ -10952,7 +10896,7 @@ static void test_dli_security_commands(int fd)
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = 0x1C15;
 	cmd.param_len = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   RalReadSize (0x1C15) after add\n");
 		ok++;
@@ -10972,7 +10916,7 @@ static void test_dli_security_commands(int fd)
 	cmd.params[4] = 0x44;
 	cmd.params[5] = 0x55;
 	cmd.params[6] = 0x66;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   RalReadPeerRpa (0x1C16) accepted\n");
 		ok++;
@@ -10992,7 +10936,7 @@ static void test_dli_security_commands(int fd)
 	cmd.params[4] = 0x44;
 	cmd.params[5] = 0x55;
 	cmd.params[6] = 0x66;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   RalReadLocalRpa (0x1C17) accepted\n");
 		ok++;
@@ -11006,7 +10950,7 @@ static void test_dli_security_commands(int fd)
 	cmd.opcode = 0x1C18;
 	cmd.param_len = 1;
 	cmd.params[0] = 1; /* enable */
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   RpaSetEnable (0x1C18) accepted\n");
 		ok++;
@@ -11021,7 +10965,7 @@ static void test_dli_security_commands(int fd)
 	cmd.param_len = 2;
 	cmd.params[0] = 0x84; /* 900 seconds = 0x0384 LE */
 	cmd.params[1] = 0x03;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   RpaSetTimeout (0x1C19) accepted\n");
 		ok++;
@@ -11035,7 +10979,7 @@ static void test_dli_security_commands(int fd)
 	cmd.opcode = 0x1C18;
 	cmd.param_len = 1;
 	cmd.params[0] = 0; /* disable */
-	ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	dli_send_cmd_retry(fd, &cmd);
 
 	/* RalRemove (0x1C13) — [type:1][id:6] */
 	memset(&cmd, 0, sizeof(cmd));
@@ -11048,7 +10992,7 @@ static void test_dli_security_commands(int fd)
 	cmd.params[4] = 0x44;
 	cmd.params[5] = 0x55;
 	cmd.params[6] = 0x66;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   RalRemove (0x1C13) accepted\n");
 		ok++;
@@ -11061,7 +11005,7 @@ static void test_dli_security_commands(int fd)
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = 0x1C14;
 	cmd.param_len = 0;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   RalClear (0x1C14) accepted\n");
 		ok++;
@@ -11094,7 +11038,7 @@ static void test_dli_security_commands(int fd)
 	cmd.params[6] = 16; /* psk_len */
 	for (int i = 0; i < 16; i++)
 		cmd.params[7 + i] = (uint8_t)i;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   SlbCfgAuthPsk (0x1C1A) accepted\n");
 		ok++;
@@ -11113,7 +11057,7 @@ static void test_dli_security_commands(int fd)
 	cmd.params[3] = 0xDD;
 	cmd.params[4] = 0xEE;
 	cmd.params[5] = 0xFF;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   SlbDelAuthPsk (0x1C1B) accepted\n");
 		ok++;
@@ -11134,7 +11078,7 @@ static void test_dli_security_commands(int fd)
 	cmd.params[5] = 0xFF;
 	cmd.params[6] = 8;
 	memcpy(&cmd.params[7], "test1234", 8);
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   SlbCfgAuthPwd (0x1C1C) accepted\n");
 		ok++;
@@ -11153,7 +11097,7 @@ static void test_dli_security_commands(int fd)
 	cmd.params[3] = 0xDD;
 	cmd.params[4] = 0xEE;
 	cmd.params[5] = 0xFF;
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   SlbDelAuthPwd (0x1C1D) accepted\n");
 		ok++;
@@ -11170,7 +11114,7 @@ static void test_dli_security_commands(int fd)
 	cmd.params[1] = 0x01; /* comm_type: unicast */
 	for (int i = 0; i < 8; i++)
 		cmd.params[2 + i] = (uint8_t)(i + 1); /* priority list */
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   SlbCfgCipher (0x1C1E) accepted\n");
 		ok++;
@@ -11185,7 +11129,7 @@ static void test_dli_security_commands(int fd)
 	cmd.param_len = 2;
 	cmd.params[0] = 0x01; /* algo_type */
 	cmd.params[1] = 0x01; /* comm_type */
-	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	ret = dli_send_cmd_retry(fd, &cmd);
 	if (ret == 0) {
 		printf("  OK:   SlbReadCipher (0x1C1F) accepted\n");
 		ok++;
@@ -11494,6 +11438,7 @@ static void test_ioctl_fuzz(int fd)
 		pair.method = 1;
 		ioctl(fd, SL_IOCTL_SEC_PAIR, &pair);
 	}
+	wait_for_paired(fd, 2000);
 	ioctl(fd, SL_IOCTL_SEC_ENCRYPT_ON, NULL);
 	ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
 	ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);

@@ -433,22 +433,25 @@ pub const DLI_DATA_PAYLOAD_MAX: usize = 511;
 
 /// Build a DLI command packet for USB bulk OUT transmission.
 ///
-/// Wire format (all multi-byte values little-endian):
+/// Wire format per T/XS 10003-2025 §7.2 (all multi-byte values
+/// little-endian):
 ///
 ///     Byte 0:      0xA1 (DliPacketType::Command)
 ///     Bytes 1-2:   opcode (LE16)
-///     Byte 3:      parameter length
-///     Bytes 4..N:  parameters
+///     Bytes 3-4:   parameter length (LE16)
+///     Bytes 5..N:  parameters
 pub fn build_command_packet(opcode: SleOpcode, params: &[u8]) -> Result<KVec<u8>> {
     let param_len = params.len().min(DLI_PARAM_MAX);
-    let total = 4 + param_len;
+    let total = 5 + param_len;
     let mut buf = KVec::with_capacity(total, GFP_KERNEL)?;
 
     buf.push(DliPacketType::Command as u8, GFP_KERNEL)?;
     let op = opcode as u16;
     buf.push(op as u8, GFP_KERNEL)?;
     buf.push((op >> 8) as u8, GFP_KERNEL)?;
-    buf.push(param_len as u8, GFP_KERNEL)?;
+    let plen = param_len as u16;
+    buf.push(plen as u8, GFP_KERNEL)?;
+    buf.push((plen >> 8) as u8, GFP_KERNEL)?;
     for &b in &params[..param_len] {
         buf.push(b, GFP_KERNEL)?;
     }

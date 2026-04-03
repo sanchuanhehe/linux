@@ -60,8 +60,8 @@ pub const DEFAULT_BAUD_RATE: u32 = 115200;
 /// Maximum supported baud rate.
 pub const MAX_BAUD_RATE: u32 = 3_000_000;
 
-/// Command frame header size: type(1) + opcode(2) + len(1) = 4.
-pub const CMD_HEADER_SIZE: usize = 4;
+/// Command frame header size: type(1) + opcode(2) + len(2) = 5.
+pub const CMD_HEADER_SIZE: usize = 5;
 
 /// Event frame header size: type(1) + event_code(2) + len(2) = 5.
 pub const EVENT_HEADER_SIZE: usize = 5;
@@ -166,10 +166,10 @@ impl UartParser {
                     _ => return None, // skip unknown bytes
                 };
                 // Header size depends on type
-                let hdr_size = match pkt_type {
-                    DliPacketType::Command => 3,
-                    _ => 4, // Event: event_code(2)+len(2); Data: handle(2)+len(2)
-                };
+                // All DLI frame types use 4-byte header after type byte:
+                // Command: opcode(2)+len(2), Event: event_code(2)+len(2),
+                // Data: handle(2)+len(2).
+                let hdr_size = 4;
                 self.state = RxState::ReadHeader {
                     pkt_type,
                     count: 0,
@@ -192,11 +192,10 @@ impl UartParser {
                     };
                     return None;
                 }
-                // Header complete, determine payload length
-                let payload_len = match pkt_type {
-                    DliPacketType::Command => self.header[2] as usize,
-                    _ => u16::from_le_bytes([self.header[2], self.header[3]]) as usize,
-                };
+                // Header complete, determine payload length.
+                // All DLI frame types use LE16 length at header[2..3].
+                let payload_len =
+                    u16::from_le_bytes([self.header[2], self.header[3]]) as usize;
                 if payload_len == 0 {
                     let frame = self.build_frame(pkt_type);
                     self.reset();
@@ -300,8 +299,10 @@ pub fn encode_command(opcode: u16, params: &[u8], buf: &mut [u8]) -> usize {
     let op_bytes = opcode.to_le_bytes();
     buf[1] = op_bytes[0];
     buf[2] = op_bytes[1];
-    buf[3] = params.len() as u8;
-    buf[4..total].copy_from_slice(params);
+    let plen_bytes = (params.len() as u16).to_le_bytes();
+    buf[3] = plen_bytes[0];
+    buf[4] = plen_bytes[1];
+    buf[5..total].copy_from_slice(params);
     total
 }
 

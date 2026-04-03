@@ -89,8 +89,8 @@ pub const MAX_SPI_FREQ: u32 = 20_000_000;
 /// Maximum single SPI transfer size (register address + data).
 pub const MAX_SPI_TRANSFER: usize = 260;
 
-/// Command header size on SPI: type(1) + opcode(2) + len(1) = 4.
-const SPI_CMD_HEADER_SIZE: usize = 4;
+/// Command header size on SPI: type(1) + opcode(2) + len(2) = 5.
+const SPI_CMD_HEADER_SIZE: usize = 5;
 
 // =========================================================================
 // Interrupt status bits
@@ -115,8 +115,8 @@ pub const INT_ERROR: u8 = 0x80;
 /// Build a SPI write transfer for a command header.
 ///
 /// Returns number of bytes written to `buf`.
-pub fn encode_spi_command(opcode: u16, param_len: u8, buf: &mut [u8]) -> usize {
-    if buf.len() < 5 {
+pub fn encode_spi_command(opcode: u16, param_len: u16, buf: &mut [u8]) -> usize {
+    if buf.len() < 6 {
         return 0;
     }
     buf[0] = REG_CMD;
@@ -124,8 +124,10 @@ pub fn encode_spi_command(opcode: u16, param_len: u8, buf: &mut [u8]) -> usize {
     let op_bytes = opcode.to_le_bytes();
     buf[2] = op_bytes[0];
     buf[3] = op_bytes[1];
-    buf[4] = param_len;
-    5
+    let plen_bytes = param_len.to_le_bytes();
+    buf[4] = plen_bytes[0];
+    buf[5] = plen_bytes[1];
+    6
 }
 
 /// Build a SPI write transfer for data payload.
@@ -341,7 +343,7 @@ impl SpiController {
         hdr_buf: &mut [u8],
         data_buf: &mut [u8],
     ) -> (usize, usize) {
-        let hdr_len = encode_spi_command(opcode, params.len() as u8, hdr_buf);
+        let hdr_len = encode_spi_command(opcode, params.len() as u16, hdr_buf);
         let data_len = if params.is_empty() {
             0
         } else {

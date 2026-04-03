@@ -1013,9 +1013,9 @@ static void sle_dli_handle_bulk_out_command(USBSleDliState *s,
         return;
     }
     uint16_t opcode = data[1] | ((uint16_t)data[2] << 8);
-    uint8_t param_len = data[3];
-    const uint8_t *params = (len > 4) ? &data[4] : NULL;
-    int actual_plen = MIN(param_len, len - 4);
+    uint16_t param_len = data[3] | ((uint16_t)data[4] << 8);
+    const uint8_t *params = (len > 5) ? &data[5] : NULL;
+    int actual_plen = MIN(param_len, len - 5);
 
     sle_dli_process_command(s, opcode, params, actual_plen);
 }
@@ -1133,11 +1133,12 @@ static void usb_sle_dli_handle_control(USBDevice *dev, USBPacket *p,
      */
     if ((request >> 8) == 0x21) {
         /* data contains a DLI command payload */
-        if (length >= 3) {
+        if (length >= 4) {
             uint16_t opcode = data[0] | ((uint16_t)data[1] << 8);
-            uint8_t param_len = data[2];
-            const uint8_t *params = (length > 3) ? &data[3] : NULL;
-            sle_dli_process_command(s, opcode, params, param_len);
+            uint16_t param_len = data[2] | ((uint16_t)data[3] << 8);
+            const uint8_t *params = (length > 4) ? &data[4] : NULL;
+            int actual_plen = MIN(param_len, length - 4);
+            sle_dli_process_command(s, opcode, params, actual_plen);
             p->status = USB_RET_SUCCESS;
         } else {
             p->status = USB_RET_STALL;

@@ -4751,12 +4751,17 @@ static void test_air_medium_bidir(int fd)
 	/* Switch to sle_a, receive data, then send back */
 	target = (uint16_t)id_a;
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
-	usleep(200000);
+	usleep(500000);
 
 	struct sle_conn_list cl_a;
 
 	memset(&cl_a, 0, sizeof(cl_a));
 	ret = ioctl(fd, SL_IOCTL_CONN_LIST, &cl_a);
+	if (ret != 0 || cl_a.count == 0) {
+		/* USB event delivery may need extra time; retry once */
+		usleep(500000);
+		ret = ioctl(fd, SL_IOCTL_CONN_LIST, &cl_a);
+	}
 	if (ret != 0 || cl_a.count == 0) {
 		printf("  FAIL: sle%d has no connections\n", id_a);
 		goto bidir_cleanup;

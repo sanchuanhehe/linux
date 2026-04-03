@@ -1944,8 +1944,8 @@ static void usb_sle_dli_handle_data(USBDevice *dev, USBPacket *p)
 
     switch (p->pid) {
     case USB_TOKEN_IN:
-        if (p->ep->nr == 0x11) {
-            /* Interrupt IN (0x91) — deliver events */
+        if (p->ep->nr == 1) {
+            /* Interrupt IN (0x81) — deliver events */
             len = sle_dli_dequeue_event(s, buf, sizeof(buf));
             if (len > 0) {
                 if (len > (int)p->iov.size) {
@@ -1960,8 +1960,8 @@ static void usb_sle_dli_handle_data(USBDevice *dev, USBPacket *p)
             } else {
                 p->status = USB_RET_NAK;
             }
-        } else if (p->ep->nr == 0x12) {
-            /* Bulk IN (0x92) — deliver compat command responses or data */
+        } else if (p->ep->nr == 2) {
+            /* Bulk IN (0x82) — deliver compat command responses or data */
             /* In dual/bulk-compat mode, events are also available here */
             len = sle_dli_dequeue_event(s, buf, sizeof(buf));
             if (len > 0) {
@@ -1980,8 +1980,8 @@ static void usb_sle_dli_handle_data(USBDevice *dev, USBPacket *p)
         break;
 
     case USB_TOKEN_OUT:
-        if (p->ep->nr == 0x12) {
-            /* Bulk OUT (0x12) — receive commands and data */
+        if (p->ep->nr == 2) {
+            /* Bulk OUT (0x02) — receive commands and data */
             len = MIN(p->iov.size, sizeof(buf));
             usb_packet_copy(p, buf, len);
             sle_dli_handle_bulk_out_command(s, buf, len);

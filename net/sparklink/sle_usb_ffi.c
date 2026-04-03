@@ -539,18 +539,19 @@ int sle_usb_dev_send_cmd(int dev_id, u16 opcode, const u8 *params, int plen)
 	if (plen > 255)
 		plen = 255;
 
-	total = 4 + plen;
+	total = 5 + plen;
 	pkt = kmalloc(total, GFP_KERNEL);
 	if (!pkt)
 		return -ENOMEM;
 
-	/* Build DLI command packet */
+	/* Build DLI command packet: [type:1][opcode:2][param_len:2][params...] */
 	pkt[0] = DLI_PKT_COMMAND;
 	pkt[1] = (u8)(opcode & 0xFF);
 	pkt[2] = (u8)(opcode >> 8);
-	pkt[3] = (u8)plen;
+	pkt[3] = (u8)(plen & 0xFF);
+	pkt[4] = (u8)(plen >> 8);
 	if (plen > 0 && params)
-		memcpy(&pkt[4], params, plen);
+		memcpy(&pkt[5], params, plen);
 
 	pipe = usb_sndbulkpipe(d->udev, d->ep_bulk_out);
 	ret = usb_bulk_msg(d->udev, pipe, pkt, total,
@@ -738,17 +739,18 @@ static int sle_usb_send_cmd_sync(struct sle_usb_dev *d, u16 opcode,
 	unsigned int pipe_out, pipe_in;
 	int ret;
 
-	cmd = kmalloc(4, GFP_KERNEL);
+	cmd = kmalloc(5, GFP_KERNEL);
 	if (!cmd)
 		return -ENOMEM;
 
 	cmd[0] = DLI_PKT_COMMAND;
 	cmd[1] = (u8)(opcode & 0xFF);
 	cmd[2] = (u8)(opcode >> 8);
-	cmd[3] = 0; /* no parameters */
+	cmd[3] = 0; /* param_len low */
+	cmd[4] = 0; /* param_len high */
 
 	pipe_out = usb_sndbulkpipe(d->udev, d->ep_bulk_out);
-	ret = usb_bulk_msg(d->udev, pipe_out, cmd, 4,
+	ret = usb_bulk_msg(d->udev, pipe_out, cmd, 5,
 			   &actual_len, SLE_INIT_TIMEOUT_MS);
 	kfree(cmd);
 	if (ret)
@@ -806,24 +808,32 @@ int sle_usb_dev_init_controller(int dev_id)
 	}
 	pr_info("sparklink-usb: controller reset OK\n");
 
-	/* Step 2: ReadLocalVersion → fw_version at resp[6..9] */
+	/* Step 2: ReadLocalVersion
+	 * CmdComplete wire format:
+	 *   [0..1] evt_code  (0x0002)
+	 *   [2..3] param_len (LE16)
+	 *   [4..5] opcode    (LE16)
+	 *   [6]    status
+	 *   [7..10] version  (LE32)
+	 */
 	ret = sle_usb_send_cmd_sync(d, SLE_OP_READ_LOCAL_VERSION,
 				    resp, sizeof(resp), &resp_len);
-	if (!ret && resp_len >= 10) {
-		/* Response: [evt_code:2][plen:1][opcode:2][status:1][version:4] */
-		if (resp[5] == 0) {
-			d->fw_version = le32_to_cpup((__le32 *)&resp[6]);
+	if (!ret && resp_len >= 11) {
+		if (resp[6] == 0) {
+			d->fw_version = le32_to_cpup((__le32 *)&resp[7]);
 			pr_info("sparklink-usb: fw_version=0x%08x\n",
 				d->fw_version);
 		}
 	}
 
-	/* Step 3: ReadMacAddr → 6-byte MAC at resp[6..11] */
+	/* Step 3: ReadMacAddr
+	 * CmdComplete:  [0..6] header  [7..12] mac (6 bytes)
+	 */
 	ret = sle_usb_send_cmd_sync(d, SLE_OP_READ_MAC_ADDR,
 				    resp, sizeof(resp), &resp_len);
-	if (!ret && resp_len >= 12) {
-		if (resp[5] == 0) {
-			memcpy(d->mac_addr, &resp[6], 6);
+	if (!ret && resp_len >= 13) {
+		if (resp[6] == 0) {
+			memcpy(d->mac_addr, &resp[7], 6);
 			pr_info("sparklink-usb: mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
 				d->mac_addr[0], d->mac_addr[1],
 				d->mac_addr[2], d->mac_addr[3],

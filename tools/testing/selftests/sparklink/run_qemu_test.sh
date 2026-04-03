@@ -27,7 +27,7 @@ KBUILD="${KBUILD:-$LINUX_SRC/build}"
 BZIMAGE="$KBUILD/arch/x86/boot/bzImage"
 WORKDIR="$SCRIPT_DIR/.qemu_test"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
-SLE_DLI_DEVICE="${SLE_DLI_DEVICE:-1}"
+SLE_DLI_DEVICE="${SLE_DLI_DEVICE:-2}"
 
 VERBOSE=0
 if [[ "${1:-}" == "--verbose" ]]; then
@@ -262,7 +262,7 @@ timeout "$TIMEOUT" "$QEMU_BIN" \
     -smp 2 \
     $KVM_OPTS \
     $SLE_USB_OPTS \
-    2>/dev/null
+    2>"$WORKDIR/qemu_stderr.log"
 QEMU_EXIT=$?
 set -e
 

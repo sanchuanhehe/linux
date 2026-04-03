@@ -12,6 +12,27 @@ use super::sle_dli;
 use super::sle_phy;
 
 // ---------------------------------------------------------------------------
+// Buffer size constants (used by IOCTL handlers for bounds clamping)
+// ---------------------------------------------------------------------------
+
+/// Maximum name length in SleInjectAdv / SleAdvParams.
+pub(crate) const ADV_NAME_MAX: usize = 32;
+/// Maximum advertising/scan data payload.
+pub(crate) const ADV_DATA_MAX: usize = 252;
+/// Maximum SM3 hash input length.
+pub(crate) const HASH_INPUT_MAX: usize = 220;
+/// Maximum HMAC key length.
+pub(crate) const HMAC_KEY_MAX: usize = 64;
+/// Maximum HMAC data length.
+pub(crate) const HMAC_DATA_MAX: usize = 160;
+/// Maximum SSAP read/write/notification data length.
+pub(crate) const SSAP_DATA_MAX: usize = 252;
+/// Maximum SSAP property value length.
+pub(crate) const SSAP_VALUE_MAX: usize = 248;
+/// Maximum DLI command parameter length.
+pub(crate) const DLI_PARAM_MAX: usize = 240;
+
+// ---------------------------------------------------------------------------
 // IOCTL definitions for the /dev/sparklink control interface
 // ---------------------------------------------------------------------------
 

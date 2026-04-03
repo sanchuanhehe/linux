@@ -259,7 +259,7 @@ The SparkLink subsystem exposes its control plane through ioctl on
 ``/dev/sparklink``. The ioctl magic number is ``'S'`` (0x53). All
 structure definitions are in ``net/sparklink/sparklink_core.rs``.
 
-Device management (0x01 -- 0x06)
+Device management (0x01 -- 0x08)
 --------------------------------
 
 .. list-table::
@@ -294,6 +294,14 @@ Device management (0x01 -- 0x06)
      - ``DEV_LIST``
      - Read (u16)
      - List all registered device IDs (returns bitmask)
+   * - 0x07
+     - ``DEV_SELECT``
+     - Write (i16)
+     - Bind this fd to a specific device (-1 = follow global active)
+   * - 0x08
+     - ``DEV_GET_ACTIVE``
+     - Read (u16)
+     - Get the currently active device ID
 
 Advertising and scanning (0x10 -- 0x13)
 ---------------------------------------
@@ -342,6 +350,30 @@ Loopback injection (0x20 -- 0x21)
      - ``SCAN_RESULT_COUNT``
      - None (retval)
      - Return number of pending scan results
+
+Scan filtering (0x22 -- 0x24)
+-----------------------------
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0x22
+     - ``INJECT_RAW_ADV``
+     - Write (SleInjectRawAdv)
+     - Inject raw advertising PDU for testing
+   * - 0x23
+     - ``SET_SCAN_FILTER``
+     - Write (SleScanFilter)
+     - Set scan filter (discovery level threshold and/or UUID whitelist)
+   * - 0x24
+     - ``CLEAR_SCAN_FILTER``
+     - None
+     - Clear all scan filters
 
 Connection management (0x30 -- 0x38)
 ------------------------------------
@@ -495,6 +527,41 @@ SSAP service layer (0x50 -- 0x59)
      - ``SSAP_REMOVE_SVC``
      - Write (u16)
      - Remove a service by its start_handle
+
+SSAP remote operations (0x5A -- 0x5E)
+-------------------------------------
+
+Client-side SSAP operations for querying remote services over an
+established connection. PDUs are sent via the SERVICE_MGMT TCID.
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0x5A
+     - ``SSAP_EXCHANGE_INFO``
+     - Write (SsapRemoteCmd)
+     - Send ExchangeInfo request to negotiate MTU with peer
+   * - 0x5B
+     - ``SSAP_REMOTE_DISCOVER``
+     - Read/Write (SsapRemoteDiscover)
+     - Discover remote services, returns cached entry count
+   * - 0x5C
+     - ``SSAP_REMOTE_READ``
+     - Read/Write (SsapRemoteReadWrite)
+     - Read a remote property value by handle
+   * - 0x5D
+     - ``SSAP_REMOTE_WRITE``
+     - Write (SsapRemoteReadWrite)
+     - Write to a remote property value by handle
+   * - 0x5E
+     - ``SSAP_REMOTE_EVENT``
+     - Read (SsapNotification)
+     - Dequeue a remote notification/indication event
 
 Power management (0x60 -- 0x65)
 -------------------------------
@@ -922,6 +989,96 @@ per T/XS 10003-2025 sections 8.6.18--8.6.25.
      - ``RPA_SET_TIMEOUT``
      - Write (u16)
      - Set RPA rotation timeout in seconds
+
+Capability negotiation (0x98 -- 0x9B)
+-------------------------------------
+
+Per-connection feature/version exchange and parameter update.
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0x98
+     - ``CONN_READ_PEER_FEATURES``
+     - Read/Write (SleConnPeerCap)
+     - Trigger or query peer feature exchange; sends ReadFeatures DLI
+       command if not yet cached
+   * - 0x99
+     - ``CONN_READ_PEER_VERSION``
+     - Read/Write (SleConnPeerCap)
+     - Trigger or query peer version exchange; sends ReadVersion DLI
+       command if not yet cached
+   * - 0x9A
+     - ``CONN_UPDATE_PARAMS``
+     - Write (SleConnParamUpdate)
+     - Request connection parameter update (interval, latency, timeout)
+   * - 0x9B
+     - ``CONN_PHY_UPDATE``
+     - Write (SleConnPhyUpdate)
+     - Request PHY parameter update (MCS index, bandwidth) per connection
+
+Narrowband AFH measurement (0xC0 -- 0xC3)
+------------------------------------------
+
+Narrowband measurement support per T/XS 10003-2025 section 8.7.
+
+.. list-table::
+   :widths: 8 25 15 52
+   :header-rows: 1
+
+   * - Nr
+     - Name
+     - Direction
+     - Description
+   * - 0xC0
+     - ``MEAS_READ_CAP``
+     - Read (SleMeasCap)
+     - Read local measurement capabilities (DLI opcode 0x2001)
+   * - 0xC1
+     - ``MEAS_SET_LINK_PARAM``
+     - Write (SleMeasLinkParam)
+     - Set measurement link parameters (DLI opcode 0x2003)
+   * - 0xC2
+     - ``MEAS_ACTION``
+     - Write (SleMeasAction)
+     - Start or stop a measurement action (DLI opcode 0x2005)
+   * - 0xC3
+     - ``MEAS_ENABLE``
+     - Write (u8)
+     - Enable or disable measurement reporting (DLI opcode 0x200B)
+
+Error codes
+-----------
+
+Common ``errno`` values returned by sparklink ioctls:
+
+.. list-table::
+   :widths: 12 88
+   :header-rows: 1
+
+   * - Error
+     - Meaning
+   * - ``ENODEV``
+     - No active controller or subsystem not initialized
+   * - ``EBUSY``
+     - Operation blocked by active connection, scan, or advertisement
+   * - ``EINVAL``
+     - Invalid parameter, enum value, or MCS/bandwidth out of range
+   * - ``ENOENT``
+     - Connection handle not found or SSAP session missing
+   * - ``EAGAIN``
+     - No data, event, or notification available (non-blocking)
+   * - ``ENOMEM``
+     - Kernel memory allocation failure
+   * - ``EACCES``
+     - Operation rejected (e.g., connection response rejection)
+   * - ``EIO``
+     - DLI controller communication failure
 
 Event delivery via read()
 =========================

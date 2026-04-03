@@ -1632,7 +1632,7 @@ fn ioctl_dispatch_ext_adv(cmd: u32, arg: usize) -> Result<isize> {
         }
         SL_IOCTL_EXT_ADV_SET_DATA => {
             let d: SleExtAdvData = read_user_struct(arg)?;
-            let len = (d.data_len as usize).min(252);
+            let len = (d.data_len as usize).min(ADV_DATA_MAX);
             let mut ss = SUBSYSTEM.lock();
             let s = ss.as_mut().ok_or(ENODEV)?;
             s.adv_scan.ext_adv_set_data(d.handle, &d.data[..len])?;
@@ -1710,7 +1710,7 @@ fn ioctl_inject_adv(me: Pin<&SparkLinkCtl>, arg: usize) -> Result<isize> {
     let mut builder = sle_pdu::AdvDataBuilder::new();
     let _ = builder.push_discovery_level(inject.discovery_level);
     let _ = builder.push_sle_addr(&inject.addr);
-    let name_len = (inject.name_len as usize).min(32);
+    let name_len = (inject.name_len as usize).min(ADV_NAME_MAX);
     if name_len > 0 {
         let _ = builder.push_complete_name(&inject.name[..name_len]);
     }
@@ -2344,7 +2344,7 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
         }
         SL_IOCTL_SEC_SM3_TEST => {
             let mut ht: SleHashTest = read_user_struct(arg)?;
-            let in_len = (ht.in_len as usize).min(220);
+            let in_len = (ht.in_len as usize).min(HASH_INPUT_MAX);
             let digest = SecurityInner::sm3_hash(&ht.data[..in_len]);
             ht.digest = digest;
             write_user_struct(arg, &ht)?;
@@ -2385,8 +2385,8 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
         }
         SL_IOCTL_SEC_HMAC_TEST => {
             let mut ht: SleHmacTest = read_user_struct(arg)?;
-            let klen = (ht.key_len as usize).min(64);
-            let dlen = (ht.data_len as usize).min(160);
+            let klen = (ht.key_len as usize).min(HMAC_KEY_MAX);
+            let dlen = (ht.data_len as usize).min(HMAC_DATA_MAX);
             ht.digest = sle_crypto::hmac_sm3(&ht.key[..klen], &ht.data[..dlen]);
             write_user_struct(arg, &ht)?;
             Ok(0)
@@ -2463,7 +2463,7 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
             let data = s.ssap.read_property(rw.handle)?;
             let mut out: SsapReadWrite = unsafe { core::mem::zeroed() };
             out.handle = rw.handle;
-            let copy_len = data.len().min(252);
+            let copy_len = data.len().min(SSAP_DATA_MAX);
             out.length = copy_len as u16;
             out.data[..copy_len].copy_from_slice(&data[..copy_len]);
             drop(ss);
@@ -2472,7 +2472,7 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
         }
         SL_IOCTL_SSAP_WRITE => {
             let rw: SsapReadWrite = read_user_struct(arg)?;
-            let len = (rw.length as usize).min(252);
+            let len = (rw.length as usize).min(SSAP_DATA_MAX);
             let mut ss = SUBSYSTEM.lock();
             let s = ss.as_mut().ok_or(ENODEV)?;
             s.ssap.write_property(rw.handle, &rw.data[..len])?;
@@ -2511,7 +2511,7 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
                     let mut out: SsapNotification = unsafe { core::mem::zeroed() };
                     out.handle = n.handle;
                     out.indication = if n.indication { 1 } else { 0 };
-                    let copy_len = n.data.len().min(252);
+                    let copy_len = n.data.len().min(SSAP_DATA_MAX);
                     out.length = copy_len as u8;
                     out.data[..copy_len].copy_from_slice(&n.data[..copy_len]);
                     drop(ss);
@@ -2541,7 +2541,7 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
             let mut cmd_data: SsapAddProperty = read_user_struct(arg)?;
             let uuid = sle_ssap::SsapUuid::Uuid16(cmd_data.uuid16);
             let ops = sle_ssap::OpIndicator::from_raw(u32::from(cmd_data.ops));
-            let len = (cmd_data.value_len as usize).min(248);
+            let len = (cmd_data.value_len as usize).min(SSAP_VALUE_MAX);
             let mut ss = SUBSYSTEM.lock();
             let s = ss.as_mut().ok_or(ENODEV)?;
             let handle = s.ssap.add_property(uuid, ops, &cmd_data.value[..len])?;
@@ -3002,7 +3002,7 @@ fn ioctl_dispatch_infra(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<
         }
         SL_IOCTL_DLI_SEND_CMD => {
             let mut cmd_data: SleDliCmd = read_user_struct(arg)?;
-            let param_len = (cmd_data.param_len as usize).min(240);
+            let param_len = (cmd_data.param_len as usize).min(DLI_PARAM_MAX);
             if sle_dli::sle_opcode_from_u16(cmd_data.opcode).is_none() {
                 return Err(EINVAL);
             }

@@ -2591,8 +2591,12 @@ pub(crate) enum SciBus {
     None = 0,
     /// UART-attached controller.
     Uart = 1,
-    /// USB-attached controller.
-    Usb = 2,
+    /// SPI-attached controller.
+    Spi = 2,
     /// SDIO-attached controller.
     Sdio = 3,
+    /// USB-attached controller.
+    Usb = 4,
+    /// MMIO-attached controller.
+    Mmio = 5,
 }

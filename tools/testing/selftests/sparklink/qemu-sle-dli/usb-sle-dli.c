@@ -444,18 +444,18 @@ static const USBDescIface desc_iface_sle_dli = {
     .bInterfaceProtocol = SLE_USB_PROTOCOL,
     .eps = (USBDescEndpoint[]) {
         {
-            .bEndpointAddress = USB_DIR_IN | 0x01,  /* 0x81: interrupt IN (events) */
+            .bEndpointAddress = USB_DIR_IN | 0x11,  /* 0x91: interrupt IN (events) */
             .bmAttributes     = USB_ENDPOINT_XFER_INT,
             .wMaxPacketSize   = 64,
             .bInterval        = 4,
         },
         {
-            .bEndpointAddress = USB_DIR_IN | 0x02,  /* 0x82: bulk IN (data) */
+            .bEndpointAddress = USB_DIR_IN | 0x12,  /* 0x92: bulk IN (data) */
             .bmAttributes     = USB_ENDPOINT_XFER_BULK,
             .wMaxPacketSize   = 512,
         },
         {
-            .bEndpointAddress = USB_DIR_OUT | 0x02, /* 0x02: bulk OUT (commands) */
+            .bEndpointAddress = USB_DIR_OUT | 0x12, /* 0x12: bulk OUT (commands) */
             .bmAttributes     = USB_ENDPOINT_XFER_BULK,
             .wMaxPacketSize   = 512,
         },
@@ -1073,7 +1073,7 @@ static void usb_sle_dli_realize(USBDevice *dev, Error **errp)
     }
 
     /* Cache interrupt endpoint for wakeup signaling */
-    s->intr = usb_ep_get(dev, USB_TOKEN_IN, 1);
+    s->intr = usb_ep_get(dev, USB_TOKEN_IN, 0x11);
 
     /* Create deferred wakeup timer for cross-device event delivery */
     s->deferred_wakeup = timer_new_ns(QEMU_CLOCK_VIRTUAL,
@@ -1157,8 +1157,8 @@ static void usb_sle_dli_handle_data(USBDevice *dev, USBPacket *p)
 
     switch (p->pid) {
     case USB_TOKEN_IN:
-        if (p->ep->nr == 0x01) {
-            /* Interrupt IN (0x81) — deliver events */
+        if (p->ep->nr == 0x11) {
+            /* Interrupt IN (0x91) — deliver events */
             len = sle_dli_dequeue_event(s, buf, sizeof(buf));
             if (len > 0) {
                 if (len > (int)p->iov.size) {
@@ -1173,8 +1173,8 @@ static void usb_sle_dli_handle_data(USBDevice *dev, USBPacket *p)
             } else {
                 p->status = USB_RET_NAK;
             }
-        } else if (p->ep->nr == 0x02) {
-            /* Bulk IN (0x82) — deliver compat command responses or data */
+        } else if (p->ep->nr == 0x12) {
+            /* Bulk IN (0x92) — deliver compat command responses or data */
             /* In dual/bulk-compat mode, events are also available here */
             len = sle_dli_dequeue_event(s, buf, sizeof(buf));
             if (len > 0) {
@@ -1193,8 +1193,8 @@ static void usb_sle_dli_handle_data(USBDevice *dev, USBPacket *p)
         break;
 
     case USB_TOKEN_OUT:
-        if (p->ep->nr == 0x02) {
-            /* Bulk OUT (0x02) — receive commands and data */
+        if (p->ep->nr == 0x12) {
+            /* Bulk OUT (0x12) — receive commands and data */
             len = MIN(p->iov.size, sizeof(buf));
             usb_packet_copy(p, buf, len);
             sle_dli_handle_bulk_out_command(s, buf, len);

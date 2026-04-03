@@ -331,9 +331,9 @@ int sle_usb_sync_bulk_in(struct usb_device *udev, u8 ep,
 #define DLI_PKT_ASYNC_DATA 0xA3
 
 /* Endpoint addresses (host perspective, T/XS 10003-2025 Table 3) */
-#define SLE_EP_EVENT_IN   0x81
-#define SLE_EP_DATA_IN    0x82
-#define SLE_EP_CMD_OUT    0x02
+#define SLE_EP_EVENT_IN   0x91
+#define SLE_EP_DATA_IN    0x92
+#define SLE_EP_CMD_OUT    0x12
 
 /* Transfer buffer sizes */
 #define SLE_CMD_BUF_SIZE  260  /* 4-byte header + 255 params + 1 spare */

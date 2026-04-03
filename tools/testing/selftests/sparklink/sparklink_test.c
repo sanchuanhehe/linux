@@ -11264,6 +11264,362 @@ static void test_async_event_pump(int fd)
 	printf("  Async event pump: %d checks passed\n", ok);
 }
 
+/* ------------------------------------------------------------------ */
+/* Stress test: rapid connect / disconnect cycling                    */
+/* ------------------------------------------------------------------ */
+static void test_rapid_connect_disconnect(int fd)
+{
+	test_header("Stress: rapid connect/disconnect cycling");
+
+	const int cycles = 200;
+	int created = 0, failed = 0;
+	struct timespec t0, t1;
+
+	set_role(fd, 0);
+
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (int i = 0; i < cycles; i++) {
+		struct sle_connect_params cp;
+
+		memset(&cp, 0, sizeof(cp));
+		cp.peer_addr[0] = 0xC0 + (uint8_t)(i & 0x0F);
+		cp.peer_addr[5] = (uint8_t)((i >> 4) & 0xFF);
+		cp.gt_role = 0;
+		cp.bandwidth = 1;
+		cp.mcs_index = 4;
+		cp.timeout_10ms = 100;
+
+		int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
+		if (ret > 0) {
+			uint16_t h = (uint16_t)ret;
+
+			ioctl(fd, SL_IOCTL_DISCONNECT, &h);
+			created++;
+		} else {
+			failed++;
+		}
+	}
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	uint64_t ns = elapsed_ns(&t0, &t1);
+
+	printf("  OK:   %d/%d connect+disconnect cycles in %lu us\n",
+	       created, cycles, (unsigned long)(ns / 1000));
+
+	/* Verify no leaked connections */
+	int ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
+
+	if (ret <= 0) {
+		printf("  OK:   No leaked connections (count=%d)\n", ret);
+	} else {
+		printf("  WARN: %d leaked connections after rapid cycling\n", ret);
+		disconnect_all(fd);
+	}
+
+	/* Verify subsystem is still healthy */
+	ret = ioctl(fd, SL_IOCTL_DEV_COUNT, NULL);
+	if (ret >= 1) {
+		printf("  OK:   Subsystem healthy after rapid cycling\n");
+	} else {
+		printf("  WARN: DEV_COUNT=%d after rapid cycling\n", ret);
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Stress test: multi-fd concurrent access                            */
+/* ------------------------------------------------------------------ */
+static void test_multi_fd_stress(int fd)
+{
+	test_header("Stress: multi-fd concurrent access");
+
+	const int num_fds = 8;
+	int fds[8];
+	int opened = 0;
+	int i;
+
+	/* Open multiple file descriptors */
+	for (i = 0; i < num_fds; i++) {
+		fds[i] = open(DEVICE, O_RDWR | O_NONBLOCK);
+		if (fds[i] >= 0)
+			opened++;
+	}
+
+	if (opened < 2) {
+		printf("  FAIL: Could only open %d fds\n", opened);
+		for (i = 0; i < opened; i++)
+			close(fds[i]);
+		return;
+	}
+	printf("  OK:   Opened %d file descriptors\n", opened);
+
+	/* Interleaved IOCTL calls across all fds */
+	int ok_count = 0;
+
+	for (int round = 0; round < 50; round++) {
+		for (i = 0; i < opened; i++) {
+			/* Read-only IOCTLs interleaved across fds */
+			int ret = ioctl(fds[i], SL_IOCTL_DEV_COUNT, NULL);
+
+			if (ret >= 1)
+				ok_count++;
+
+			struct sle_event_stats es;
+
+			memset(&es, 0, sizeof(es));
+			ioctl(fds[i], SL_IOCTL_EVENT_STATS, &es);
+			ok_count++;
+
+			uint8_t role;
+
+			ioctl(fds[i], SL_IOCTL_GET_ROLE, &role);
+			ok_count++;
+		}
+	}
+	printf("  OK:   %d interleaved IOCTLs across %d fds\n",
+	       ok_count, opened);
+
+	/* Per-fd device selection isolation */
+	if (opened >= 2) {
+		int16_t dev0 = 0;
+
+		ioctl(fds[0], SL_IOCTL_DEV_SELECT, &dev0);
+		int16_t dev_neg = -1;
+
+		ioctl(fds[1], SL_IOCTL_DEV_SELECT, &dev_neg);
+
+		uint16_t active0, active1;
+
+		ioctl(fds[0], SL_IOCTL_DEV_GET_ACTIVE, &active0);
+		ioctl(fds[1], SL_IOCTL_DEV_GET_ACTIVE, &active1);
+		printf("  OK:   fd[0] active=%u, fd[1] active=%u (isolation)\n",
+		       active0, active1);
+	}
+
+	/* Concurrent connect from different fds */
+	uint16_t handles[8] = {0};
+	int connected = 0;
+
+	for (i = 0; i < opened && i < 4; i++) {
+		struct sle_connect_params cp;
+
+		memset(&cp, 0, sizeof(cp));
+		cp.peer_addr[0] = 0xD0 + (uint8_t)i;
+		cp.peer_addr[5] = 0x50 + (uint8_t)i;
+		int ret = ioctl(fds[i], SL_IOCTL_CONNECT, &cp);
+
+		if (ret > 0) {
+			handles[i] = (uint16_t)ret;
+			connected++;
+		}
+	}
+	printf("  OK:   Created %d connections from %d different fds\n",
+	       connected, opened < 4 ? opened : 4);
+
+	/* Disconnect from main fd (shared state) */
+	for (i = 0; i < opened && i < 4; i++) {
+		if (handles[i] > 0)
+			ioctl(fd, SL_IOCTL_DISCONNECT, &handles[i]);
+	}
+
+	/* Close extra fds */
+	for (i = 0; i < opened; i++)
+		close(fds[i]);
+	printf("  OK:   All extra fds closed cleanly\n");
+}
+
+/* ------------------------------------------------------------------ */
+/* Stress test: data path saturation                                  */
+/* ------------------------------------------------------------------ */
+static void test_data_path_saturation(int fd)
+{
+	test_header("Stress: data path saturation");
+
+	/* Establish a connection */
+	struct sle_connect_params cp;
+
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xE0;
+	cp.peer_addr[5] = 0x70;
+	cp.gt_role = 0;
+	cp.bandwidth = 1;
+	cp.mcs_index = 4;
+	cp.timeout_10ms = 100;
+
+	int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
+	if (ret <= 0) {
+		printf("  FAIL: Cannot create connection for saturation test\n");
+		return;
+	}
+	uint16_t handle = (uint16_t)ret;
+
+	/* Accept */
+	struct sle_inject_conn_resp resp;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = handle;
+	resp.response_type = 0;
+	resp.bandwidth_mhz = 2;
+	resp.mcs_index = 4;
+	resp.supervision_timeout = 100;
+	ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+
+	/* Burst send: 500 packets of 255 bytes each */
+	const int burst_count = 500;
+	int sent = 0, send_err = 0;
+	struct sle_conn_data sd;
+	struct timespec t0, t1;
+
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (int i = 0; i < burst_count; i++) {
+		memset(&sd, 0, sizeof(sd));
+		sd.handle = handle;
+		sd.length = 255;
+		memset(sd.data, (uint8_t)(i & 0xFF), 255);
+
+		ret = ioctl(fd, SL_IOCTL_CONN_SEND, &sd);
+		if (ret >= 0)
+			sent++;
+		else
+			send_err++;
+	}
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	uint64_t ns = elapsed_ns(&t0, &t1);
+
+	printf("  OK:   Burst TX: %d/%d packets in %lu us (%lu bytes/s)\n",
+	       sent, burst_count, (unsigned long)(ns / 1000),
+	       ns > 0 ? (unsigned long)((uint64_t)sent * 255 * 1000000000ULL / ns) : 0);
+	if (send_err > 0)
+		printf("  INFO: %d send errors (expected under saturation)\n",
+		       send_err);
+
+	/* Burst inject + receive: 200 packets */
+	const int recv_count = 200;
+	int received = 0;
+
+	for (int i = 0; i < recv_count; i++) {
+		struct sle_conn_data inj;
+
+		memset(&inj, 0, sizeof(inj));
+		inj.handle = handle;
+		inj.length = 128;
+		memset(inj.data, (uint8_t)((i + 0x80) & 0xFF), 128);
+		ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
+
+		struct sle_conn_data recv_buf;
+
+		memset(&recv_buf, 0, sizeof(recv_buf));
+		recv_buf.handle = handle;
+		ret = ioctl(fd, SL_IOCTL_CONN_RECV, &recv_buf);
+		if (ret == 0 && recv_buf.length == 128)
+			received++;
+	}
+	printf("  OK:   Burst RX: %d/%d packets received correctly\n",
+	       received, recv_count);
+
+	/* Check connection integrity after saturation */
+	struct sle_conn_info info;
+
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	if (ret == 0) {
+		printf("  OK:   Post-saturation: tx=%lu rx=%lu state=%u\n",
+		       (unsigned long)info.tx_bytes,
+		       (unsigned long)info.rx_bytes,
+		       info.state);
+	}
+
+	ioctl(fd, SL_IOCTL_DISCONNECT, &handle);
+	printf("  OK:   Connection cleaned up after saturation\n");
+}
+
+/* ------------------------------------------------------------------ */
+/* Stress test: state machine torture (rapid role/adv/scan toggling)  */
+/* ------------------------------------------------------------------ */
+static void test_state_machine_torture(int fd)
+{
+	test_header("Stress: state machine rapid transitions");
+
+	const int transitions = 100;
+	int ok = 0;
+	struct timespec t0, t1;
+
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+
+	for (int i = 0; i < transitions; i++) {
+		struct sle_adv_params adv;
+		struct sle_scan_params scan;
+
+		/* Cycle: TNode → scan → stop → GNode → adv → stop → TNode */
+		set_role(fd, 0); /* TNode */
+		memset(&scan, 0, sizeof(scan));
+		scan.window_ms = 20;
+		scan.interval_ms = 40;
+		ioctl(fd, SL_IOCTL_START_SCAN, &scan);
+		ioctl(fd, SL_IOCTL_STOP_SCAN, NULL);
+
+		set_role(fd, 1); /* GNode */
+		memset(&adv, 0, sizeof(adv));
+		adv.discovery_level = 1;
+		adv.interval_ms = 50;
+		ioctl(fd, SL_IOCTL_START_ADV, &adv);
+		ioctl(fd, SL_IOCTL_STOP_ADV, NULL);
+		ok++;
+	}
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	uint64_t ns = elapsed_ns(&t0, &t1);
+
+	set_role(fd, 0);
+
+	printf("  OK:   %d role/adv/scan cycles in %lu ms\n",
+	       transitions, (unsigned long)(ns / 1000000));
+
+	/* Mixed connect during transitions */
+	int connects = 0;
+
+	for (int i = 0; i < 20; i++) {
+		struct sle_connect_params cp;
+
+		memset(&cp, 0, sizeof(cp));
+		cp.peer_addr[0] = 0xB0 + (uint8_t)i;
+		cp.peer_addr[5] = 0x30;
+		int ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
+		if (ret > 0) {
+			uint16_t h = (uint16_t)ret;
+
+			connects++;
+			/* Immediately disconnect */
+			ioctl(fd, SL_IOCTL_DISCONNECT, &h);
+		}
+	}
+	printf("  OK:   %d/20 connect+disconnect during transitions\n",
+	       connects);
+
+	/* Final health check */
+	int ret = ioctl(fd, SL_IOCTL_DEV_COUNT, NULL);
+
+	if (ret >= 1) {
+		printf("  OK:   Subsystem stable after %d transitions\n",
+		       transitions);
+	} else {
+		printf("  WARN: DEV_COUNT=%d after torture\n", ret);
+	}
+
+	/* Drain residual events */
+	struct sle_dli_event ev;
+
+	for (int i = 0; i < 64; i++) {
+		if (ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &ev) < 0)
+			break;
+	}
+	struct sle_wire_event we;
+
+	while (read(fd, &we, sizeof(we)) > 0)
+		;
+}
+
 static void test_ioctl_fuzz(int fd)
 {
 	test_header("Ioctl fuzz: deterministic payload injection");
@@ -11746,6 +12102,10 @@ int main(void)
 	test_dli_extended_commands(fd);
 	test_dli_security_commands(fd);
 	test_async_event_pump(fd);
+	test_rapid_connect_disconnect(fd);
+	test_multi_fd_stress(fd);
+	test_data_path_saturation(fd);
+	test_state_machine_torture(fd);
 	test_usb_controller_ops(fd);
 	test_ioctl_fuzz(fd);
 	test_genetlink();

@@ -2568,6 +2568,91 @@ static void test_usb_discovery(int fd)
 		printf("  OK:   %d USB SLE controller(s) attached\n", ret);
 }
 
+static void test_usb_controller_ops(int fd)
+{
+	test_header("USB Controller Integration");
+
+	/*
+	 * This test exercises the real USB transport path through the
+	 * QEMU usb-sle-dli device.  It only runs when USB controllers
+	 * are attached (SLE_DLI_DEVICE >= 1).
+	 */
+
+	/* 1. Check DEV_LIST for USB devices (id >= 1) */
+	uint16_t mask = 0;
+	int ret = ioctl(fd, SL_IOCTL_DEV_LIST, &mask);
+	if (ret < 0) {
+		printf("  SKIP: DEV_LIST failed: %s\n", strerror(errno));
+		return;
+	}
+
+	int usb_dev_id = -1;
+	for (int i = 1; i < 16; i++) {
+		if (mask & (1 << i)) {
+			usb_dev_id = i;
+			break;
+		}
+	}
+	if (usb_dev_id < 0) {
+		printf("  SKIP: no USB device in DEV_LIST (mask=0x%04x)\n", mask);
+		return;
+	}
+	printf("  OK:   found USB device sle%d (mask=0x%04x)\n",
+	       usb_dev_id, mask);
+
+	/* 2. Select USB device via DEV_SELECT */
+	int16_t sel = (int16_t)usb_dev_id;
+	ret = ioctl(fd, SL_IOCTL_DEV_SELECT, &sel);
+	if (ret < 0) {
+		printf("  FAIL: DEV_SELECT sle%d: %s\n", usb_dev_id,
+		       strerror(errno));
+		return;
+	}
+	printf("  OK:   DEV_SELECT sle%d\n", usb_dev_id);
+
+	/* 3. Verify DEV_GET_ACTIVE reports the USB device */
+	uint16_t active = 0xFFFF;
+	ret = ioctl(fd, SL_IOCTL_DEV_GET_ACTIVE, &active);
+	if (ret < 0) {
+		printf("  FAIL: DEV_GET_ACTIVE: %s\n", strerror(errno));
+	} else if (active != (uint16_t)usb_dev_id) {
+		printf("  FAIL: DEV_GET_ACTIVE: expected %d, got %u\n",
+		       usb_dev_id, active);
+	} else {
+		printf("  OK:   DEV_GET_ACTIVE = sle%d\n", active);
+	}
+
+	/* 4. Read DLI info from the USB controller */
+	struct sle_dli_info dli;
+	memset(&dli, 0, sizeof(dli));
+	ret = ioctl(fd, SL_IOCTL_DLI_INFO, &dli);
+	if (ret != 0) {
+		printf("  FAIL: DLI_INFO on USB device: %s\n", strerror(errno));
+	} else {
+		printf("  OK:   DLI_INFO: bus=%u fw=0x%08x max_conn=%u\n",
+		       dli.bus, dli.firmware_version, dli.max_connections);
+		/* USB bus type should be 4 (Usb) per SleBus enum */
+		if (dli.bus == 4)
+			printf("  OK:   bus=Usb (4)\n");
+		else
+			printf("  WARN: expected bus=4 (Usb), got %u\n", dli.bus);
+		/* Firmware version from QEMU device */
+		if (dli.firmware_version != 0)
+			printf("  OK:   firmware=0x%08x\n", dli.firmware_version);
+		else
+			printf("  WARN: firmware_version=0\n");
+	}
+
+	/* 5. Switch back to virtual controller (sle0) */
+	sel = 0;
+	ret = ioctl(fd, SL_IOCTL_DEV_SELECT, &sel);
+	if (ret < 0) {
+		printf("  FAIL: DEV_SELECT sle0: %s\n", strerror(errno));
+	} else {
+		printf("  OK:   switched back to sle0\n");
+	}
+}
+
 static void test_dli_event_poll(int fd)
 {
 	test_header("DLI Event Polling via Controller");
@@ -10850,6 +10935,7 @@ int main(void)
 	test_ssap_remote_ioctls(fd);
 	test_capability_negotiation(fd);
 	test_async_event_pump(fd);
+	test_usb_controller_ops(fd);
 	test_ioctl_fuzz(fd);
 	test_genetlink();
 

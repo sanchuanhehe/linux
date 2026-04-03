@@ -431,30 +431,47 @@ pub(crate) struct PerDeviceState {
 }
 
 impl PerDeviceState {
-    /// Create fresh state for a newly activated device.
-    pub(crate) fn new_for_device(addr: [u8; 6], backend: sle_dli::ControllerBackend) -> Self {
-        Self {
-            controller: backend,
-            conn: ConnManager::new(addr),
-            adv_scan: AdvScanInner::new(addr, b"sparklink"),
-            security: SecurityInner::new(),
-            ssap: SsapInner::new(),
-            power: PowerInner::new(),
-            phy: sle_phy::PhyConfig::default_config(),
-            local_role: GtRole::TNode,
-        }
+    /// Heap-allocate fresh state for a newly activated device.
+    ///
+    /// Uses `KBox::init` + `init!` to construct each field directly on
+    /// the heap, avoiding a ~13 KB `PerDeviceState` value on the kernel
+    /// stack.  This is critical for call paths with limited remaining
+    /// stack (USB hub workqueue, serdev probe, etc.).
+    #[inline(never)]
+    pub(crate) fn new_boxed(
+        addr: [u8; 6],
+        backend: sle_dli::ControllerBackend,
+    ) -> Result<KBox<Self>> {
+        KBox::init(
+            init!(PerDeviceState {
+                controller: backend,
+                conn: ConnManager::new(addr),
+                adv_scan: AdvScanInner::new(addr, b"sparklink"),
+                security: SecurityInner::new(),
+                ssap: SsapInner::new(),
+                power: PowerInner::new(),
+                phy: sle_phy::PhyConfig::default_config(),
+                local_role: GtRole::TNode,
+            }),
+            GFP_KERNEL,
+        )
     }
 
-    /// Restore this container's state into the live SubsystemShared fields.
-    pub(crate) fn restore_into(self, ss: &mut SubsystemShared) {
-        ss.controller = self.controller;
-        ss.conn = self.conn;
-        ss.adv_scan = self.adv_scan;
-        ss.security = self.security;
-        ss.ssap = self.ssap;
-        ss.power = self.power;
-        ss.phy = self.phy;
-        ss.local_role = self.local_role;
+    /// Restore state from a heap-allocated box into the live fields.
+    ///
+    /// Swaps each field individually so the old live values end up in
+    /// the box and are dropped with it — no full `PerDeviceState` ever
+    /// lands on the stack.
+    pub(crate) fn restore_box_into(mut state: KBox<Self>, ss: &mut SubsystemShared) {
+        core::mem::swap(&mut ss.controller, &mut state.controller);
+        core::mem::swap(&mut ss.conn, &mut state.conn);
+        core::mem::swap(&mut ss.adv_scan, &mut state.adv_scan);
+        core::mem::swap(&mut ss.security, &mut state.security);
+        core::mem::swap(&mut ss.ssap, &mut state.ssap);
+        core::mem::swap(&mut ss.power, &mut state.power);
+        core::mem::swap(&mut ss.phy, &mut state.phy);
+        core::mem::swap(&mut ss.local_role, &mut state.local_role);
+        // `state` drops here, deallocating the old live values.
     }
 }
 
@@ -498,7 +515,7 @@ pub(crate) struct SubsystemShared {
     /// Stored as (dev_id, state) pairs. When the active device switches,
     /// its state is saved here. Typically holds at most N-1 entries for N
     /// registered controllers.
-    pub(crate) saved_states: KVec<(u16, PerDeviceState)>,
+    pub(crate) saved_states: KVec<(u16, KBox<PerDeviceState>)>,
 }
 
 impl SubsystemShared {
@@ -533,32 +550,33 @@ impl SubsystemShared {
 
     /// Save the current active device's live state into saved_states.
     ///
-    /// Uses field-by-field swap to avoid placing a full PerDeviceState
-    /// on the stack (~9 KB), which would overflow the 16 KB kernel stack.
+    /// Allocates a placeholder `PerDeviceState` on the **heap** via
+    /// `KBox::init` + `init!`, then swaps each field between `self` and
+    /// the heap entry.  This keeps the stack frame small (~200 B) so
+    /// the function is safe to call from USB hub workqueue or serdev
+    /// probe contexts where remaining kernel stack is limited.
     #[inline(never)]
     fn save_current_device(&mut self, old_id: u16) {
         // Remove any existing entry for old_id.
         self.discard_saved_state(old_id);
+
+        // Allocate a placeholder PerDeviceState on the heap.
+        let placeholder = [0u8; 6];
+        let boxed = match PerDeviceState::new_boxed(
+            placeholder,
+            sle_dli::ControllerBackend::new_virtual(placeholder),
+        ) {
+            Ok(b) => b,
+            Err(_) => {
+                pr_err!("sparklink: save_current_device: OOM\n");
+                return;
+            }
+        };
+
         // Extract saved_states temporarily so we can borrow self fields.
         let mut states = core::mem::take(&mut self.saved_states);
-        let placeholder = [0u8; 6];
-        // Push a placeholder entry.  The live fields will be swapped in.
-        let _ = states.push(
-            (
-                old_id,
-                PerDeviceState {
-                    controller: sle_dli::ControllerBackend::new_virtual(placeholder),
-                    conn: ConnManager::new(placeholder),
-                    adv_scan: AdvScanInner::new(placeholder, b""),
-                    security: SecurityInner::new(),
-                    ssap: SsapInner::new(),
-                    power: PowerInner::new(),
-                    phy: sle_phy::PhyConfig::default_config(),
-                    local_role: GtRole::TNode,
-                },
-            ),
-            GFP_KERNEL,
-        );
+        let _ = states.push((old_id, boxed), GFP_KERNEL);
+
         // Swap each field between self and the newly pushed entry.
         // After swapping, the entry holds the old live data and
         // self holds the placeholder defaults.
@@ -624,14 +642,17 @@ impl SubsystemShared {
     }
 
     /// Activate a device with fresh state (first-time or re-init).
+    ///
+    /// Takes a heap-allocated `KBox<PerDeviceState>` to avoid placing
+    /// the ~13 KB struct on the kernel stack.
     #[inline(never)]
-    pub(crate) fn activate_new_device(&mut self, new_id: u16, new_state: PerDeviceState) -> Result {
+    pub(crate) fn activate_new_device(&mut self, new_id: u16, new_state: KBox<PerDeviceState>) -> Result {
         if new_id as usize >= sle_dev::SLE_DEV_MAX {
             return Err(EINVAL);
         }
         if let Some(old_id) = self.active_dev_id {
             if old_id == new_id {
-                new_state.restore_into(self);
+                PerDeviceState::restore_box_into(new_state, self);
                 return Ok(());
             }
             self.save_current_device(old_id);
@@ -639,9 +660,10 @@ impl SubsystemShared {
         // Prefer saved state over provided state (preserves prior connections).
         let has_saved = self.saved_states.iter().any(|(id, _)| *id == new_id);
         if has_saved {
+            drop(new_state);
             self.restore_saved_device(new_id)
         } else {
-            new_state.restore_into(self);
+            PerDeviceState::restore_box_into(new_state, self);
             self.active_dev_id = Some(new_id);
             Ok(())
         }
@@ -740,12 +762,18 @@ pub(crate) fn sle_detach_device(dev_id: u16) {
             // Active device detached: revert to virtual controller.
             let virt_addr = [0x5E, 0x00, 0x00, 0x00, 0x00, 0x00];
             let backend = sle_dli::ControllerBackend::new_virtual(virt_addr);
-            let virt_state = PerDeviceState::new_for_device(virt_addr, backend);
-            // Don't save the detaching device's state.
-            ss.active_dev_id = None;
-            virt_state.restore_into(ss);
-            // active_dev_id stays None (no registered virtual device).
-            pr_info!("sparklink: reverted to virtual controller\n");
+            match PerDeviceState::new_boxed(virt_addr, backend) {
+                Ok(virt_state) => {
+                    // Don't save the detaching device's state.
+                    ss.active_dev_id = None;
+                    PerDeviceState::restore_box_into(virt_state, ss);
+                    // active_dev_id stays None (no registered virtual device).
+                    pr_info!("sparklink: reverted to virtual controller\n");
+                }
+                Err(_) => {
+                    pr_err!("sparklink: OOM reverting to virtual controller\n");
+                }
+            }
         } else {
             // Inactive device: discard its saved state.
             ss.discard_saved_state(dev_id);
@@ -924,7 +952,17 @@ pub(crate) fn sle_switch_controller_usb(dev_id: u16, addr: [u8; 6], fw_version: 
     let mut ss = SUBSYSTEM.lock();
     if let Some(ss) = ss.as_mut() {
         let backend = sle_dli::ControllerBackend::new_usb(addr, dev_id);
-        let new_state = PerDeviceState::new_for_device(addr, backend);
+        let new_state = match PerDeviceState::new_boxed(addr, backend) {
+            Ok(b) => b,
+            Err(e) => {
+                pr_err!(
+                    "sparklink: failed to allocate state for USB sle{}: {:?}\n",
+                    dev_id,
+                    e
+                );
+                return;
+            }
+        };
         if let Err(e) = ss.activate_new_device(dev_id, new_state) {
             pr_err!(
                 "sparklink: failed to switch to USB sle{}: {:?}\n",

@@ -1322,12 +1322,24 @@ fn init_subsystem() -> Result<SubsystemGuard> {
 
     sle_workers::init_event_pump_ref();
 
-    let pump = EventPump::new().ok();
-    if let Some(ref p) = pump {
-        p.start();
-    }
+    let pump = match EventPump::new() {
+        Ok(p) => {
+            p.start();
+            Some(p)
+        }
+        Err(_) => {
+            pr_warn!("sparklink: EventPump allocation failed, running without async events\n");
+            None
+        }
+    };
 
-    let cmd_worker = CommandWorker::new().ok();
+    let cmd_worker = match CommandWorker::new() {
+        Ok(w) => Some(w),
+        Err(_) => {
+            pr_warn!("sparklink: CommandWorker allocation failed, commands run synchronously\n");
+            None
+        }
+    };
 
     let mut proto_registry = sle_transport::SleProtoRegistry::new();
     sle_transport::register_builtin_protos(&mut proto_registry);
@@ -1877,7 +1889,7 @@ fn ioctl_dispatch_conn(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<i
                 let mut tx_buf = [0u8; 1 + CONN_DATA_MAX];
                 tx_buf[0] = sle_conn::tcid::DEFAULT_DATA as u8;
                 tx_buf[1..1 + len].copy_from_slice(&cd.data[..len]);
-                let _ = s.controller.send_data(cd.handle, &tx_buf[..1 + len]);
+                s.controller.send_data(cd.handle, &tx_buf[..1 + len])?;
                 sent
             };
             Ok(sent as isize)
@@ -1981,9 +1993,8 @@ fn ioctl_dispatch_conn(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<i
             let entry = s.conn.info(handle)?;
             if !entry.peer_cap.features_valid {
                 let hb = handle.to_le_bytes();
-                let _ = s
-                    .controller
-                    .send_command(sle_dli::SleOpcode::ReadFeatures, &hb);
+                s.controller
+                    .send_command(sle_dli::SleOpcode::ReadFeatures, &hb)?;
                 drain_controller_events(s);
             }
             let entry = s.conn.info(handle)?;
@@ -2007,9 +2018,8 @@ fn ioctl_dispatch_conn(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<i
             let entry = s.conn.info(handle)?;
             if !entry.peer_cap.version_valid {
                 let hb = handle.to_le_bytes();
-                let _ = s
-                    .controller
-                    .send_command(sle_dli::SleOpcode::ReadVersion, &hb);
+                s.controller
+                    .send_command(sle_dli::SleOpcode::ReadVersion, &hb)?;
                 drain_controller_events(s);
             }
             let entry = s.conn.info(handle)?;
@@ -2043,9 +2053,8 @@ fn ioctl_dispatch_conn(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<i
             params[4..6].copy_from_slice(&up.interval_max.to_le_bytes());
             params[6..8].copy_from_slice(&up.latency.to_le_bytes());
             params[8..10].copy_from_slice(&up.supervision_timeout.to_le_bytes());
-            let _ = s
-                .controller
-                .send_command(sle_dli::SleOpcode::ConnParamUpdate, &params);
+            s.controller
+                .send_command(sle_dli::SleOpcode::ConnParamUpdate, &params)?;
             Ok(0)
         }
         SL_IOCTL_CONN_PHY_UPDATE => {
@@ -2068,9 +2077,8 @@ fn ioctl_dispatch_conn(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<i
             params[0..2].copy_from_slice(&handle.to_le_bytes());
             params[2] = mcs;
             params[3] = bw;
-            let _ = s
-                .controller
-                .send_command(sle_dli::SleOpcode::SetPhyParam, &params);
+            s.controller
+                .send_command(sle_dli::SleOpcode::SetPhyParam, &params)?;
             Ok(0)
         }
         _ => Err(EINVAL),
@@ -2119,7 +2127,12 @@ fn ioctl_inject_conn_data(me: Pin<&SparkLinkCtl>, arg: usize) -> Result<isize> {
                 tx_buf[1..1 + resp_len].copy_from_slice(&resp_buf[..resp_len]);
                 let _ = s.controller.send_data(handle, &tx_buf[..1 + resp_len]);
             }
-            while let Some(n) = s.ssap.dequeue_notification() {
+            // Drain at most 8 queued notifications to bound lock hold time.
+            for _ in 0..8 {
+                let n = match s.ssap.dequeue_notification() {
+                    Some(n) => n,
+                    None => break,
+                };
                 if s.conn
                     .consume_tx_credit(handle, sle_conn::tcid::SERVICE_MGMT)
                     .is_err()
@@ -2302,7 +2315,7 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
             let handle = s.conn.first_active_handle().unwrap_or(0);
             // Send DLI RequestPair command to controller
             let auth_req: u8 = if params.method == 3 { 0x04 } else { 0x00 };
-            let _ = s.controller.request_pair(handle, auth_req, params.method);
+            s.controller.request_pair(handle, auth_req, params.method)?;
             // Process controller events to drive the pairing sequence
             drain_controller_events(s);
             Ok(0)
@@ -2326,7 +2339,7 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
             let mut ss = SUBSYSTEM.lock();
             let s = ss.as_mut().ok_or(ENODEV)?;
             s.security.enable_encryption()?;
-            let _ = s.controller.start_encrypt();
+            s.controller.start_encrypt()?;
             Ok(0)
         }
         SL_IOCTL_SEC_SM3_TEST => {
@@ -2575,7 +2588,7 @@ fn ioctl_ssap_remote(cmd: u32, arg: usize) -> Result<isize> {
                 let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
                 tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
                 tx_buf[1..1 + pdu_len].copy_from_slice(&buf[..pdu_len]);
-                let _ = s.controller.send_data(handle, &tx_buf[..1 + pdu_len]);
+                s.controller.send_data(handle, &tx_buf[..1 + pdu_len])?;
             }
             Ok(0)
         }
@@ -2599,7 +2612,7 @@ fn ioctl_ssap_remote(cmd: u32, arg: usize) -> Result<isize> {
                 let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
                 tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
                 tx_buf[1..1 + pdu_len].copy_from_slice(&buf[..pdu_len]);
-                let _ = s.controller.send_data(handle, &tx_buf[..1 + pdu_len]);
+                s.controller.send_data(handle, &tx_buf[..1 + pdu_len])?;
             }
             drop(ss);
             write_user_struct(arg, &params)?;
@@ -2619,7 +2632,7 @@ fn ioctl_ssap_remote(cmd: u32, arg: usize) -> Result<isize> {
                 let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
                 tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
                 tx_buf[1..1 + pdu_len].copy_from_slice(&buf[..pdu_len]);
-                let _ = s.controller.send_data(handle, &tx_buf[..1 + pdu_len]);
+                s.controller.send_data(handle, &tx_buf[..1 + pdu_len])?;
             }
             Ok(0)
         }
@@ -2642,7 +2655,7 @@ fn ioctl_ssap_remote(cmd: u32, arg: usize) -> Result<isize> {
                 let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
                 tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
                 tx_buf[1..1 + pdu_len].copy_from_slice(&buf[..pdu_len]);
-                let _ = s.controller.send_data(handle, &tx_buf[..1 + pdu_len]);
+                s.controller.send_data(handle, &tx_buf[..1 + pdu_len])?;
             }
             Ok(0)
         }
@@ -3076,7 +3089,7 @@ fn ioctl_dispatch_infra(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<
             let mut ss = SUBSYSTEM.lock();
             let s = ss.as_mut().ok_or(ENODEV)?;
             s.phy.set_mcs(cmd_data.mcs_index)?;
-            let _ = s.controller.set_coding_modulation(cmd_data.mcs_index);
+            s.controller.set_coding_modulation(cmd_data.mcs_index)?;
             Ok(0)
         }
         SL_IOCTL_PHY_SET_TXPOWER => {
@@ -3084,7 +3097,7 @@ fn ioctl_dispatch_infra(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<
             let mut ss = SUBSYSTEM.lock();
             let s = ss.as_mut().ok_or(ENODEV)?;
             s.phy.set_tx_power(cmd_data.tx_power_dbm)?;
-            let _ = s.controller.set_tx_power(cmd_data.tx_power_dbm);
+            s.controller.set_tx_power(cmd_data.tx_power_dbm)?;
             Ok(0)
         }
         SL_IOCTL_PHY_MCS_SELECT => {
@@ -3122,7 +3135,7 @@ fn ioctl_dispatch_infra(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<
             let mut ss = SUBSYSTEM.lock();
             let s = ss.as_mut().ok_or(ENODEV)?;
             s.phy.set_bandwidth(cmd_data.bandwidth_mhz)?;
-            let _ = s.controller.set_bandwidth(cmd_data.bandwidth_mhz);
+            s.controller.set_bandwidth(cmd_data.bandwidth_mhz)?;
             Ok(0)
         }
         SL_IOCTL_PHY_GET_SINR => {

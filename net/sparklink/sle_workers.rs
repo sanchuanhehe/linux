@@ -391,9 +391,9 @@ pub(crate) fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dl
 pub(crate) fn drain_controller_events(shared: &mut SubsystemShared) {
     // Multiple rounds: each round may generate new DLI commands whose
     // responses arrive in a subsequent round. Limit total iterations
-    // to avoid infinite loops.
+    // to bound lock hold time on the ioctl path.
     let mut total = 0u32;
-    for _round in 0..16 {
+    for _round in 0..4 {
         let mut drained_this_round = 0u32;
 
         // 1. Inline controller events (UART/SPI synchronous responses)
@@ -401,7 +401,7 @@ pub(crate) fn drain_controller_events(shared: &mut SubsystemShared) {
             process_controller_event(shared, &ev);
             drained_this_round += 1;
             total += 1;
-            if total >= 256 {
+            if total >= 32 {
                 return;
             }
         }
@@ -431,7 +431,7 @@ pub(crate) fn drain_controller_events(shared: &mut SubsystemShared) {
                 }
                 drained_this_round += 1;
                 total += 1;
-                if total >= 256 {
+                if total >= 32 {
                     return;
                 }
             }

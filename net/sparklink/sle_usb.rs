@@ -730,6 +730,67 @@ pub fn event_to_sle(evt: &DliUsbEvent) -> Option<SleEvent> {
                 method: evt.params[6],
             })
         }
+        // PeerFeatures (0x0016): [handle:2] [status:1] [pad:1] [features:10]
+        0x0016 => {
+            if evt.params.len() < 14 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let status = evt.params[2];
+            let mut features = [0u8; 10];
+            features.copy_from_slice(&evt.params[4..14]);
+            Some(SleEvent::ReadPeerFeatures {
+                handle,
+                status,
+                features,
+            })
+        }
+        // PeerVersion (0x0017): [handle:2] [status:1] [version:1] [mfr:2] [subver:2]
+        0x0017 => {
+            if evt.params.len() < 8 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let status = evt.params[2];
+            let version = evt.params[3];
+            let manufacturer = u16::from_le_bytes([evt.params[4], evt.params[5]]);
+            let subversion = u16::from_le_bytes([evt.params[6], evt.params[7]]);
+            Some(SleEvent::ReadPeerVersion {
+                handle,
+                status,
+                version,
+                manufacturer,
+                subversion,
+            })
+        }
+        // PhyParamUpdate (0x0018): [handle:2] [mcs_index:1] [bandwidth:1]
+        0x0018 => {
+            if evt.params.len() < 4 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            Some(SleEvent::PhyUpdate {
+                handle,
+                mcs_index: evt.params[2],
+                bandwidth_mhz: evt.params[3],
+            })
+        }
+        // ConnParamUpdate (0x0019): [handle:2] [interval:2] [latency:2] [timeout:2]
+        0x0019 => {
+            if evt.params.len() < 8 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let interval = u16::from_le_bytes([evt.params[2], evt.params[3]]);
+            let latency = u16::from_le_bytes([evt.params[4], evt.params[5]]);
+            let timeout = u16::from_le_bytes([evt.params[6], evt.params[7]]);
+            Some(SleEvent::ConnParamUpdate {
+                handle,
+                interval,
+                latency,
+                timeout,
+            })
+        }
         _ => None,
     }
 }

@@ -73,6 +73,15 @@
 #define DLI_OP_FW_DL_START        0xF810
 #define DLI_OP_FW_DL_DONE         0xF811
 
+/* Link control opcodes (§8.5) */
+#define DLI_OP_READ_PEER_FEATURES 0x1801
+#define DLI_OP_READ_PEER_VERSION  0x1802
+#define DLI_OP_SET_DATA_LENGTH    0x1804
+#define DLI_OP_READ_PHY_PARAM     0x1805
+#define DLI_OP_SET_PHY_PARAM      0x1806
+#define DLI_OP_CONN_PARAM_UPDATE  0x1807
+#define DLI_OP_READ_RSSI          0x180C
+
 /* DLI event codes */
 #define DLI_EVT_CMD_STATUS        0x0001
 #define DLI_EVT_CMD_COMPLETE      0x0002
@@ -82,6 +91,12 @@
 #define DLI_EVT_CONN_ESTABLISHED  0x0015
 #define DLI_EVT_BROADCAST_REPORT  0x001A
 #define DLI_EVT_PAIR_REQUEST      0x001D
+
+/* Link control events (§9.1.15–§9.1.18) */
+#define DLI_EVT_PEER_FEATURES     0x0016
+#define DLI_EVT_PEER_VERSION      0x0017
+#define DLI_EVT_PHY_PARAM_UPDATE  0x0018
+#define DLI_EVT_CONN_PARAM_UPDATE 0x0019
 
 /* Controller limits */
 #define MAX_CONNECTIONS   8
@@ -144,6 +159,16 @@ typedef struct SleDliConn {
     /* Link to the remote device's connection slot for data relay */
     struct USBSleDliState *remote_dev;
     int      remote_slot;
+    /* PHY parameters */
+    uint8_t  mcs_index;
+    uint8_t  bandwidth_mhz;
+    /* Connection parameters */
+    uint16_t interval;
+    uint16_t latency;
+    uint16_t timeout;
+    /* Data length */
+    uint16_t max_tx_octets;
+    uint16_t max_rx_octets;
 } SleDliConn;
 
 struct USBSleDliState {
@@ -729,6 +754,129 @@ static void sle_dli_hw_error(USBSleDliState *s, uint8_t code)
     sle_dli_queue_event(s, buf, 5);
 }
 
+/* Find an active connection by handle. Returns NULL if not found. */
+static SleDliConn *sle_dli_find_conn(USBSleDliState *s, uint16_t handle)
+{
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        if (s->connections[i].active && s->connections[i].handle == handle) {
+            return &s->connections[i];
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Build a PeerFeatures event (0x0016).
+ *   [0..1] event_code (LE16)
+ *   [2..3] param_len = 13 (LE16)
+ *   [4..5] handle (LE16)
+ *   [6]    status
+ *   [7]    pad
+ *   [8..17] features (10 bytes)
+ */
+static void sle_dli_peer_features_evt(USBSleDliState *s, uint16_t handle,
+                                      uint8_t status,
+                                      const uint8_t *features)
+{
+    uint8_t buf[18];
+    buf[0] = DLI_EVT_PEER_FEATURES & 0xFF;
+    buf[1] = (DLI_EVT_PEER_FEATURES >> 8) & 0xFF;
+    buf[2] = 14; /* param_len */
+    buf[3] = 0;
+    buf[4] = handle & 0xFF;
+    buf[5] = (handle >> 8) & 0xFF;
+    buf[6] = status;
+    buf[7] = 0; /* pad */
+    if (features) {
+        memcpy(&buf[8], features, 10);
+    } else {
+        memset(&buf[8], 0, 10);
+    }
+    sle_dli_queue_event(s, buf, 18);
+}
+
+/*
+ * Build a PeerVersion event (0x0017).
+ *   [0..1] event_code (LE16)
+ *   [2..3] param_len = 8 (LE16)
+ *   [4..5] handle (LE16)
+ *   [6]    status
+ *   [7]    version
+ *   [8..9] manufacturer (LE16)
+ *   [10..11] subversion (LE16)
+ */
+static void sle_dli_peer_version_evt(USBSleDliState *s, uint16_t handle,
+                                     uint8_t status, uint8_t version,
+                                     uint16_t manufacturer, uint16_t subversion)
+{
+    uint8_t buf[12];
+    buf[0]  = DLI_EVT_PEER_VERSION & 0xFF;
+    buf[1]  = (DLI_EVT_PEER_VERSION >> 8) & 0xFF;
+    buf[2]  = 8;
+    buf[3]  = 0;
+    buf[4]  = handle & 0xFF;
+    buf[5]  = (handle >> 8) & 0xFF;
+    buf[6]  = status;
+    buf[7]  = version;
+    buf[8]  = manufacturer & 0xFF;
+    buf[9]  = (manufacturer >> 8) & 0xFF;
+    buf[10] = subversion & 0xFF;
+    buf[11] = (subversion >> 8) & 0xFF;
+    sle_dli_queue_event(s, buf, 12);
+}
+
+/*
+ * Build a PhyParamUpdate event (0x0018).
+ *   [0..1] event_code (LE16)
+ *   [2..3] param_len = 4 (LE16)
+ *   [4..5] handle (LE16)
+ *   [6]    mcs_index
+ *   [7]    bandwidth_mhz
+ */
+static void sle_dli_phy_update_evt(USBSleDliState *s, uint16_t handle,
+                                   uint8_t mcs_index, uint8_t bandwidth_mhz)
+{
+    uint8_t buf[8];
+    buf[0] = DLI_EVT_PHY_PARAM_UPDATE & 0xFF;
+    buf[1] = (DLI_EVT_PHY_PARAM_UPDATE >> 8) & 0xFF;
+    buf[2] = 4;
+    buf[3] = 0;
+    buf[4] = handle & 0xFF;
+    buf[5] = (handle >> 8) & 0xFF;
+    buf[6] = mcs_index;
+    buf[7] = bandwidth_mhz;
+    sle_dli_queue_event(s, buf, 8);
+}
+
+/*
+ * Build a ConnParamUpdate event (0x0019).
+ *   [0..1] event_code (LE16)
+ *   [2..3] param_len = 8 (LE16)
+ *   [4..5] handle (LE16)
+ *   [6..7] interval (LE16)
+ *   [8..9] latency (LE16)
+ *   [10..11] timeout (LE16)
+ */
+static void sle_dli_conn_param_update_evt(USBSleDliState *s, uint16_t handle,
+                                          uint16_t interval, uint16_t latency,
+                                          uint16_t timeout)
+{
+    uint8_t buf[12];
+    buf[0]  = DLI_EVT_CONN_PARAM_UPDATE & 0xFF;
+    buf[1]  = (DLI_EVT_CONN_PARAM_UPDATE >> 8) & 0xFF;
+    buf[2]  = 8;
+    buf[3]  = 0;
+    buf[4]  = handle & 0xFF;
+    buf[5]  = (handle >> 8) & 0xFF;
+    buf[6]  = interval & 0xFF;
+    buf[7]  = (interval >> 8) & 0xFF;
+    buf[8]  = latency & 0xFF;
+    buf[9]  = (latency >> 8) & 0xFF;
+    buf[10] = timeout & 0xFF;
+    buf[11] = (timeout >> 8) & 0xFF;
+    sle_dli_queue_event(s, buf, 12);
+}
+
 /* --------------------------------------------------------------------
  * Command engine
  * -------------------------------------------------------------------- */
@@ -892,6 +1040,14 @@ static void sle_dli_process_command(USBSleDliState *s,
         memcpy(s->connections[slot].peer_addr, &params[0], 6);
         s->connections[slot].remote_dev = NULL;
         s->connections[slot].remote_slot = -1;
+        /* Default PHY/connection parameters */
+        s->connections[slot].mcs_index = 4;     /* QPSK 1/2 */
+        s->connections[slot].bandwidth_mhz = 2; /* 2 MHz */
+        s->connections[slot].interval = 20;     /* 20 units */
+        s->connections[slot].latency = 0;
+        s->connections[slot].timeout = 500;     /* 500 units */
+        s->connections[slot].max_tx_octets = 251;
+        s->connections[slot].max_rx_octets = 251;
 
         /* Try to create a bidirectional link via the air medium */
         sle_air_connect(s, &params[0], slot);
@@ -965,6 +1121,184 @@ static void sle_dli_process_command(USBSleDliState *s,
             sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
         }
         break;
+
+    /* ----------------------------------------------------------------
+     * Link control commands (§8.5)
+     * ---------------------------------------------------------------- */
+
+    case DLI_OP_READ_PEER_FEATURES: {
+        /* params: [handle:2] → CmdStatus + PeerFeatures event */
+        if (plen < 2) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02); /* unknown connection */
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        /* Return remote device features if linked, else zeros */
+        uint8_t features[10] = {0};
+        if (conn->remote_dev) {
+            /* Simulate: copy features from local (peers share features) */
+            features[0] = 0xFF;
+            features[1] = 0x03;
+        }
+        sle_dli_peer_features_evt(s, handle, 0x00, features);
+        break;
+    }
+
+    case DLI_OP_READ_PEER_VERSION: {
+        /* params: [handle:2] → CmdStatus + PeerVersion event */
+        if (plen < 2) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        uint8_t ver = s->protocol_version;
+        uint16_t mfr = s->company_id;
+        uint16_t sub = s->sub_version;
+        if (conn->remote_dev) {
+            ver = conn->remote_dev->protocol_version;
+            mfr = conn->remote_dev->company_id;
+            sub = conn->remote_dev->sub_version;
+        }
+        sle_dli_peer_version_evt(s, handle, 0x00, ver, mfr, sub);
+        break;
+    }
+
+    case DLI_OP_SET_DATA_LENGTH: {
+        /* params: [handle:2] [max_tx:2] → CmdComplete */
+        if (plen < 4) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        uint16_t max_tx = params[2] | ((uint16_t)params[3] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_complete(s, opcode, 0x02, NULL, 0);
+            break;
+        }
+        conn->max_tx_octets = max_tx;
+        if (plen >= 6) {
+            conn->max_rx_octets = params[4] | ((uint16_t)params[5] << 8);
+        }
+        uint8_t rp[3];
+        rp[0] = handle & 0xFF;
+        rp[1] = (handle >> 8) & 0xFF;
+        rp[2] = 0x00;
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 3);
+        break;
+    }
+
+    case DLI_OP_READ_PHY_PARAM: {
+        /* params: [handle:2] → CmdComplete with PHY params */
+        if (plen < 2) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_complete(s, opcode, 0x02, NULL, 0);
+            break;
+        }
+        uint8_t rp[11];
+        rp[0] = handle & 0xFF;
+        rp[1] = (handle >> 8) & 0xFF;
+        rp[2] = 0x00; /* status */
+        rp[3] = 0;    /* tx_frame_type */
+        rp[4] = 0;    /* rx_frame_type */
+        rp[5] = conn->bandwidth_mhz; /* tx_bandwidth */
+        rp[6] = conn->bandwidth_mhz; /* rx_bandwidth */
+        rp[7] = 0;    /* tx_pilot_density */
+        rp[8] = 0;    /* rx_pilot_density */
+        rp[9] = 0;    /* tx_feedback_type */
+        rp[10] = 0;   /* rx_feedback_type */
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 11);
+        break;
+    }
+
+    case DLI_OP_SET_PHY_PARAM: {
+        /* params: [handle:2] [tx_frame:1] [rx_frame:1] [tx_bw:1] [rx_bw:1]
+         *         [tx_pilot:1] [rx_pilot:1] [tx_fb:1] [rx_fb:1]
+         * → CmdStatus + PhyParamUpdate event */
+        if (plen < 4) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        /* Apply bandwidth if present */
+        if (plen >= 6) {
+            conn->bandwidth_mhz = params[4];
+        }
+        sle_dli_phy_update_evt(s, handle, conn->mcs_index,
+                               conn->bandwidth_mhz);
+        break;
+    }
+
+    case DLI_OP_CONN_PARAM_UPDATE: {
+        /* params: [handle:2] [interval_min:2] [interval_max:2]
+         *         [latency:2] [timeout:2] → CmdStatus + ConnParamUpdate evt */
+        if (plen < 10) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        uint16_t imin   = params[2] | ((uint16_t)params[3] << 8);
+        uint16_t imax   = params[4] | ((uint16_t)params[5] << 8);
+        uint16_t lat    = params[6] | ((uint16_t)params[7] << 8);
+        uint16_t tmo    = params[8] | ((uint16_t)params[9] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        /* Pick midpoint of interval range */
+        conn->interval = (imin + imax) / 2;
+        conn->latency = lat;
+        conn->timeout = tmo;
+        sle_dli_conn_param_update_evt(s, handle, conn->interval,
+                                      conn->latency, conn->timeout);
+        break;
+    }
+
+    case DLI_OP_READ_RSSI: {
+        /* params: [handle:2] → CmdComplete with RSSI */
+        if (plen < 2) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_complete(s, opcode, 0x02, NULL, 0);
+            break;
+        }
+        uint8_t rp[4];
+        rp[0] = handle & 0xFF;
+        rp[1] = (handle >> 8) & 0xFF;
+        rp[2] = 0x00;         /* status */
+        rp[3] = (uint8_t)-50; /* RSSI: -50 dBm */
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 4);
+        break;
+    }
 
     default:
         /* Unknown command — return error */

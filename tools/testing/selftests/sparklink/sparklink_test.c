@@ -125,7 +125,7 @@ static void set_role(int fd, uint8_t role)
 
 	if (ret < 0 && errno == EBUSY) {
 		disconnect_all(fd);
-		usleep(50000);
+		usleep(10000);
 		ret = ioctl(fd, SL_IOCTL_SET_ROLE, &role);
 	}
 	if (ret < 0) {
@@ -902,8 +902,8 @@ static int wait_for_paired(int fd, int timeout_ms)
 		memset(&sec, 0, sizeof(sec));
 		if (ioctl(fd, SL_IOCTL_SEC_INFO, &sec) == 0 && sec.state >= 2)
 			return 0;
-		usleep(10000); /* 10ms */
-		elapsed += 10;
+		usleep(2000); /* 2ms */
+		elapsed += 2;
 	}
 	return -1;
 }
@@ -4262,7 +4262,7 @@ static void test_air_medium_connect(int fd)
 			}
 		}
 		/* Give EventPump time to process disconnect confirmations */
-		usleep(250000);
+		usleep(20000);
 	}
 
 	/* Step 1: sle_a broadcasts */
@@ -4309,7 +4309,7 @@ static void test_air_medium_connect(int fd)
 	}
 
 	/* Allow EventPump to process AdvReport events from INT URB */
-	usleep(200000);
+	usleep(20000);
 
 	int scan_count = ioctl(fd, SL_IOCTL_SCAN_RESULT_COUNT, NULL);
 
@@ -4399,7 +4399,7 @@ static void test_air_medium_connect(int fd)
 		ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
 
 		/* Wait for EventPump to deliver DataReceived event */
-		usleep(200000);
+		usleep(20000);
 
 		/* Find sle_a's connection handle via CONN_LIST */
 		struct sle_conn_list cl_a;
@@ -4618,7 +4618,7 @@ static void test_air_medium_bidir(int fd)
 			for (int j = 0; j < cl.count && j < 8; j++)
 				ioctl(fd, SL_IOCTL_DISCONNECT, &cl.handles[j]);
 		}
-		usleep(250000);
+		usleep(20000);
 	}
 
 	/* sle_a broadcasts */
@@ -4684,7 +4684,7 @@ static void test_air_medium_bidir(int fd)
 	/* Switch to sle_a, receive data, then send back */
 	target = (uint16_t)id_a;
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
-	usleep(1000000);
+	usleep(50000);
 
 	struct sle_conn_list cl_a;
 
@@ -4692,7 +4692,7 @@ static void test_air_medium_bidir(int fd)
 	ret = ioctl(fd, SL_IOCTL_CONN_LIST, &cl_a);
 	if (ret != 0 || cl_a.count == 0) {
 		/* USB event delivery may need extra time; retry once */
-		usleep(1000000);
+		usleep(50000);
 		ret = ioctl(fd, SL_IOCTL_CONN_LIST, &cl_a);
 	}
 	if (ret != 0 || cl_a.count == 0) {
@@ -4737,7 +4737,7 @@ static void test_air_medium_bidir(int fd)
 	/* Switch to sle_b, receive sle_a's data */
 	target = (uint16_t)id_b;
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
-	usleep(200000);
+	usleep(20000);
 
 	memset(&rd, 0, sizeof(rd));
 	rd.handle = hb;
@@ -4761,7 +4761,7 @@ static void test_air_medium_bidir(int fd)
 	} else {
 		printf("  WARN: sle%d DISCONNECT: %s\n", id_a, strerror(errno));
 	}
-	usleep(200000);
+	usleep(20000);
 
 	/* Verify sle_a has no connections */
 	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
@@ -4775,7 +4775,7 @@ static void test_air_medium_bidir(int fd)
 	/* Verify sle_b sees disconnect via EventPump */
 	target = (uint16_t)id_b;
 	ioctl(fd, SL_IOCTL_DEV_SWITCH, &target);
-	usleep(200000);
+	usleep(20000);
 	ret = ioctl(fd, SL_IOCTL_CONN_COUNT, NULL);
 	if (ret == 0) {
 		printf("  OK:   sle%d CONN_COUNT=0 (remote disconnect propagated)\n", id_b);
@@ -5885,7 +5885,7 @@ static int dli_send_cmd_retry(int fd, struct sle_dli_cmd *cmd)
 	int ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, cmd);
 
 	for (int i = 0; i < 3 && ret < 0 && errno == EBUSY; i++) {
-		usleep(50000);
+		usleep(10000);
 		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, cmd);
 	}
 	return ret;
@@ -7214,7 +7214,7 @@ static void test_conn_stale_handle_ops(int fd)
 	uint16_t dh = h;
 
 	ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
-	usleep(10000); /* wait for cleanup */
+	usleep(5000); /* wait for cleanup */
 
 	/* All operations on stale handle should fail */
 	struct sle_conn_info info;
@@ -7741,7 +7741,7 @@ static void test_dli_reset_behavior(int fd)
 	int ret = ioctl(fd, SL_IOCTL_DLI_RESET, NULL);
 
 	check("DLI_RESET", ret);
-	usleep(50000); /* wait for reset to propagate */
+	usleep(20000); /* wait for reset to propagate */
 
 	/* Check that subsystem state is still accessible after reset */
 	struct sle_sec_info si;
@@ -7771,7 +7771,7 @@ static void test_dli_reset_behavior(int fd)
 	/* Double reset — should be safe */
 	ret = ioctl(fd, SL_IOCTL_DLI_RESET, NULL);
 	check("DLI_RESET (second)", ret);
-	usleep(20000);
+	usleep(10000);
 
 	/* Verify manager operations still work after reset */
 	struct sle_subsys_stats ss;
@@ -8303,10 +8303,10 @@ static void test_supervision_timeout(int fd)
 	}
 
 	/* Step 4: Wait for timeout to expire (no more data activity).
-	 * Sleep 400ms to ensure the 100ms timeout fires
-	 * (EventPump runs every 100ms, so worst case 200ms latency).
+	 * Sleep 700ms to ensure the 100ms timeout fires
+	 * (EventPump heartbeat is 500ms, so worst case ~600ms latency).
 	 */
-	usleep(400000);
+	usleep(700000);
 
 	/* Step 5: Verify connection was disconnected by supervision timeout */
 	memset(&info, 0, sizeof(info));
@@ -10654,7 +10654,7 @@ static void test_dli_security_commands(int fd)
 		memset(&ms, 0, sizeof(ms));
 		if (ioctl(fd, SL_IOCTL_MGMT_STATS, &ms) == 0 && ms.pending == 0)
 			break;
-		usleep(100000);
+		usleep(10000);
 	}
 
 	/* Need a connection for pairing exchange commands */
@@ -10849,7 +10849,7 @@ static void test_dli_security_commands(int fd)
 		memset(&ms, 0, sizeof(ms));
 		if (ioctl(fd, SL_IOCTL_MGMT_STATS, &ms) == 0 && ms.pending == 0)
 			break;
-		usleep(100000);
+		usleep(10000);
 	}
 
 	/* RalReadSize (0x1C15) — no params, should return 0 initially */
@@ -11022,7 +11022,7 @@ static void test_dli_security_commands(int fd)
 		memset(&ms, 0, sizeof(ms));
 		if (ioctl(fd, SL_IOCTL_MGMT_STATS, &ms) == 0 && ms.pending == 0)
 			break;
-		usleep(100000);
+		usleep(10000);
 	}
 
 	/* SlbCfgAuthPsk (0x1C1A) — [remote_id:6][psk_len:1][psk:16] */
@@ -11191,8 +11191,8 @@ static void test_async_event_pump(int fd)
 	       connected);
 	ok++;
 
-	/* Allow EventPump to process (sleep ~150ms for at least 1 pump cycle) */
-	usleep(150000);
+	/* Allow EventPump to process events */
+	usleep(20000);
 
 	/* Check EVENT_STATS after burst */
 	struct sle_event_stats es1;
@@ -11236,8 +11236,8 @@ static void test_async_event_pump(int fd)
 			ioctl(fd, SL_IOCTL_DISCONNECT, &handles[i]);
 	}
 
-	/* After disconnect: another pump cycle should process disconnect events */
-	usleep(150000);
+	/* After disconnect: pump processes disconnect events */
+	usleep(20000);
 
 	struct sle_event_stats es2;
 

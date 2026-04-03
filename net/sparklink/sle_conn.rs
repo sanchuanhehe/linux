@@ -1678,6 +1678,36 @@ impl ConnManager {
         timed_out
     }
 
+    /// Return the number of jiffies until the next supervision
+    /// timeout fires, or `None` if no connected entry has a timeout.
+    pub fn next_supervision_jiffies(&self) -> Option<u64> {
+        let now = jiffies_now();
+        let mut earliest: Option<u64> = None;
+        for entry in self.connections.iter() {
+            if entry.state != ConnState::Connected {
+                continue;
+            }
+            if entry.last_activity == 0 {
+                continue;
+            }
+            let timeout_ms = u64::from(entry.params.supervision_timeout) * 10;
+            if timeout_ms == 0 {
+                continue;
+            }
+            let timeout_jiffies = msecs_to_jiffies(timeout_ms as u32) as u64;
+            let elapsed = now.wrapping_sub(entry.last_activity);
+            if elapsed < timeout_jiffies {
+                let remaining = timeout_jiffies - elapsed;
+                match earliest {
+                    Some(e) if remaining < e => earliest = Some(remaining),
+                    None => earliest = Some(remaining),
+                    _ => {}
+                }
+            }
+        }
+        earliest
+    }
+
     /// Force-disconnect a connection due to supervision timeout.
     ///
     /// Closes channels, resets state, and returns the peer address for

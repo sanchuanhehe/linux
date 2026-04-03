@@ -8303,10 +8303,11 @@ static void test_supervision_timeout(int fd)
 	}
 
 	/* Step 4: Wait for timeout to expire (no more data activity).
-	 * Sleep 700ms to ensure the 100ms timeout fires
-	 * (EventPump heartbeat is 500ms, so worst case ~600ms latency).
+	 * Sleep 200ms to ensure the 100ms supervision timeout fires.
+	 * The EventPump schedules precisely at the supervision deadline
+	 * so latency is minimal.
 	 */
-	usleep(700000);
+	usleep(200000);
 
 	/* Step 5: Verify connection was disconnected by supervision timeout */
 	memset(&info, 0, sizeof(info));

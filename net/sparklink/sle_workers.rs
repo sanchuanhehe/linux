@@ -439,6 +439,7 @@ impl WorkItem for EventPump {
         // (for read() delivery) and the DLI event ring (for DLI_POLL_EVENT).
         // Also resolve pending commands from the management plane.
         let mut _pumped = 0u32;
+        let mut rearm_jiffies = msecs_to_jiffies(EVENT_PUMP_HEARTBEAT_MS) as u64;
 
         // Collect tagged events from USB event ring first (minimal lock hold).
         let mut tagged_events: [(Option<u16>, Option<sle_dli::SleEvent>); 64] =
@@ -518,13 +519,20 @@ impl WorkItem for EventPump {
                             ));
                     }
                 }
+
+                // Compute rearm delay: use the nearest supervision
+                // deadline when connections exist, capped by heartbeat.
+                let heartbeat = msecs_to_jiffies(EVENT_PUMP_HEARTBEAT_MS) as u64;
+                rearm_jiffies = match shared.conn.next_supervision_jiffies() {
+                    Some(j) if j < heartbeat => j,
+                    _ => heartbeat,
+                };
             }
         }
-        // Re-arm with heartbeat interval for periodic maintenance
-        // (supervision timeouts, command expiry, GC).  Immediate event
-        // processing is triggered by kick_event_pump() from producers.
+        // Re-arm with computed interval — either the nearest supervision
+        // deadline or the heartbeat, whichever is sooner.
         let _ = workqueue::system()
-            .enqueue_delayed(this, msecs_to_jiffies(EVENT_PUMP_HEARTBEAT_MS));
+            .enqueue_delayed(this, rearm_jiffies as kernel::time::Jiffies);
     }
 }
 

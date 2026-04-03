@@ -1369,7 +1369,7 @@ impl ControllerBackend {
         self.send_command(SleOpcode::CreateConnection, peer_addr)
     }
 
-    /// Disconnect a link identified by `handle` (section 8.4.2).
+    /// Disconnect a link identified by `handle` (section 8.4.3).
     pub fn disconnect(&self, handle: u16) -> Result {
         let h = handle.to_le_bytes();
         self.send_command(SleOpcode::Disconnect, &h)

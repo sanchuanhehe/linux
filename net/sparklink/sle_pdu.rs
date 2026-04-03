@@ -549,6 +549,93 @@ pub fn crc12_adv_seed() -> u16 {
 }
 
 // ---------------------------------------------------------------------------
+// CRC-16 for transport layer data frames (TXS-20002-2025 section 3.6)
+//
+// Polynomial: G(x) = x^16 + x^15 + x^2 + 1  (0x8005, reflected 0xA001)
+// Default seed: 0x5555 (negotiable per standard)
+// Scope: entire packet (header + payload)
+// ---------------------------------------------------------------------------
+
+/// CRC-16 lookup table for polynomial 0x8005, LSB-first processing.
+#[rustfmt::skip]
+const CRC16_TABLE: [u16; 256] = [
+    0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,
+    0xC601, 0x06C0, 0x0780, 0xC741, 0x0500, 0xC5C1, 0xC481, 0x0440,
+    0xCC01, 0x0CC0, 0x0D80, 0xCD41, 0x0F00, 0xCFC1, 0xCE81, 0x0E40,
+    0x0A00, 0xCAC1, 0xCB81, 0x0B40, 0xC901, 0x09C0, 0x0880, 0xC841,
+    0xD801, 0x18C0, 0x1980, 0xD941, 0x1B00, 0xDBC1, 0xDA81, 0x1A40,
+    0x1E00, 0xDEC1, 0xDF81, 0x1F40, 0xDD01, 0x1DC0, 0x1C80, 0xDC41,
+    0x1400, 0xD4C1, 0xD581, 0x1540, 0xD701, 0x17C0, 0x1680, 0xD641,
+    0xD201, 0x12C0, 0x1380, 0xD341, 0x1100, 0xD1C1, 0xD081, 0x1040,
+    0xF001, 0x30C0, 0x3180, 0xF141, 0x3300, 0xF3C1, 0xF281, 0x3240,
+    0x3600, 0xF6C1, 0xF781, 0x3740, 0xF501, 0x35C0, 0x3480, 0xF441,
+    0x3C00, 0xFCC1, 0xFD81, 0x3D40, 0xFF01, 0x3FC0, 0x3E80, 0xFE41,
+    0xFA01, 0x3AC0, 0x3B80, 0xFB41, 0x3900, 0xF9C1, 0xF881, 0x3840,
+    0x2800, 0xE8C1, 0xE981, 0x2940, 0xEB01, 0x2BC0, 0x2A80, 0xEA41,
+    0xEE01, 0x2EC0, 0x2F80, 0xEF41, 0x2D00, 0xEDC1, 0xEC81, 0x2C40,
+    0xE401, 0x24C0, 0x2580, 0xE541, 0x2700, 0xE7C1, 0xE681, 0x2640,
+    0x2200, 0xE2C1, 0xE381, 0x2340, 0xE101, 0x21C0, 0x2080, 0xE041,
+    0xA001, 0x60C0, 0x6180, 0xA141, 0x6300, 0xA3C1, 0xA281, 0x6240,
+    0x6600, 0xA6C1, 0xA781, 0x6740, 0xA501, 0x65C0, 0x6480, 0xA441,
+    0x6C00, 0xACC1, 0xAD81, 0x6D40, 0xAF01, 0x6FC0, 0x6E80, 0xAE41,
+    0xAA01, 0x6AC0, 0x6B80, 0xAB41, 0x6900, 0xA9C1, 0xA881, 0x6840,
+    0x7800, 0xB8C1, 0xB981, 0x7940, 0xBB01, 0x7BC0, 0x7A80, 0xBA41,
+    0xBE01, 0x7EC0, 0x7F80, 0xBF41, 0x7D00, 0xBDC1, 0xBC81, 0x7C40,
+    0xB401, 0x74C0, 0x7580, 0xB541, 0x7700, 0xB7C1, 0xB681, 0x7640,
+    0x7200, 0xB2C1, 0xB381, 0x7340, 0xB101, 0x71C0, 0x7080, 0xB041,
+    0x5000, 0x90C1, 0x9181, 0x5140, 0x9301, 0x53C0, 0x5280, 0x9241,
+    0x9601, 0x56C0, 0x5780, 0x9741, 0x5500, 0x95C1, 0x9481, 0x5440,
+    0x9C01, 0x5CC0, 0x5D80, 0x9D41, 0x5F00, 0x9FC1, 0x9E81, 0x5E40,
+    0x5A00, 0x9AC1, 0x9B81, 0x5B40, 0x9901, 0x59C0, 0x5880, 0x9841,
+    0x8801, 0x48C0, 0x4980, 0x8941, 0x4B00, 0x8BC1, 0x8A81, 0x4A40,
+    0x4E00, 0x8EC1, 0x8F81, 0x4F40, 0x8D01, 0x4DC0, 0x4C80, 0x8C41,
+    0x4400, 0x84C1, 0x8581, 0x4540, 0x8701, 0x47C0, 0x4680, 0x8641,
+    0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040,
+];
+
+/// Default CRC-16 seed for transport layer data frames.
+pub const CRC16_DEFAULT_SEED: u16 = 0x5555;
+
+/// Compute CRC-16 over `data` with the given initial seed.
+///
+/// Uses polynomial 0x8005 (G(x) = x^16 + x^15 + x^2 + 1) in reflected
+/// (LSB-first) form. Table-driven: one byte per iteration.
+#[inline]
+pub fn crc16(seed: u16, data: &[u8]) -> u16 {
+    let mut crc = seed;
+    for &byte in data {
+        let idx = ((crc as u8) ^ byte) as usize;
+        crc = (crc >> 8) ^ CRC16_TABLE[idx];
+    }
+    crc
+}
+
+/// Verify CRC-16 of a packet: header+payload followed by 2-byte CRC (LE).
+///
+/// Returns `true` if the CRC matches.
+#[inline]
+pub fn crc16_verify(seed: u16, packet: &[u8]) -> bool {
+    if packet.len() < 2 {
+        return false;
+    }
+    let data_len = packet.len() - 2;
+    let computed = crc16(seed, &packet[..data_len]);
+    let stored = u16::from_le_bytes([packet[data_len], packet[data_len + 1]]);
+    computed == stored
+}
+
+/// Append CRC-16 (LE) to a mutable buffer at `data_len` offset.
+///
+/// The caller must ensure `buf.len() >= data_len + 2`.
+#[inline]
+pub fn crc16_append(seed: u16, buf: &mut [u8], data_len: usize) {
+    let crc = crc16(seed, &buf[..data_len]);
+    let bytes = crc.to_le_bytes();
+    buf[data_len] = bytes[0];
+    buf[data_len + 1] = bytes[1];
+}
+
+// ---------------------------------------------------------------------------
 // Full advertising PDU (header + data payload + CRC)
 // ---------------------------------------------------------------------------
 
@@ -650,4 +737,160 @@ impl AdvPdu {
     pub fn iter_adv_data(&self) -> AdvDataIter<'_> {
         AdvDataIter::new(&self.data[..self.data_len])
     }
+}
+
+// ---------------------------------------------------------------------------
+// Transport layer frame format (TXS-20002-2025 section 3.3)
+//
+// Basic frame:
+//   TCID(8) | FrameType(4)=0000 | O(1)=0 | C(1) | RFU(2)
+//   | Length(16 LE) | PI(8) | Data(N) | [CRC-16(2) if C=1]
+//
+// Enhanced frame (reliable/flow):
+//   TCID(8) | FrameType(4)!=0000 | O(1) | C(1)=1 | P(1) | RFU(1)
+//   | Length(16 LE) | PI(8) | TxSeq(14) | RFU(2) | Data(N) | CRC-16(2)
+// ---------------------------------------------------------------------------
+
+/// Transport frame types defined by TXS-20002-2025.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum TransportFrameType {
+    /// Basic frame — no sequence, optional CRC.
+    Basic = 0x00,
+    /// Aggregated frame.
+    Aggregated = 0x01,
+    /// Segmented frame.
+    Segmented = 0x02,
+    /// Bidirectional frame (type 3).
+    Bidi3 = 0x03,
+    /// Bidirectional frame (type 4).
+    Bidi4 = 0x04,
+    /// ACK / supervisory frame.
+    Ack = 0x05,
+}
+
+/// Header of a parsed transport frame.
+#[derive(Copy, Clone, Debug)]
+pub struct TransportHeader {
+    /// Transport Channel ID.
+    pub tcid: u8,
+    /// Frame type.
+    pub frame_type: u8,
+    /// Outgoing indicator (O bit).
+    pub outgoing: bool,
+    /// Checksum present (C bit).
+    pub checksum: bool,
+    /// Poll/priority (P bit, enhanced only).
+    pub poll: bool,
+    /// Payload length (from the Length field).
+    pub length: u16,
+    /// Protocol information byte.
+    pub pi: u8,
+    /// TX sequence number (14-bit, enhanced frames only; 0 for basic).
+    pub tx_seq: u16,
+    /// Request sequence / ACK number (14-bit, ACK frames only; 0 otherwise).
+    pub req_seq: u16,
+}
+
+/// Minimum header size for a basic frame (TCID + flags + length + PI).
+pub const TRANSPORT_BASIC_HDR_LEN: usize = 5;
+/// Additional bytes for enhanced frame header (TxSeq field).
+pub const TRANSPORT_ENH_HDR_EXTRA: usize = 2;
+/// Total enhanced frame header length.
+pub const TRANSPORT_ENH_HDR_LEN: usize = TRANSPORT_BASIC_HDR_LEN + TRANSPORT_ENH_HDR_EXTRA;
+/// CRC-16 trailer size.
+pub const TRANSPORT_CRC_LEN: usize = 2;
+
+/// Encode a basic-mode transport frame header into `buf`.
+///
+/// Returns the number of header bytes written (5).
+/// Caller appends data after the header, then optionally CRC-16.
+#[allow(dead_code)]
+pub fn encode_basic_header(buf: &mut [u8], tcid: u8, pi: u8, data_len: u16, crc: bool) -> usize {
+    // Byte 0: TCID
+    buf[0] = tcid;
+    // Byte 1: FrameType(4)=0000 | O(1)=0 | C(1) | RFU(2)=00
+    buf[1] = if crc { 0x04 } else { 0x00 }; // C bit at position 2
+    // Bytes 2-3: Length (LE16)
+    let len_bytes = data_len.to_le_bytes();
+    buf[2] = len_bytes[0];
+    buf[3] = len_bytes[1];
+    // Byte 4: PI
+    buf[4] = pi;
+    TRANSPORT_BASIC_HDR_LEN
+}
+
+/// Encode an enhanced-mode transport frame header into `buf`.
+///
+/// Returns the number of header bytes written (7).
+#[allow(dead_code)]
+pub fn encode_enhanced_header(
+    buf: &mut [u8],
+    tcid: u8,
+    frame_type: u8,
+    pi: u8,
+    tx_seq: u16,
+    data_len: u16,
+    poll: bool,
+) -> usize {
+    // Byte 0: TCID
+    buf[0] = tcid;
+    // Byte 1: FrameType(4) | O(1)=0 | C(1)=1 | P(1) | RFU(1)=0
+    let ft = (frame_type & 0x0F) << 4;
+    let c_bit = 0x04; // C=1 always for enhanced
+    let p_bit = if poll { 0x02 } else { 0x00 };
+    buf[1] = ft | c_bit | p_bit;
+    // Bytes 2-3: Length (LE16)
+    let len_bytes = data_len.to_le_bytes();
+    buf[2] = len_bytes[0];
+    buf[3] = len_bytes[1];
+    // Byte 4: PI
+    buf[4] = pi;
+    // Bytes 5-6: TxSeq(14) | RFU(2)=00, LE16
+    let seq_field = (tx_seq & 0x3FFF).to_le_bytes();
+    buf[5] = seq_field[0];
+    buf[6] = seq_field[1];
+    TRANSPORT_ENH_HDR_LEN
+}
+
+/// Parse a transport frame header from raw bytes.
+///
+/// Returns `None` if the buffer is too short for the detected frame type.
+#[allow(dead_code)]
+pub fn parse_transport_header(data: &[u8]) -> Option<TransportHeader> {
+    if data.len() < TRANSPORT_BASIC_HDR_LEN {
+        return None;
+    }
+    let tcid = data[0];
+    let flags = data[1];
+    let frame_type = (flags >> 4) & 0x0F;
+    let outgoing = (flags & 0x08) != 0;
+    let checksum = (flags & 0x04) != 0;
+    let poll = (flags & 0x02) != 0;
+    let length = u16::from_le_bytes([data[2], data[3]]);
+    let pi = data[4];
+
+    let (tx_seq, req_seq) = if frame_type != 0 {
+        // Enhanced frame — need 2 more bytes for TxSeq.
+        if data.len() < TRANSPORT_ENH_HDR_LEN {
+            return None;
+        }
+        let raw_seq = u16::from_le_bytes([data[5], data[6]]);
+        (raw_seq & 0x3FFF, 0u16)
+    } else {
+        (0, 0)
+    };
+
+    Some(TransportHeader {
+        tcid,
+        frame_type,
+        outgoing,
+        checksum,
+        poll,
+        length,
+        pi,
+        tx_seq,
+        req_seq,
+    })
 }

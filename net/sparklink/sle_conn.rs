@@ -90,6 +90,9 @@ pub struct TransportChannel {
     pub tx_credits: u16,
     /// RX credit count.
     pub rx_credits: u16,
+    /// Sliding window sequence state for reliable/flow modes.
+    /// Inactive (zeroed) when mode is Unreliable.
+    pub seq: SeqState,
 }
 
 /// Initial credit window for reliable transport channels.
@@ -100,6 +103,187 @@ const CREDIT_LOW_WATERMARK: u16 = 4;
 const CREDIT_GRANT_SIZE: u16 = 16;
 /// PDU type for credit grant on the management channel.
 pub const CREDIT_GRANT_PDU_TYPE: u8 = 0xFC;
+
+// ---------------------------------------------------------------------------
+// Sliding window sequence tracker (TXS-20002-2025 section 3.4)
+// ---------------------------------------------------------------------------
+
+/// Maximum sequence number space (14-bit, 0..16383).
+const SEQ_MODULUS: u16 = 1 << 14;
+/// Mask for 14-bit sequence arithmetic.
+const SEQ_MASK: u16 = SEQ_MODULUS - 1;
+
+/// Wrapping 14-bit sequence distance: `a - b` in [0, SEQ_MODULUS).
+#[inline]
+fn seq_distance(a: u16, b: u16) -> u16 {
+    (a.wrapping_sub(b)) & SEQ_MASK
+}
+
+/// Sliding window state for reliable/flow mode transport channels.
+///
+/// Implements the TX/RX state machines defined in TXS-20002-2025 section 3.4:
+/// - **TX side**: NextTxSeq, ExpectedAckSeq, ReTxSeq with bounded window
+/// - **RX side**: ExpectedTxSeq tracking with gap detection
+///
+/// This struct is only active when the channel's `TransportMode` is `Reliable`.
+/// `Unreliable` channels bypass all sequence logic.
+#[derive(Copy, Clone, Debug)]
+pub struct SeqState {
+    // --- TX side ---
+    /// Next sequence number to assign to a new outgoing PDU.
+    pub next_tx_seq: u16,
+    /// Oldest unacknowledged sequence number (peer has not ACKed up to here).
+    pub expected_ack_seq: u16,
+    /// Next sequence in the retransmission queue. When `retx_seq == next_tx_seq`,
+    /// there is nothing to retransmit.
+    pub retx_seq: u16,
+    /// Maximum number of unacknowledged PDUs allowed (negotiated).
+    pub tx_window: u16,
+
+    // --- RX side ---
+    /// Next expected in-order incoming sequence number.
+    pub expected_rx_seq: u16,
+    /// Tracks the highest sequence number buffered (for gap detection).
+    pub buffer_seq: u16,
+
+    // --- Counters ---
+    /// Number of successfully transmitted PDUs.
+    pub tx_count: u32,
+    /// Number of retransmitted PDUs.
+    pub retx_count: u32,
+    /// Number of received in-order PDUs.
+    pub rx_count: u32,
+    /// Number of out-of-order / duplicate PDUs dropped.
+    pub rx_drop_count: u32,
+}
+
+impl Default for SeqState {
+    fn default() -> Self {
+        Self {
+            next_tx_seq: 0,
+            expected_ack_seq: 0,
+            retx_seq: 0,
+            tx_window: INITIAL_CREDITS,
+            expected_rx_seq: 0,
+            buffer_seq: 0,
+            tx_count: 0,
+            retx_count: 0,
+            rx_count: 0,
+            rx_drop_count: 0,
+        }
+    }
+}
+
+/// Result of a TX window check.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TxAction {
+    /// Send a new PDU with the given sequence number.
+    SendNew(u16),
+    /// Retransmit the PDU with the given sequence number.
+    Retransmit(u16),
+    /// TX window is full, cannot send.
+    WindowFull,
+}
+
+/// Result of receiving a PDU with a particular sequence number.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RxAction {
+    /// PDU is in-order, deliver to upper layer.
+    Accept,
+    /// PDU fills a gap, buffer for reordering.
+    Buffer,
+    /// PDU is a duplicate or outside the window, discard.
+    Drop,
+}
+
+impl SeqState {
+    /// Determine the next TX action according to TXS-20002-2025 section 3.4.2.
+    ///
+    /// **TX rules**:
+    /// - If `ReTxSeq == NextTxSeq` (nothing to retransmit):
+    ///     - If window allows, assign `NextTxSeq` and advance.
+    /// - If `ReTxSeq < NextTxSeq`:
+    ///     - Retransmit the PDU at `ReTxSeq`, advance `ReTxSeq`.
+    pub fn next_tx_action(&mut self) -> TxAction {
+        if self.retx_seq == self.next_tx_seq {
+            // No pending retransmissions — try to send new.
+            let outstanding = seq_distance(self.next_tx_seq, self.expected_ack_seq);
+            if outstanding < self.tx_window {
+                let seq = self.next_tx_seq;
+                self.next_tx_seq = (self.next_tx_seq + 1) & SEQ_MASK;
+                self.retx_seq = self.next_tx_seq;
+                self.tx_count += 1;
+                TxAction::SendNew(seq)
+            } else {
+                TxAction::WindowFull
+            }
+        } else {
+            // Retransmission pending.
+            let seq = self.retx_seq;
+            self.retx_seq = (self.retx_seq + 1) & SEQ_MASK;
+            self.retx_count += 1;
+            TxAction::Retransmit(seq)
+        }
+    }
+
+    /// Process an incoming ACK (ReqSeq) from the peer.
+    ///
+    /// Advances `expected_ack_seq` to `ack_seq`, freeing window slots.
+    /// Returns the number of PDUs acknowledged.
+    pub fn process_ack(&mut self, ack_seq: u16) -> u16 {
+        let ack = ack_seq & SEQ_MASK;
+        let acked = seq_distance(ack, self.expected_ack_seq);
+        if acked > 0 && acked <= self.tx_window {
+            self.expected_ack_seq = ack;
+        }
+        acked
+    }
+
+    /// Trigger a full retransmission from `expected_ack_seq`.
+    ///
+    /// Sets `ReTxSeq = ExpectedAckSeq`, so subsequent `next_tx_action()`
+    /// calls will retransmit all unacknowledged PDUs before sending new ones.
+    pub fn trigger_retransmit(&mut self) {
+        self.retx_seq = self.expected_ack_seq;
+    }
+
+    /// Classify an incoming PDU by its TxSeq per TXS-20002-2025 section 3.4.4.
+    ///
+    /// **RX rules**:
+    /// - `TxSeq == ExpectedTxSeq`: in-order, accept, advance ExpectedTxSeq.
+    /// - `ExpectedTxSeq < TxSeq < BufferSeq + TxWindow`: out-of-order, buffer.
+    /// - Otherwise: duplicate or outside window, drop.
+    pub fn classify_rx(&mut self, tx_seq: u16) -> RxAction {
+        let seq = tx_seq & SEQ_MASK;
+        if seq == self.expected_rx_seq {
+            // In-order delivery.
+            self.expected_rx_seq = (self.expected_rx_seq + 1) & SEQ_MASK;
+            self.buffer_seq = self.expected_rx_seq;
+            self.rx_count += 1;
+            RxAction::Accept
+        } else {
+            let dist_from_expected = seq_distance(seq, self.expected_rx_seq);
+            if dist_from_expected > 0 && dist_from_expected < self.tx_window {
+                // Within the window but not the expected one — gap detected.
+                let dist_from_buffer = seq_distance(seq, self.buffer_seq);
+                if dist_from_buffer < self.tx_window {
+                    if seq_distance(seq + 1, self.buffer_seq) < self.tx_window {
+                        self.buffer_seq = (seq + 1) & SEQ_MASK;
+                    }
+                    self.rx_count += 1;
+                    RxAction::Buffer
+                } else {
+                    self.rx_drop_count += 1;
+                    RxAction::Drop
+                }
+            } else {
+                // Duplicate or outside window.
+                self.rx_drop_count += 1;
+                RxAction::Drop
+            }
+        }
+    }
+}
 
 impl TransportChannel {
     /// Create a channel with standard defaults.
@@ -113,6 +297,18 @@ impl TransportChannel {
             mps: mtu,
             tx_credits: 0,
             rx_credits: 0,
+            seq: SeqState {
+                next_tx_seq: 0,
+                expected_ack_seq: 0,
+                retx_seq: 0,
+                tx_window: INITIAL_CREDITS,
+                expected_rx_seq: 0,
+                buffer_seq: 0,
+                tx_count: 0,
+                retx_count: 0,
+                rx_count: 0,
+                rx_drop_count: 0,
+            },
         }
     }
 

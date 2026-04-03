@@ -1005,7 +1005,7 @@ Command groups:
    * - 0x01
      - 0x04xx
      - Basic
-     - Reset, ReadLocalVersion, ReadLocalFeatures, SetMacAddr
+     - ReadCmdLen, ReadCtrlBuffer, ReadLocalFeatures, ReadLocalVersion, SetMacAddr, ReadMacAddr, Reset, ...
    * - 0x03
      - 0x0Cxx
      - Broadcast
@@ -1017,7 +1017,7 @@ Command groups:
    * - 0x05
      - 0x14xx
      - Connection
-     - CreateConnection, Disconnect, SetConnParam, ReadRssi
+     - CreateConnection, CancelConnection, Disconnect, SlbCreateConnection
    * - 0x06
      - 0x18xx
      - Link control

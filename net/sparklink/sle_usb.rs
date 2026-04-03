@@ -510,24 +510,25 @@ pub struct DliUsbEvent {
 
 /// Parse a raw DLI event received on the interrupt IN endpoint.
 ///
-/// Wire format (no packet type byte — implicit from endpoint):
+/// Wire format per T/XS 10003-2025 §7.3 (no packet type byte — implicit
+/// from endpoint):
 ///
 ///     Bytes 0-1:   event_code (LE16)
-///     Byte 2:      parameter length
-///     Bytes 3..N:  parameters
+///     Bytes 2-3:   parameter length (LE16)
+///     Bytes 4..N:  parameters
 pub fn parse_event_packet(data: &[u8]) -> Result<DliUsbEvent> {
-    if data.len() < 3 {
+    if data.len() < 4 {
         return Err(EINVAL);
     }
     let event_code = u16::from_le_bytes([data[0], data[1]]);
-    let param_len = data[2] as usize;
+    let param_len = u16::from_le_bytes([data[2], data[3]]) as usize;
 
-    if data.len() < 3 + param_len {
+    if data.len() < 4 + param_len {
         return Err(EINVAL);
     }
 
     let mut params = KVec::with_capacity(param_len, GFP_KERNEL)?;
-    for &b in &data[3..3 + param_len] {
+    for &b in &data[4..4 + param_len] {
         params.push(b, GFP_KERNEL)?;
     }
 

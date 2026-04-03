@@ -380,19 +380,20 @@ static void sle_air_relay_data(USBSleDliState *sender,
     uint16_t recv_handle = receiver->connections[remote_slot].handle;
     uint8_t buf[MAX_EVENT_SIZE];
     int plen = 2 + payload_len;  /* handle + payload */
-    if (3 + plen > MAX_EVENT_SIZE) {
-        plen = MAX_EVENT_SIZE - 3;
+    if (4 + plen > MAX_EVENT_SIZE) {
+        plen = MAX_EVENT_SIZE - 4;
         payload_len = plen - 2;
     }
     buf[0] = DLI_EVT_DATA_RECEIVED & 0xFF;
     buf[1] = (DLI_EVT_DATA_RECEIVED >> 8) & 0xFF;
-    buf[2] = (uint8_t)plen;
-    buf[3] = recv_handle & 0xFF;
-    buf[4] = (recv_handle >> 8) & 0xFF;
+    buf[2] = (uint8_t)(plen & 0xFF);
+    buf[3] = (uint8_t)(plen >> 8);
+    buf[4] = recv_handle & 0xFF;
+    buf[5] = (recv_handle >> 8) & 0xFF;
     if (payload_len > 0) {
-        memcpy(&buf[5], payload, payload_len);
+        memcpy(&buf[6], payload, payload_len);
     }
-    sle_dli_queue_event(receiver, buf, 5 + payload_len);
+    sle_dli_queue_event(receiver, buf, 6 + payload_len);
     sle_dli_schedule_wakeup(receiver);
 }
 
@@ -564,12 +565,12 @@ static int sle_dli_dequeue_data(USBSleDliState *s,
 /*
  * Build a CommandComplete event packet.
  *
- * Wire format:
+ * Wire format (T/XS 10003-2025 §7.3):
  *   [0..1] event_code = 0x0002 (LE16)
- *   [2]    total_param_len
- *   [3..4] opcode (LE16)
- *   [5]    status
- *   [6..N] return params
+ *   [2..3] total_param_len (LE16)
+ *   [4..5] opcode (LE16)
+ *   [6]    status
+ *   [7..N] return params
  */
 static void sle_dli_cmd_complete(USBSleDliState *s, uint16_t opcode,
                                  uint8_t status,
@@ -580,95 +581,99 @@ static void sle_dli_cmd_complete(USBSleDliState *s, uint16_t opcode,
 
     buf[0] = DLI_EVT_CMD_COMPLETE & 0xFF;
     buf[1] = (DLI_EVT_CMD_COMPLETE >> 8) & 0xFF;
-    buf[2] = (uint8_t)total_plen;
-    buf[3] = opcode & 0xFF;
-    buf[4] = (opcode >> 8) & 0xFF;
-    buf[5] = status;
+    buf[2] = (uint8_t)(total_plen & 0xFF);
+    buf[3] = (uint8_t)(total_plen >> 8);
+    buf[4] = opcode & 0xFF;
+    buf[5] = (opcode >> 8) & 0xFF;
+    buf[6] = status;
     if (plen > 0 && params) {
-        memcpy(&buf[6], params, MIN(plen, MAX_EVENT_SIZE - 6));
+        memcpy(&buf[7], params, MIN(plen, MAX_EVENT_SIZE - 7));
     }
-    sle_dli_queue_event(s, buf, 6 + plen);
+    sle_dli_queue_event(s, buf, 7 + plen);
 }
 
 /*
  * Build a CommandStatus event packet.
  *
- * Wire format:
+ * Wire format (T/XS 10003-2025 §7.3):
  *   [0..1] event_code = 0x0001 (LE16)
- *   [2]    param_len = 3
- *   [3]    status
- *   [4..5] opcode (LE16)
+ *   [2..3] param_len = 3 (LE16)
+ *   [4]    status
+ *   [5..6] opcode (LE16)
  */
 static void sle_dli_cmd_status(USBSleDliState *s, uint16_t opcode,
                                uint8_t status)
 {
-    uint8_t buf[6];
+    uint8_t buf[7];
     buf[0] = DLI_EVT_CMD_STATUS & 0xFF;
     buf[1] = (DLI_EVT_CMD_STATUS >> 8) & 0xFF;
     buf[2] = 3;
-    buf[3] = status;
-    buf[4] = opcode & 0xFF;
-    buf[5] = (opcode >> 8) & 0xFF;
-    sle_dli_queue_event(s, buf, 6);
+    buf[3] = 0;
+    buf[4] = status;
+    buf[5] = opcode & 0xFF;
+    buf[6] = (opcode >> 8) & 0xFF;
+    sle_dli_queue_event(s, buf, 7);
 }
 
 /*
  * Build a ConnectionEstablished event.
  *
- * Wire format:
+ * Wire format (T/XS 10003-2025 §7.3):
  *   [0..1] event_code = 0x0015 (LE16)
- *   [2]    param_len = 9
- *   [3]    status
- *   [4..5] handle (LE16)
- *   [6..11] peer addr (6 bytes)
+ *   [2..3] param_len = 9 (LE16)
+ *   [4]    status
+ *   [5..6] handle (LE16)
+ *   [7..12] peer addr (6 bytes)
  */
 static void sle_dli_conn_complete(USBSleDliState *s, uint8_t status,
                                   uint16_t handle,
                                   const uint8_t *addr)
 {
-    uint8_t buf[12];
+    uint8_t buf[13];
     buf[0]  = DLI_EVT_CONN_ESTABLISHED & 0xFF;
     buf[1]  = (DLI_EVT_CONN_ESTABLISHED >> 8) & 0xFF;
     buf[2]  = 9;
-    buf[3]  = status;
-    buf[4]  = handle & 0xFF;
-    buf[5]  = (handle >> 8) & 0xFF;
-    memcpy(&buf[6], addr, 6);
-    sle_dli_queue_event(s, buf, 12);
+    buf[3]  = 0;
+    buf[4]  = status;
+    buf[5]  = handle & 0xFF;
+    buf[6]  = (handle >> 8) & 0xFF;
+    memcpy(&buf[7], addr, 6);
+    sle_dli_queue_event(s, buf, 13);
 }
 
 /*
  * Build a Disconnected event.
  *
- * Wire format:
+ * Wire format (T/XS 10003-2025 §7.3):
  *   [0..1] event_code = 0x0005 (LE16)
- *   [2]    param_len = 3
- *   [3..4] handle (LE16)
- *   [5]    reason
+ *   [2..3] param_len = 3 (LE16)
+ *   [4..5] handle (LE16)
+ *   [6]    reason
  */
 static void sle_dli_disconnected(USBSleDliState *s, uint16_t handle,
                                  uint8_t reason)
 {
-    uint8_t buf[6];
+    uint8_t buf[7];
     buf[0] = DLI_EVT_DISCONNECTED & 0xFF;
     buf[1] = (DLI_EVT_DISCONNECTED >> 8) & 0xFF;
     buf[2] = 3;
-    buf[3] = handle & 0xFF;
-    buf[4] = (handle >> 8) & 0xFF;
-    buf[5] = reason;
-    sle_dli_queue_event(s, buf, 6);
+    buf[3] = 0;
+    buf[4] = handle & 0xFF;
+    buf[5] = (handle >> 8) & 0xFF;
+    buf[6] = reason;
+    sle_dli_queue_event(s, buf, 7);
 }
 
 /*
  * Build a BroadcastReport event.
  *
- * Wire format:
+ * Wire format (T/XS 10003-2025 §7.3):
  *   [0..1] event_code = 0x001A (LE16)
- *   [2]    param_len
- *   [3..8] addr (6 bytes)
- *   [9]    rssi
- *   [10]   data_len
- *   [11..N] advertising data (TLV)
+ *   [2..3] param_len (LE16)
+ *   [4..9] addr (6 bytes)
+ *   [10]   rssi
+ *   [11]   data_len
+ *   [12..N] advertising data (TLV)
  */
 static void sle_dli_broadcast_report(USBSleDliState *s,
                                      const SleDliPeer *peer)
@@ -694,25 +699,32 @@ static void sle_dli_broadcast_report(USBSleDliState *s,
     int plen = 6 + 1 + 1 + adv_len; /* addr + rssi + data_len + data */
     buf[0]  = DLI_EVT_BROADCAST_REPORT & 0xFF;
     buf[1]  = (DLI_EVT_BROADCAST_REPORT >> 8) & 0xFF;
-    buf[2]  = (uint8_t)plen;
-    memcpy(&buf[3], peer->addr, 6);
-    buf[9]  = (uint8_t)peer->rssi;
-    buf[10] = (uint8_t)adv_len;
-    memcpy(&buf[11], adv_data, adv_len);
-    sle_dli_queue_event(s, buf, 11 + adv_len);
+    buf[2]  = (uint8_t)(plen & 0xFF);
+    buf[3]  = (uint8_t)(plen >> 8);
+    memcpy(&buf[4], peer->addr, 6);
+    buf[10] = (uint8_t)peer->rssi;
+    buf[11] = (uint8_t)adv_len;
+    memcpy(&buf[12], adv_data, adv_len);
+    sle_dli_queue_event(s, buf, 12 + adv_len);
 }
 
 /*
  * Build a HardwareError event.
+ *
+ * Wire format (T/XS 10003-2025 §7.3):
+ *   [0..1] event_code = 0x000A (LE16)
+ *   [2..3] param_len = 1 (LE16)
+ *   [4]    error code
  */
 static void sle_dli_hw_error(USBSleDliState *s, uint8_t code)
 {
-    uint8_t buf[4];
+    uint8_t buf[5];
     buf[0] = DLI_EVT_HW_ERROR & 0xFF;
     buf[1] = (DLI_EVT_HW_ERROR >> 8) & 0xFF;
     buf[2] = 1;
-    buf[3] = code;
-    sle_dli_queue_event(s, buf, 4);
+    buf[3] = 0;
+    buf[4] = code;
+    sle_dli_queue_event(s, buf, 5);
 }
 
 /* --------------------------------------------------------------------
@@ -776,11 +788,11 @@ static void sle_dli_process_command(USBSleDliState *s,
          * Return:
          *   version(1) + company_id(2) + sub_version(2)
          *
-         * The guest parses this as a 4-byte fw_version at offset [6..9]
+         * The guest parses this as a 4-byte fw_version at offset [7..10]
          * in the raw event response. Since the event is:
-         *   [0..1] evt_code  [2] plen  [3..4] opcode
-         *   [5] status  [6] version  [7..8] company_id  [9..10] sub_version
-         * The guest reads le32 from offset 6, which spans
+         *   [0..1] evt_code  [2..3] plen  [4..5] opcode
+         *   [6] status  [7] version  [8..9] company_id  [10..11] sub_version
+         * The guest reads le32 from offset 7, which spans
          * version(1) + company_id(2) + sub_version[0](1).
          */
         uint8_t rp[5];

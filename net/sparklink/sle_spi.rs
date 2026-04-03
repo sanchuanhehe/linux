@@ -193,16 +193,16 @@ pub fn parse_spi_rx_frame(data: &[u8]) -> Option<SpiFrame> {
 
     match pkt_type {
         DliPacketType::Event => {
-            if data.len() < 4 {
+            if data.len() < 5 {
                 return None;
             }
             let event_code = u16::from_le_bytes([data[1], data[2]]);
-            let param_len = data[3] as usize;
-            if data.len() < 4 + param_len {
+            let param_len = u16::from_le_bytes([data[3], data[4]]) as usize;
+            if data.len() < 5 + param_len {
                 return None;
             }
             let mut params = KVec::new();
-            for &b in &data[4..4 + param_len] {
+            for &b in &data[5..5 + param_len] {
                 let _ = params.push(b, GFP_KERNEL);
             }
             Some(SpiFrame::Event { event_code, params })

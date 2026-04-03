@@ -63,8 +63,8 @@ pub const MAX_BAUD_RATE: u32 = 3_000_000;
 /// Command frame header size: type(1) + opcode(2) + len(1) = 4.
 pub const CMD_HEADER_SIZE: usize = 4;
 
-/// Event frame header size: type(1) + event_code(2) + len(1) = 4.
-pub const EVENT_HEADER_SIZE: usize = 4;
+/// Event frame header size: type(1) + event_code(2) + len(2) = 5.
+pub const EVENT_HEADER_SIZE: usize = 5;
 
 /// Data frame header size: type(1) + handle(2) + len(2) = 5.
 pub const DATA_HEADER_SIZE: usize = 5;
@@ -167,8 +167,8 @@ impl UartParser {
                 };
                 // Header size depends on type
                 let hdr_size = match pkt_type {
-                    DliPacketType::Command | DliPacketType::Event => 3,
-                    _ => 4, // data types: handle(2) + len(2)
+                    DliPacketType::Command => 3,
+                    _ => 4, // Event: event_code(2)+len(2); Data: handle(2)+len(2)
                 };
                 self.state = RxState::ReadHeader {
                     pkt_type,
@@ -194,7 +194,7 @@ impl UartParser {
                 }
                 // Header complete, determine payload length
                 let payload_len = match pkt_type {
-                    DliPacketType::Command | DliPacketType::Event => self.header[2] as usize,
+                    DliPacketType::Command => self.header[2] as usize,
                     _ => u16::from_le_bytes([self.header[2], self.header[3]]) as usize,
                 };
                 if payload_len == 0 {
@@ -315,8 +315,10 @@ pub fn encode_event(event_code: u16, params: &[u8], buf: &mut [u8]) -> usize {
     let ec_bytes = event_code.to_le_bytes();
     buf[1] = ec_bytes[0];
     buf[2] = ec_bytes[1];
-    buf[3] = params.len() as u8;
-    buf[4..total].copy_from_slice(params);
+    let plen_bytes = (params.len() as u16).to_le_bytes();
+    buf[3] = plen_bytes[0];
+    buf[4] = plen_bytes[1];
+    buf[5..total].copy_from_slice(params);
     total
 }
 

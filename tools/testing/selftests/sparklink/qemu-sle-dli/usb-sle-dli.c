@@ -113,6 +113,29 @@
 #define DLI_OP_REJECT_ENC_PARAM   0x1C06
 #define DLI_OP_READ_ENC_ALGO      0x1C07
 #define DLI_OP_START_PAIRING      0x1C08
+#define DLI_OP_PAIR_INFO_EXCH_RPL 0x1C09
+#define DLI_OP_PAIR_OPT_CONFIRM  0x1C0A
+#define DLI_OP_PAIR_OPT_ACCEPT   0x1C0B
+#define DLI_OP_PAIR_EXT_DATA     0x1C0C
+#define DLI_OP_PAIR_PASSKEY_KEY  0x1C0D
+#define DLI_OP_PAIR_RANDOM       0x1C0E
+#define DLI_OP_PAIR_CONFIRM      0x1C0F
+#define DLI_OP_DHKEY_VERIFY      0x1C10
+#define DLI_OP_PAIR_FAIL         0x1C11
+#define DLI_OP_RAL_ADD           0x1C12
+#define DLI_OP_RAL_REMOVE        0x1C13
+#define DLI_OP_RAL_CLEAR         0x1C14
+#define DLI_OP_RAL_READ_SIZE     0x1C15
+#define DLI_OP_RAL_READ_PEER_RPA 0x1C16
+#define DLI_OP_RAL_READ_LOCAL_RPA 0x1C17
+#define DLI_OP_RPA_SET_ENABLE    0x1C18
+#define DLI_OP_RPA_SET_TIMEOUT   0x1C19
+#define DLI_OP_SLB_CFG_AUTH_PSK  0x1C1A
+#define DLI_OP_SLB_DEL_AUTH_PSK  0x1C1B
+#define DLI_OP_SLB_CFG_AUTH_PWD  0x1C1C
+#define DLI_OP_SLB_DEL_AUTH_PWD  0x1C1D
+#define DLI_OP_SLB_CFG_CIPHER   0x1C1E
+#define DLI_OP_SLB_READ_CIPHER  0x1C1F
 
 /* DLI event codes */
 #define DLI_EVT_CMD_STATUS        0x0001
@@ -138,11 +161,24 @@
 #define DLI_EVT_CONN_PARAM_UPDATE 0x0019
 #define DLI_EVT_READ_PEER_POWER   0x001B
 
+/* Pairing events (§9.1.22–§9.1.32) */
+#define DLI_EVT_PAIR_INFO_EXCH    0x001E
+#define DLI_EVT_PAIR_INFO_REPORT  0x001F
+#define DLI_EVT_PAIR_OPT_REPORT  0x0020
+#define DLI_EVT_REMOTE_PUBKEY    0x0021
+#define DLI_EVT_PAIR_EXT_DATA    0x0022
+#define DLI_EVT_PASSKEY_NOTIFY   0x0023
+#define DLI_EVT_PAIR_RANDOM      0x0024
+#define DLI_EVT_PAIR_CONFIRM     0x0025
+#define DLI_EVT_DHKEY_VERIFY     0x0026
+#define DLI_EVT_PAIR_FAIL        0x0027
+
 /* Controller limits */
 #define MAX_CONNECTIONS   8
 #define MAX_EVENT_QUEUE   64
 #define MAX_DATA_QUEUE    16
 #define MAX_EVENT_SIZE    64
+#define MAX_RAL_ENTRIES   16
 #define MAX_DATA_SIZE     520
 #define MAX_PEERS         4
 
@@ -190,6 +226,18 @@ typedef struct SleDliPeer {
     int     name_len;
     uint8_t discovery_level;
 } SleDliPeer;
+
+/* Resolving Address List entry */
+typedef struct SleDliRalEntry {
+    bool    used;
+    uint8_t resolve_algo;
+    uint8_t peer_id_type;
+    uint8_t peer_id[6];
+    uint8_t peer_irkid;
+    uint8_t local_irkid;
+    uint8_t peer_irk[16];
+    uint8_t local_irk[16];
+} SleDliRalEntry;
 
 /* Per-connection state in the controller */
 typedef struct SleDliConn {
@@ -246,6 +294,17 @@ struct USBSleDliState {
 
     /* Simulated peers */
     SleDliPeer peers[MAX_PEERS];
+
+    /* Resolving Address List */
+    SleDliRalEntry ral[MAX_RAL_ENTRIES];
+    int            ral_count;
+    bool           rpa_enabled;
+    uint16_t       rpa_timeout;   /* seconds */
+
+    /* SLB cipher algorithm config */
+    uint8_t  slb_cipher_algo_type;
+    uint8_t  slb_cipher_comm_type;
+    uint8_t  slb_cipher_priority[8];
 
     /* Event queue (interrupt IN + compat bulk IN) */
     SleDliEvent event_queue[MAX_EVENT_QUEUE];
@@ -1747,6 +1806,480 @@ static void sle_dli_process_command(USBSleDliState *s,
             buf[6] = 1;
             sle_dli_queue_event(s, buf, 7);
         }
+        break;
+    }
+
+    /* ----------------------------------------------------------------
+     * Pairing exchange commands (§8.6.9–§8.6.17)
+     * ---------------------------------------------------------------- */
+
+    case DLI_OP_PAIR_INFO_EXCH_RPL: {
+        /* params: [handle:2][io_cap:1][oob:1][auth_req:1][max_key:1]
+         *         [sec_dist:1][cipher_cap:4][psk:1] → CmdStatus
+         * Then queue PairInfoReport event on remote. */
+        if (plen < 3) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        /* Queue PairInfoReport on remote */
+        if (conn->remote_dev) {
+            uint8_t buf[4 + 12];
+            buf[0] = DLI_EVT_PAIR_INFO_REPORT & 0xFF;
+            buf[1] = (DLI_EVT_PAIR_INFO_REPORT >> 8) & 0xFF;
+            int elen = MIN(plen, 12);
+            buf[2] = elen & 0xFF;
+            buf[3] = (elen >> 8) & 0xFF;
+            memcpy(&buf[4], params, elen);
+            sle_dli_queue_event(conn->remote_dev, buf, 4 + elen);
+        }
+        break;
+    }
+
+    case DLI_OP_PAIR_OPT_CONFIRM: {
+        /* params: [handle:2][key_len:1][auth_method:1][cipher:4][pubkey:32]
+         * → CmdStatus + PairOptionReport event on remote */
+        if (plen < 4) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        if (conn->remote_dev) {
+            uint8_t buf[4 + 40];
+            buf[0] = DLI_EVT_PAIR_OPT_REPORT & 0xFF;
+            buf[1] = (DLI_EVT_PAIR_OPT_REPORT >> 8) & 0xFF;
+            int elen = MIN(plen, 40);
+            buf[2] = elen & 0xFF;
+            buf[3] = (elen >> 8) & 0xFF;
+            memcpy(&buf[4], params, elen);
+            sle_dli_queue_event(conn->remote_dev, buf, 4 + elen);
+        }
+        break;
+    }
+
+    case DLI_OP_PAIR_OPT_ACCEPT: {
+        /* params: [handle:2][pubkey:32] → CmdStatus
+         * + RemotePublicKey event on remote */
+        if (plen < 2) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        if (conn->remote_dev && plen > 2) {
+            uint8_t buf[4 + 34];
+            buf[0] = DLI_EVT_REMOTE_PUBKEY & 0xFF;
+            buf[1] = (DLI_EVT_REMOTE_PUBKEY >> 8) & 0xFF;
+            int elen = MIN(plen, 34);
+            buf[2] = elen & 0xFF;
+            buf[3] = (elen >> 8) & 0xFF;
+            memcpy(&buf[4], params, elen);
+            sle_dli_queue_event(conn->remote_dev, buf, 4 + elen);
+        }
+        break;
+    }
+
+    case DLI_OP_PAIR_EXT_DATA: {
+        /* params: [handle:2][ext_pubkey_x:32][ext_pubkey_y:32]
+         * → CmdStatus + PairExtData event on remote */
+        if (plen < 2) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        if (conn->remote_dev) {
+            int elen = MIN(plen, 66);
+            uint8_t buf[4 + 66];
+            buf[0] = DLI_EVT_PAIR_EXT_DATA & 0xFF;
+            buf[1] = (DLI_EVT_PAIR_EXT_DATA >> 8) & 0xFF;
+            buf[2] = elen & 0xFF;
+            buf[3] = (elen >> 8) & 0xFF;
+            memcpy(&buf[4], params, elen);
+            sle_dli_queue_event(conn->remote_dev, buf, 4 + elen);
+        }
+        break;
+    }
+
+    case DLI_OP_PAIR_PASSKEY_KEY: {
+        /* params: [handle:2][key_type:1] → CmdStatus
+         * + PasskeyNotify event on remote */
+        if (plen < 3) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        if (conn->remote_dev) {
+            uint8_t buf[7];
+            buf[0] = DLI_EVT_PASSKEY_NOTIFY & 0xFF;
+            buf[1] = (DLI_EVT_PASSKEY_NOTIFY >> 8) & 0xFF;
+            buf[2] = 3;
+            buf[3] = 0;
+            buf[4] = handle & 0xFF;
+            buf[5] = (handle >> 8) & 0xFF;
+            buf[6] = params[2]; /* key_type */
+            sle_dli_queue_event(conn->remote_dev, buf, 7);
+        }
+        break;
+    }
+
+    case DLI_OP_PAIR_RANDOM: {
+        /* params: [handle:2][random:16] → CmdStatus
+         * + PairRandomReport on remote */
+        if (plen < 18) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        if (conn->remote_dev) {
+            uint8_t buf[4 + 18];
+            buf[0] = DLI_EVT_PAIR_RANDOM & 0xFF;
+            buf[1] = (DLI_EVT_PAIR_RANDOM >> 8) & 0xFF;
+            buf[2] = 18;
+            buf[3] = 0;
+            memcpy(&buf[4], params, 18);
+            sle_dli_queue_event(conn->remote_dev, buf, 22);
+        }
+        break;
+    }
+
+    case DLI_OP_PAIR_CONFIRM: {
+        /* params: [handle:2][confirm:16] → CmdStatus
+         * + PairConfirmReport on remote */
+        if (plen < 18) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        if (conn->remote_dev) {
+            uint8_t buf[4 + 18];
+            buf[0] = DLI_EVT_PAIR_CONFIRM & 0xFF;
+            buf[1] = (DLI_EVT_PAIR_CONFIRM >> 8) & 0xFF;
+            buf[2] = 18;
+            buf[3] = 0;
+            memcpy(&buf[4], params, 18);
+            sle_dli_queue_event(conn->remote_dev, buf, 22);
+        }
+        break;
+    }
+
+    case DLI_OP_DHKEY_VERIFY: {
+        /* params: [handle:2][dhkey_check:16] → CmdStatus
+         * + DhkeyVerifyReport on remote */
+        if (plen < 18) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        if (conn->remote_dev) {
+            uint8_t buf[4 + 18];
+            buf[0] = DLI_EVT_DHKEY_VERIFY & 0xFF;
+            buf[1] = (DLI_EVT_DHKEY_VERIFY >> 8) & 0xFF;
+            buf[2] = 18;
+            buf[3] = 0;
+            memcpy(&buf[4], params, 18);
+            sle_dli_queue_event(conn->remote_dev, buf, 22);
+        }
+        break;
+    }
+
+    case DLI_OP_PAIR_FAIL: {
+        /* params: [handle:2][reason:1] → CmdStatus
+         * + PairFailReport on remote */
+        if (plen < 3) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        if (conn->remote_dev) {
+            uint8_t buf[7];
+            buf[0] = DLI_EVT_PAIR_FAIL & 0xFF;
+            buf[1] = (DLI_EVT_PAIR_FAIL >> 8) & 0xFF;
+            buf[2] = 3;
+            buf[3] = 0;
+            buf[4] = handle & 0xFF;
+            buf[5] = (handle >> 8) & 0xFF;
+            buf[6] = params[2]; /* reason */
+            sle_dli_queue_event(conn->remote_dev, buf, 7);
+        }
+        break;
+    }
+
+    /* ----------------------------------------------------------------
+     * RAL management commands (§8.6.18–§8.6.25)
+     * ---------------------------------------------------------------- */
+
+    case DLI_OP_RAL_ADD: {
+        /* params: [resolve_algo:1][peer_id_type:1][peer_id:6]
+         *         [peer_irkid:1][local_irkid:1][peer_irk:16][local_irk:16]
+         * → CmdComplete */
+        if (plen < 42) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        if (s->ral_count >= MAX_RAL_ENTRIES) {
+            sle_dli_cmd_complete(s, opcode, 0x07, NULL, 0); /* memory full */
+            break;
+        }
+        /* Check for duplicate */
+        for (int i = 0; i < MAX_RAL_ENTRIES; i++) {
+            if (s->ral[i].used &&
+                s->ral[i].peer_id_type == params[1] &&
+                memcmp(s->ral[i].peer_id, &params[2], 6) == 0) {
+                sle_dli_cmd_complete(s, opcode, 0x11, NULL, 0); /* exists */
+                goto done;
+            }
+        }
+        /* Find empty slot */
+        for (int i = 0; i < MAX_RAL_ENTRIES; i++) {
+            if (!s->ral[i].used) {
+                s->ral[i].used = true;
+                s->ral[i].resolve_algo = params[0];
+                s->ral[i].peer_id_type = params[1];
+                memcpy(s->ral[i].peer_id, &params[2], 6);
+                s->ral[i].peer_irkid = params[8];
+                s->ral[i].local_irkid = params[9];
+                memcpy(s->ral[i].peer_irk, &params[10], 16);
+                memcpy(s->ral[i].local_irk, &params[26], 16);
+                s->ral_count++;
+                break;
+            }
+        }
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+    done:
+        break;
+    }
+
+    case DLI_OP_RAL_REMOVE: {
+        /* params: [peer_id_type:1][peer_id:6] → CmdComplete */
+        if (plen < 7) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        bool found = false;
+        for (int i = 0; i < MAX_RAL_ENTRIES; i++) {
+            if (s->ral[i].used &&
+                s->ral[i].peer_id_type == params[0] &&
+                memcmp(s->ral[i].peer_id, &params[1], 6) == 0) {
+                memset(&s->ral[i], 0, sizeof(s->ral[i]));
+                s->ral_count--;
+                found = true;
+                break;
+            }
+        }
+        sle_dli_cmd_complete(s, opcode, found ? 0x00 : 0x02, NULL, 0);
+        break;
+    }
+
+    case DLI_OP_RAL_CLEAR: {
+        /* no params → CmdComplete */
+        memset(s->ral, 0, sizeof(s->ral));
+        s->ral_count = 0;
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+    }
+
+    case DLI_OP_RAL_READ_SIZE: {
+        /* no params → CmdComplete with [size:1] */
+        uint8_t rp[1];
+        rp[0] = (uint8_t)s->ral_count;
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 1);
+        break;
+    }
+
+    case DLI_OP_RAL_READ_PEER_RPA: {
+        /* params: [peer_id_type:1][peer_id:6] → CmdComplete with [rpa:6] */
+        if (plen < 7) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        /* Find the RAL entry and generate a simulated RPA */
+        uint8_t rpa[6] = {0};
+        uint8_t status = 0x02; /* not found */
+        for (int i = 0; i < MAX_RAL_ENTRIES; i++) {
+            if (s->ral[i].used &&
+                s->ral[i].peer_id_type == params[0] &&
+                memcmp(s->ral[i].peer_id, &params[1], 6) == 0) {
+                /* Generate deterministic RPA from peer_irk */
+                for (int j = 0; j < 6; j++)
+                    rpa[j] = s->ral[i].peer_irk[j] ^ s->ral[i].peer_id[j];
+                rpa[3] = (rpa[3] & 0x3F) | 0x40; /* resolvable marker */
+                status = 0x00;
+                break;
+            }
+        }
+        sle_dli_cmd_complete(s, opcode, status, rpa, 6);
+        break;
+    }
+
+    case DLI_OP_RAL_READ_LOCAL_RPA: {
+        /* params: [local_id_type:1][local_id:6] → CmdComplete with [rpa:6] */
+        if (plen < 7) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        uint8_t rpa[6] = {0};
+        uint8_t status = 0x02; /* not found */
+        for (int i = 0; i < MAX_RAL_ENTRIES; i++) {
+            if (s->ral[i].used &&
+                s->ral[i].peer_id_type == params[0] &&
+                memcmp(s->ral[i].peer_id, &params[1], 6) == 0) {
+                /* Generate deterministic RPA from local_irk */
+                for (int j = 0; j < 6; j++)
+                    rpa[j] = s->ral[i].local_irk[j] ^ s->ral[i].peer_id[j];
+                rpa[3] = (rpa[3] & 0x3F) | 0x40; /* resolvable marker */
+                status = 0x00;
+                break;
+            }
+        }
+        sle_dli_cmd_complete(s, opcode, status, rpa, 6);
+        break;
+    }
+
+    case DLI_OP_RPA_SET_ENABLE: {
+        /* params: [enable:1] → CmdComplete */
+        if (plen < 1) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        s->rpa_enabled = (params[0] != 0);
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+    }
+
+    case DLI_OP_RPA_SET_TIMEOUT: {
+        /* params: [timeout:2] → CmdComplete */
+        if (plen < 2) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        s->rpa_timeout = params[0] | ((uint16_t)params[1] << 8);
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+    }
+
+    /* ----------------------------------------------------------------
+     * SLB security commands (§8.6.26–§8.6.31)
+     * ---------------------------------------------------------------- */
+
+    case DLI_OP_SLB_CFG_AUTH_PSK: {
+        /* params: [remote_id:6][psk_len:1][psk:N] → CmdComplete */
+        if (plen < 7) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        /* Accept and ACK (simulation only stores nothing) */
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+    }
+
+    case DLI_OP_SLB_DEL_AUTH_PSK: {
+        /* params: [remote_id:6] → CmdComplete */
+        if (plen < 6) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+    }
+
+    case DLI_OP_SLB_CFG_AUTH_PWD: {
+        /* params: [remote_id:6][pwd_len:1][pwd:N] → CmdComplete */
+        if (plen < 7) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+    }
+
+    case DLI_OP_SLB_DEL_AUTH_PWD: {
+        /* params: [remote_id:6] → CmdComplete */
+        if (plen < 6) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+    }
+
+    case DLI_OP_SLB_CFG_CIPHER: {
+        /* params: [algo_type:1][comm_type:1][priority:8] → CmdComplete */
+        if (plen < 10) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        s->slb_cipher_algo_type = params[0];
+        s->slb_cipher_comm_type = params[1];
+        memcpy(s->slb_cipher_priority, &params[2], 8);
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+    }
+
+    case DLI_OP_SLB_READ_CIPHER: {
+        /* params: [algo_type:1][comm_type:1]
+         * → CmdComplete with [algo_type:1][comm_type:1][priority:8] */
+        if (plen < 2) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        uint8_t rp[10];
+        rp[0] = s->slb_cipher_algo_type;
+        rp[1] = s->slb_cipher_comm_type;
+        memcpy(&rp[2], s->slb_cipher_priority, 8);
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 10);
         break;
     }
 

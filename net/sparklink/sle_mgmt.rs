@@ -265,7 +265,7 @@ pub(crate) struct CmdRequest {
 }
 
 /// Maximum depth of the command request queue.
-const CMD_REQ_QUEUE_DEPTH: usize = 16;
+const CMD_REQ_QUEUE_DEPTH: usize = 64;
 
 /// Fixed-size ring buffer for outgoing command requests.
 ///

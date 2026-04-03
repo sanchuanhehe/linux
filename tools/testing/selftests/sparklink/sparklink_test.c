@@ -10669,6 +10669,534 @@ static void test_dli_extended_commands(int fd)
 	printf("  Extended DLI commands: %d OK, %d FAIL\n", ok, fail);
 }
 
+/* ------------------------------------------------------------------ *
+ * test_dli_security_commands — exercise security DLI opcodes via raw *
+ *   DLI_SEND_CMD for pairing exchange, RAL, and SLB config.         *
+ *                                                                    *
+ * Tests opcodes added to the QEMU virtual controller:               *
+ *   0x1C09 PairInfoExchangeReply                                    *
+ *   0x1C0A PairOptionConfirm                                        *
+ *   0x1C0B PairOptionAccept                                         *
+ *   0x1C0C PairExtData                                              *
+ *   0x1C0D PairPasskeyKey                                           *
+ *   0x1C0E PairRandom                                               *
+ *   0x1C0F PairConfirm                                              *
+ *   0x1C10 DhkeyVerify                                              *
+ *   0x1C11 PairFail                                                 *
+ *   0x1C12 RalAdd                                                   *
+ *   0x1C13 RalRemove                                                *
+ *   0x1C14 RalClear                                                 *
+ *   0x1C15 RalReadSize                                              *
+ *   0x1C16 RalReadPeerRpa                                           *
+ *   0x1C17 RalReadLocalRpa                                          *
+ *   0x1C18 RpaSetEnable                                             *
+ *   0x1C19 RpaSetTimeout                                            *
+ *   0x1C1A SlbCfgAuthPsk                                            *
+ *   0x1C1B SlbDelAuthPsk                                            *
+ *   0x1C1C SlbCfgAuthPwd                                            *
+ *   0x1C1D SlbDelAuthPwd                                            *
+ *   0x1C1E SlbCfgCipher                                             *
+ *   0x1C1F SlbReadCipher                                            *
+ * ------------------------------------------------------------------ */
+static void test_dli_security_commands(int fd)
+{
+	test_header("DLI: security command coverage (pairing + RAL + SLB)");
+	int ret, ok = 0, fail = 0;
+	struct sle_dli_cmd cmd;
+
+	/* Wait for pending commands from prior tests to be fully processed */
+	for (int w = 0; w < 20; w++) {
+		struct sle_mgmt_stats ms;
+		memset(&ms, 0, sizeof(ms));
+		if (ioctl(fd, SL_IOCTL_MGMT_STATS, &ms) == 0 && ms.pending == 0)
+			break;
+		usleep(100000);
+	}
+
+	/* Need a connection for pairing exchange commands */
+	struct sle_connect_params cp;
+
+	memset(&cp, 0, sizeof(cp));
+	uint8_t peer[6] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
+
+	memcpy(cp.peer_addr, peer, 6);
+	cp.timeout_10ms = 300;
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	uint16_t h16 = (ret >= 0) ? (uint16_t)ret : 0;
+
+	if (ret < 0) {
+		printf("  WARN: connect for security tests failed, skipping conn-based tests\n");
+	}
+
+	/* ---- Phase 1: Pairing exchange commands (need connection) ---- */
+
+	if (h16 > 0) {
+		/* PairInfoExchangeReply (0x1C09) — [handle:2][io_cap:1][...] */
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.opcode = 0x1C09;
+		cmd.param_len = 12;
+		cmd.params[0] = h16 & 0xFF;
+		cmd.params[1] = (h16 >> 8) & 0xFF;
+		cmd.params[2] = 0x03; /* io_cap: DisplayYesNo */
+		cmd.params[3] = 0;    /* oob */
+		cmd.params[4] = 0x01; /* auth_req */
+		cmd.params[5] = 16;   /* max_key_len */
+		cmd.params[6] = 0;    /* sec_dist */
+		cmd.params[7] = 0x03; /* cipher_cap byte 0 */
+		cmd.params[8] = 0;
+		cmd.params[9] = 0;
+		cmd.params[10] = 0;
+		cmd.params[11] = 0;   /* psk_indicator */
+		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		if (ret == 0) {
+			printf("  OK:   PairInfoExchReply (0x1C09) accepted\n");
+			ok++;
+		} else {
+			printf("  FAIL: PairInfoExchReply (0x1C09) errno=%d\n", errno);
+			fail++;
+		}
+
+		/* PairOptionConfirm (0x1C0A) — [handle:2][key_len:1][auth:1][cipher:4] */
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.opcode = 0x1C0A;
+		cmd.param_len = 8;
+		cmd.params[0] = h16 & 0xFF;
+		cmd.params[1] = (h16 >> 8) & 0xFF;
+		cmd.params[2] = 16;   /* key_len */
+		cmd.params[3] = 0x00; /* auth_method: JustWorks */
+		cmd.params[4] = 0x01; /* cipher algo byte 0 */
+		cmd.params[5] = 0;
+		cmd.params[6] = 0;
+		cmd.params[7] = 0;
+		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		if (ret == 0) {
+			printf("  OK:   PairOptConfirm (0x1C0A) accepted\n");
+			ok++;
+		} else {
+			printf("  FAIL: PairOptConfirm (0x1C0A) errno=%d\n", errno);
+			fail++;
+		}
+
+		/* PairOptionAccept (0x1C0B) — [handle:2][pubkey:32] */
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.opcode = 0x1C0B;
+		cmd.param_len = 34;
+		cmd.params[0] = h16 & 0xFF;
+		cmd.params[1] = (h16 >> 8) & 0xFF;
+		for (int i = 0; i < 32; i++)
+			cmd.params[2 + i] = (uint8_t)(0xA0 + i);
+		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		if (ret == 0) {
+			printf("  OK:   PairOptAccept (0x1C0B) accepted\n");
+			ok++;
+		} else {
+			printf("  FAIL: PairOptAccept (0x1C0B) errno=%d\n", errno);
+			fail++;
+		}
+
+		/* PairExtData (0x1C0C) — [handle:2][xpub_x:32][xpub_y:32] */
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.opcode = 0x1C0C;
+		cmd.param_len = 66;
+		cmd.params[0] = h16 & 0xFF;
+		cmd.params[1] = (h16 >> 8) & 0xFF;
+		for (int i = 0; i < 64; i++)
+			cmd.params[2 + i] = (uint8_t)(0x10 + i);
+		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		if (ret == 0) {
+			printf("  OK:   PairExtData (0x1C0C) accepted\n");
+			ok++;
+		} else {
+			printf("  FAIL: PairExtData (0x1C0C) errno=%d\n", errno);
+			fail++;
+		}
+
+		/* PairPasskeyKey (0x1C0D) — [handle:2][key_type:1] */
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.opcode = 0x1C0D;
+		cmd.param_len = 3;
+		cmd.params[0] = h16 & 0xFF;
+		cmd.params[1] = (h16 >> 8) & 0xFF;
+		cmd.params[2] = 0; /* key_type: input */
+		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		if (ret == 0) {
+			printf("  OK:   PairPasskeyKey (0x1C0D) accepted\n");
+			ok++;
+		} else {
+			printf("  FAIL: PairPasskeyKey (0x1C0D) errno=%d\n", errno);
+			fail++;
+		}
+
+		/* PairRandom (0x1C0E) — [handle:2][random:16] */
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.opcode = 0x1C0E;
+		cmd.param_len = 18;
+		cmd.params[0] = h16 & 0xFF;
+		cmd.params[1] = (h16 >> 8) & 0xFF;
+		for (int i = 0; i < 16; i++)
+			cmd.params[2 + i] = (uint8_t)(0x42 + i);
+		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		if (ret == 0) {
+			printf("  OK:   PairRandom (0x1C0E) accepted\n");
+			ok++;
+		} else {
+			printf("  FAIL: PairRandom (0x1C0E) errno=%d\n", errno);
+			fail++;
+		}
+
+		/* PairConfirm (0x1C0F) — [handle:2][confirm:16] */
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.opcode = 0x1C0F;
+		cmd.param_len = 18;
+		cmd.params[0] = h16 & 0xFF;
+		cmd.params[1] = (h16 >> 8) & 0xFF;
+		for (int i = 0; i < 16; i++)
+			cmd.params[2 + i] = (uint8_t)(0xC0 + i);
+		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		if (ret == 0) {
+			printf("  OK:   PairConfirm (0x1C0F) accepted\n");
+			ok++;
+		} else {
+			printf("  FAIL: PairConfirm (0x1C0F) errno=%d\n", errno);
+			fail++;
+		}
+
+		/* DhkeyVerify (0x1C10) — [handle:2][dhkey_check:16] */
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.opcode = 0x1C10;
+		cmd.param_len = 18;
+		cmd.params[0] = h16 & 0xFF;
+		cmd.params[1] = (h16 >> 8) & 0xFF;
+		for (int i = 0; i < 16; i++)
+			cmd.params[2 + i] = (uint8_t)(0xD0 + i);
+		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		if (ret == 0) {
+			printf("  OK:   DhkeyVerify (0x1C10) accepted\n");
+			ok++;
+		} else {
+			printf("  FAIL: DhkeyVerify (0x1C10) errno=%d\n", errno);
+			fail++;
+		}
+
+		/* PairFail (0x1C11) — [handle:2][reason:1] */
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.opcode = 0x1C11;
+		cmd.param_len = 3;
+		cmd.params[0] = h16 & 0xFF;
+		cmd.params[1] = (h16 >> 8) & 0xFF;
+		cmd.params[2] = 0x05; /* reason: PairingNotSupported */
+		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+		if (ret == 0) {
+			printf("  OK:   PairFail (0x1C11) accepted\n");
+			ok++;
+		} else {
+			printf("  FAIL: PairFail (0x1C11) errno=%d\n", errno);
+			fail++;
+		}
+
+		ioctl(fd, SL_IOCTL_DISCONNECT, &h16);
+	}
+
+	/* ---- Phase 2: RAL management commands (no connection needed) ---- */
+
+	/* Wait for prior commands to drain */
+	for (int w = 0; w < 20; w++) {
+		struct sle_mgmt_stats ms;
+		memset(&ms, 0, sizeof(ms));
+		if (ioctl(fd, SL_IOCTL_MGMT_STATS, &ms) == 0 && ms.pending == 0)
+			break;
+		usleep(100000);
+	}
+
+	/* RalReadSize (0x1C15) — no params, should return 0 initially */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C15;
+	cmd.param_len = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   RalReadSize (0x1C15) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: RalReadSize (0x1C15) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* RalAdd (0x1C12) — [algo:1][type:1][id:6][pirkid:1][lirkid:1][pirk:16][lirk:16] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C12;
+	cmd.param_len = 42;
+	cmd.params[0] = 0x01; /* resolve_algo */
+	cmd.params[1] = 0x00; /* peer_id_type */
+	cmd.params[2] = 0x11; /* peer_id[0] */
+	cmd.params[3] = 0x22;
+	cmd.params[4] = 0x33;
+	cmd.params[5] = 0x44;
+	cmd.params[6] = 0x55;
+	cmd.params[7] = 0x66; /* peer_id[5] */
+	cmd.params[8] = 1;    /* peer_irkid */
+	cmd.params[9] = 2;    /* local_irkid */
+	for (int i = 0; i < 16; i++) {
+		cmd.params[10 + i] = (uint8_t)(0xA0 + i); /* peer_irk */
+		cmd.params[26 + i] = (uint8_t)(0xB0 + i); /* local_irk */
+	}
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   RalAdd (0x1C12) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: RalAdd (0x1C12) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* RalReadSize again — should be 1 */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C15;
+	cmd.param_len = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   RalReadSize (0x1C15) after add\n");
+		ok++;
+	} else {
+		printf("  FAIL: RalReadSize (0x1C15) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* RalReadPeerRpa (0x1C16) — [type:1][id:6] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C16;
+	cmd.param_len = 7;
+	cmd.params[0] = 0x00;
+	cmd.params[1] = 0x11;
+	cmd.params[2] = 0x22;
+	cmd.params[3] = 0x33;
+	cmd.params[4] = 0x44;
+	cmd.params[5] = 0x55;
+	cmd.params[6] = 0x66;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   RalReadPeerRpa (0x1C16) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: RalReadPeerRpa (0x1C16) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* RalReadLocalRpa (0x1C17) — [type:1][id:6] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C17;
+	cmd.param_len = 7;
+	cmd.params[0] = 0x00;
+	cmd.params[1] = 0x11;
+	cmd.params[2] = 0x22;
+	cmd.params[3] = 0x33;
+	cmd.params[4] = 0x44;
+	cmd.params[5] = 0x55;
+	cmd.params[6] = 0x66;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   RalReadLocalRpa (0x1C17) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: RalReadLocalRpa (0x1C17) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* RpaSetEnable (0x1C18) — [enable:1] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C18;
+	cmd.param_len = 1;
+	cmd.params[0] = 1; /* enable */
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   RpaSetEnable (0x1C18) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: RpaSetEnable (0x1C18) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* RpaSetTimeout (0x1C19) — [timeout:2] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C19;
+	cmd.param_len = 2;
+	cmd.params[0] = 0x84; /* 900 seconds = 0x0384 LE */
+	cmd.params[1] = 0x03;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   RpaSetTimeout (0x1C19) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: RpaSetTimeout (0x1C19) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* Disable RPA before RAL ops */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C18;
+	cmd.param_len = 1;
+	cmd.params[0] = 0; /* disable */
+	ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+
+	/* RalRemove (0x1C13) — [type:1][id:6] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C13;
+	cmd.param_len = 7;
+	cmd.params[0] = 0x00;
+	cmd.params[1] = 0x11;
+	cmd.params[2] = 0x22;
+	cmd.params[3] = 0x33;
+	cmd.params[4] = 0x44;
+	cmd.params[5] = 0x55;
+	cmd.params[6] = 0x66;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   RalRemove (0x1C13) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: RalRemove (0x1C13) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* RalClear (0x1C14) — no params */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C14;
+	cmd.param_len = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   RalClear (0x1C14) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: RalClear (0x1C14) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* ---- Phase 3: SLB security commands ---- */
+
+	/* Wait for prior commands to drain */
+	for (int w = 0; w < 20; w++) {
+		struct sle_mgmt_stats ms;
+		memset(&ms, 0, sizeof(ms));
+		if (ioctl(fd, SL_IOCTL_MGMT_STATS, &ms) == 0 && ms.pending == 0)
+			break;
+		usleep(100000);
+	}
+
+	/* SlbCfgAuthPsk (0x1C1A) — [remote_id:6][psk_len:1][psk:16] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C1A;
+	cmd.param_len = 23;
+	cmd.params[0] = 0xAA; /* remote_id */
+	cmd.params[1] = 0xBB;
+	cmd.params[2] = 0xCC;
+	cmd.params[3] = 0xDD;
+	cmd.params[4] = 0xEE;
+	cmd.params[5] = 0xFF;
+	cmd.params[6] = 16; /* psk_len */
+	for (int i = 0; i < 16; i++)
+		cmd.params[7 + i] = (uint8_t)i;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   SlbCfgAuthPsk (0x1C1A) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: SlbCfgAuthPsk (0x1C1A) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* SlbDelAuthPsk (0x1C1B) — [remote_id:6] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C1B;
+	cmd.param_len = 6;
+	cmd.params[0] = 0xAA;
+	cmd.params[1] = 0xBB;
+	cmd.params[2] = 0xCC;
+	cmd.params[3] = 0xDD;
+	cmd.params[4] = 0xEE;
+	cmd.params[5] = 0xFF;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   SlbDelAuthPsk (0x1C1B) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: SlbDelAuthPsk (0x1C1B) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* SlbCfgAuthPwd (0x1C1C) — [remote_id:6][pwd_len:1][pwd:8] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C1C;
+	cmd.param_len = 15;
+	cmd.params[0] = 0xAA;
+	cmd.params[1] = 0xBB;
+	cmd.params[2] = 0xCC;
+	cmd.params[3] = 0xDD;
+	cmd.params[4] = 0xEE;
+	cmd.params[5] = 0xFF;
+	cmd.params[6] = 8;
+	memcpy(&cmd.params[7], "test1234", 8);
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   SlbCfgAuthPwd (0x1C1C) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: SlbCfgAuthPwd (0x1C1C) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* SlbDelAuthPwd (0x1C1D) — [remote_id:6] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C1D;
+	cmd.param_len = 6;
+	cmd.params[0] = 0xAA;
+	cmd.params[1] = 0xBB;
+	cmd.params[2] = 0xCC;
+	cmd.params[3] = 0xDD;
+	cmd.params[4] = 0xEE;
+	cmd.params[5] = 0xFF;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   SlbDelAuthPwd (0x1C1D) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: SlbDelAuthPwd (0x1C1D) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* SlbCfgCipher (0x1C1E) — [algo_type:1][comm_type:1][priority:8] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C1E;
+	cmd.param_len = 10;
+	cmd.params[0] = 0x01; /* algo_type: GKE */
+	cmd.params[1] = 0x01; /* comm_type: unicast */
+	for (int i = 0; i < 8; i++)
+		cmd.params[2 + i] = (uint8_t)(i + 1); /* priority list */
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   SlbCfgCipher (0x1C1E) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: SlbCfgCipher (0x1C1E) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* SlbReadCipher (0x1C1F) — [algo_type:1][comm_type:1] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1C1F;
+	cmd.param_len = 2;
+	cmd.params[0] = 0x01; /* algo_type */
+	cmd.params[1] = 0x01; /* comm_type */
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   SlbReadCipher (0x1C1F) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: SlbReadCipher (0x1C1F) errno=%d\n", errno);
+		fail++;
+	}
+
+	printf("  Security DLI commands: %d OK, %d FAIL\n", ok, fail);
+}
+
 /*
  * Async event pump throughput and robustness.
  *
@@ -11263,6 +11791,7 @@ int main(void)
 	test_ssap_remote_ioctls(fd);
 	test_capability_negotiation(fd);
 	test_dli_extended_commands(fd);
+	test_dli_security_commands(fd);
 	test_async_event_pump(fd);
 	test_usb_controller_ops(fd);
 	test_ioctl_fuzz(fd);

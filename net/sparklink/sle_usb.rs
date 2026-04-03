@@ -146,6 +146,8 @@ extern "C" {
     fn sle_usb_dev_send_data(dev_id: i32, handle: u16, data: *const u8, len: i32) -> i32;
     fn sle_usb_dev_start_evt(dev_id: i32) -> i32;
     fn sle_usb_dev_stop_evt(dev_id: i32);
+    fn sle_usb_dev_start_data(dev_id: i32) -> i32;
+    fn sle_usb_dev_stop_data(dev_id: i32);
     fn sle_usb_dev_init_controller(dev_id: i32) -> i32;
     fn sle_usb_dev_get_fw_version(dev_id: i32) -> u32;
     fn sle_usb_dev_get_mac(dev_id: i32, mac: *mut u8) -> i32;
@@ -348,6 +350,26 @@ pub(crate) extern "C" fn sparklink_usb_complete(
     // during the completion callback. length is the actual bytes
     // transferred, guaranteed <= buffer size by USB core.
     let slice = unsafe { core::slice::from_raw_parts(data, len) };
+
+    // Check if this is a DLI async data packet (0xA3 prefix, from Bulk IN)
+    if len >= 5 && slice[0] == 0xA3 {
+        // Parse DLI async data: [0xA3][link_id_seg:2][plen:2][payload...]
+        let link_id_seg = u16::from_le_bytes([slice[1], slice[2]]);
+        let handle = (link_id_seg >> 4) & 0x0FFF;
+        let payload = &slice[5..];
+        let mut data_vec = KVec::new();
+        for &b in payload {
+            let _ = data_vec.push(b, GFP_KERNEL);
+        }
+        let sle_evt = SleEvent::DataReceived {
+            handle,
+            data: data_vec,
+        };
+        if let Some(ref mut ring) = *USB_EVENT_RING.lock() {
+            ring.push_tagged(dev_id, sle_evt);
+        }
+        return;
+    }
 
     // Try to parse as a DLI event packet
     match parse_event_packet(slice) {
@@ -708,18 +730,6 @@ pub fn event_to_sle(evt: &DliUsbEvent) -> Option<SleEvent> {
                 method: evt.params[6],
             })
         }
-        // DataReceived (0xFC01, vendor-defined): [handle:2] [payload:N]
-        0xFC01 => {
-            if evt.params.len() < 2 {
-                return None;
-            }
-            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
-            let mut data = KVec::new();
-            for &b in &evt.params[2..] {
-                let _ = data.push(b, GFP_KERNEL);
-            }
-            Some(SleEvent::DataReceived { handle, data })
-        }
         _ => None,
     }
 }
@@ -952,13 +962,19 @@ impl SleController for UsbController {
             pr_warn!("sparklink-usb: event listener start failed: {}\n", ret);
             // Non-fatal: controller can still send commands.
         }
+        // Start bulk IN listener for async data (T/XS 10003-2025 §7.4).
+        let ret = unsafe { sle_usb_dev_start_data(i32::from(self.dev_id)) };
+        if ret < 0 {
+            pr_warn!("sparklink-usb: data listener start failed: {}\n", ret);
+        }
         pr_info!("sparklink-usb: open dev_id={}\n", self.dev_id);
         Ok(())
     }
 
     fn close(&self) {
-        // SAFETY: dev_id was validated during probe; stop_evt is idempotent.
+        // SAFETY: dev_id was validated during probe; stop is idempotent.
         unsafe { sle_usb_dev_stop_evt(i32::from(self.dev_id)) };
+        unsafe { sle_usb_dev_stop_data(i32::from(self.dev_id)) };
         pr_info!("sparklink-usb: close dev_id={}\n", self.dev_id);
     }
 

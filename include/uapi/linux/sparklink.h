@@ -404,9 +404,6 @@ enum sparklink_dli_event_code {
 	SPARKLINK_DLI_EVT_SYNC_UC_CONN_DONE	= 0x0039, /* 9.1.49 */
 	SPARKLINK_DLI_EVT_SYNC_MC_CONN_REQ	= 0x003A, /* 9.1.50 */
 	SPARKLINK_DLI_EVT_SYNC_MC_CONN_DONE	= 0x003B, /* 9.1.51 */
-
-	/* Vendor-defined events (0xFC01-0xFFFF) */
-	SPARKLINK_DLI_EVT_DATA_RECEIVED		= 0xFC01, /* QEMU test data relay */
 };
 
 #endif /* _UAPI_LINUX_SPARKLINK_H */

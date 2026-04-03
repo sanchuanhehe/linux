@@ -27,7 +27,7 @@ KBUILD="${KBUILD:-$LINUX_SRC/build}"
 BZIMAGE="$KBUILD/arch/x86/boot/bzImage"
 WORKDIR="$SCRIPT_DIR/.qemu_test"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
-SLE_DLI_DEVICE="${SLE_DLI_DEVICE:-0}"
+SLE_DLI_DEVICE="${SLE_DLI_DEVICE:-1}"
 
 VERBOSE=0
 if [[ "${1:-}" == "--verbose" ]]; then

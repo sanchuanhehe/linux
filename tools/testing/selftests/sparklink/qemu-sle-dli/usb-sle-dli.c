@@ -82,7 +82,6 @@
 #define DLI_EVT_CONN_ESTABLISHED  0x0015
 #define DLI_EVT_BROADCAST_REPORT  0x001A
 #define DLI_EVT_PAIR_REQUEST      0x001D
-#define DLI_EVT_DATA_RECEIVED     0xFC01  /* vendor-defined, avoids 0x0020 PairOptionReport */
 
 /* Controller limits */
 #define MAX_CONNECTIONS   8
@@ -345,7 +344,7 @@ static bool sle_air_connect(USBSleDliState *initiator,
     return true;
 }
 
-/* Relay data from one connected device to its peer */
+/* Relay data from one connected device to its peer via Bulk IN (standard path) */
 static void sle_air_relay_data(USBSleDliState *sender,
                                int conn_slot,
                                const uint8_t *data, int len)
@@ -365,7 +364,7 @@ static void sle_air_relay_data(USBSleDliState *sender,
     /*
      * Extract payload from the DLI async data packet:
      *   [0]    = 0xA3 (DLI_PKT_ASYNC_DATA)
-     *   [1..2] = handle (sender-side)
+     *   [1..2] = link_id_seg (sender handle encoded)
      *   [3..4] = payload length (LE16)
      *   [5..N] = payload
      */
@@ -376,24 +375,27 @@ static void sle_air_relay_data(USBSleDliState *sender,
         payload_len = len - 5;
     }
 
-    /* Build DataReceived event on the receiver side */
+    /*
+     * Rebuild a standard 0xA3 async data packet with the receiver's handle
+     * and queue it to the data queue for delivery via Bulk IN (0x92).
+     */
     uint16_t recv_handle = receiver->connections[remote_slot].handle;
-    uint8_t buf[MAX_EVENT_SIZE];
-    int plen = 2 + payload_len;  /* handle + payload */
-    if (4 + plen > MAX_EVENT_SIZE) {
-        plen = MAX_EVENT_SIZE - 4;
-        payload_len = plen - 2;
+    uint16_t link_id_seg = (recv_handle & 0x0FFF) << 4;
+    uint8_t buf[MAX_DATA_SIZE];
+    int total = 5 + payload_len;
+    if (total > MAX_DATA_SIZE) {
+        payload_len = MAX_DATA_SIZE - 5;
+        total = MAX_DATA_SIZE;
     }
-    buf[0] = DLI_EVT_DATA_RECEIVED & 0xFF;
-    buf[1] = (DLI_EVT_DATA_RECEIVED >> 8) & 0xFF;
-    buf[2] = (uint8_t)(plen & 0xFF);
-    buf[3] = (uint8_t)(plen >> 8);
-    buf[4] = recv_handle & 0xFF;
-    buf[5] = (recv_handle >> 8) & 0xFF;
+    buf[0] = DLI_PKT_ASYNC_DATA;  /* 0xA3 */
+    buf[1] = link_id_seg & 0xFF;
+    buf[2] = (link_id_seg >> 8) & 0xFF;
+    buf[3] = payload_len & 0xFF;
+    buf[4] = (payload_len >> 8) & 0xFF;
     if (payload_len > 0) {
-        memcpy(&buf[6], payload, payload_len);
+        memcpy(&buf[5], payload, payload_len);
     }
-    sle_dli_queue_event(receiver, buf, 6 + payload_len);
+    sle_dli_queue_data(receiver, buf, total);
     sle_dli_schedule_wakeup(receiver);
 }
 
@@ -452,12 +454,12 @@ static const USBDescIface desc_iface_sle_dli = {
         {
             .bEndpointAddress = USB_DIR_IN | 0x12,  /* 0x92: bulk IN (data) */
             .bmAttributes     = USB_ENDPOINT_XFER_BULK,
-            .wMaxPacketSize   = 512,
+            .wMaxPacketSize   = 64,
         },
         {
             .bEndpointAddress = USB_DIR_OUT | 0x12, /* 0x12: bulk OUT (commands) */
             .bmAttributes     = USB_ENDPOINT_XFER_BULK,
-            .wMaxPacketSize   = 512,
+            .wMaxPacketSize   = 64,
         },
     },
 };

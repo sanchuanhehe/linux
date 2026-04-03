@@ -78,6 +78,23 @@ static void sle_usb_bulk_cb(struct urb *urb)
 			       urb->actual_length, urb->status);
 }
 
+/* Bulk IN (data) callback with auto-resubmit for continuous reception */
+static void sle_usb_bulk_in_cb(struct urb *urb)
+{
+	struct sle_urb_ctx *ctx = urb->context;
+
+	sparklink_usb_complete(ctx->rust_ctx, ctx->buf,
+			       urb->actual_length, urb->status);
+
+	/* Auto-resubmit unless cancelled or device disconnected */
+	if (urb->status == 0 || urb->status == -EOVERFLOW) {
+		int ret = usb_submit_urb(urb, GFP_ATOMIC);
+		if (ret)
+			pr_err("sparklink-usb: bulk-in resubmit failed: %d\n",
+			       ret);
+	}
+}
+
 static void sle_usb_intr_cb(struct urb *urb)
 {
 	struct sle_urb_ctx *ctx = urb->context;
@@ -210,7 +227,7 @@ int sle_usb_submit_bulk_in(struct sle_urb_ctx *ctx,
 
 	usb_fill_bulk_urb(ctx->urb, udev, pipe,
 			  ctx->buf, ctx->buf_size,
-			  sle_usb_bulk_cb, ctx);
+			  sle_usb_bulk_in_cb, ctx);
 
 	return usb_submit_urb(ctx->urb, GFP_KERNEL);
 }
@@ -351,6 +368,8 @@ int sle_usb_dev_send_cmd(int dev_id, u16 opcode, const u8 *params, int plen);
 int sle_usb_dev_send_data(int dev_id, u16 handle, const u8 *data, int len);
 int sle_usb_dev_start_evt(int dev_id);
 void sle_usb_dev_stop_evt(int dev_id);
+int sle_usb_dev_start_data(int dev_id);
+void sle_usb_dev_stop_data(int dev_id);
 int sle_usb_dev_init_controller(int dev_id);
 u32 sle_usb_dev_get_fw_version(int dev_id);
 int sle_usb_dev_get_mac(int dev_id, u8 *mac);
@@ -634,6 +653,44 @@ void sle_usb_dev_stop_evt(int dev_id)
 	d = &usb_dev_table[dev_id];
 	if (d->evt_urb)
 		sle_usb_kill_ctx(d->evt_urb);
+}
+
+/**
+ * sle_usb_dev_start_data - Start listening for async data on bulk IN.
+ * @dev_id: device id
+ *
+ * Submits the bulk IN URB which auto-resubmits on completion.
+ */
+int sle_usb_dev_start_data(int dev_id)
+{
+	struct sle_usb_dev *d;
+
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
+		return -EINVAL;
+
+	d = &usb_dev_table[dev_id];
+	if (!d->active || !d->udev || !d->rx_urb)
+		return -ENODEV;
+
+	return sle_usb_submit_bulk_in(d->rx_urb, d->udev,
+				      d->ep_bulk_in,
+				      (void *)(uintptr_t)(dev_id + 1));
+}
+
+/**
+ * sle_usb_dev_stop_data - Stop listening for async data.
+ * @dev_id: device id
+ */
+void sle_usb_dev_stop_data(int dev_id)
+{
+	struct sle_usb_dev *d;
+
+	if (dev_id < 0 || dev_id >= SLE_USB_MAX_DEVS)
+		return;
+
+	d = &usb_dev_table[dev_id];
+	if (d->rx_urb)
+		sle_usb_kill_ctx(d->rx_urb);
 }
 
 /* -----------------------------------------------------------------------
@@ -1004,6 +1061,16 @@ int sle_usb_dev_resume(int dev_id)
 			       dev_id, ret);
 			return ret;
 		}
+	}
+
+	/* Re-submit bulk IN data URB */
+	if (d->rx_urb && d->udev) {
+		ret = sle_usb_submit_bulk_in(d->rx_urb, d->udev,
+					     d->ep_bulk_in,
+					     (void *)(uintptr_t)(dev_id + 1));
+		if (ret)
+			pr_err("sparklink-usb: dev %d resume data URB failed: %d\n",
+			       dev_id, ret);
 	}
 
 	pr_debug("sparklink-usb: dev %d resumed\n", dev_id);

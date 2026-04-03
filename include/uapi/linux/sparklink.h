@@ -101,7 +101,7 @@ enum {
 	SPARKLINK_ATTR_DEV_INDEX,	/* u16: SCI device index */
 	SPARKLINK_ATTR_DEV_STATE,	/* u8: operating state */
 	SPARKLINK_ATTR_DEV_NAME,	/* NUL string: device name */
-	SPARKLINK_ATTR_DEV_BUS,	/* u8: transport bus type */
+	SPARKLINK_ATTR_DEV_BUS,		/* u8: transport bus type */
 	SPARKLINK_ATTR_DEV_COUNT,	/* u32: device count */
 
 	/* Version info */
@@ -115,7 +115,7 @@ enum {
 	/* Connection */
 	SPARKLINK_ATTR_HANDLE,		/* u16: connection handle */
 	SPARKLINK_ATTR_CONN_STATE,	/* u8: connection state */
-	SPARKLINK_ATTR_GT_ROLE,	/* u8: GT role (0=T, 1=G) */
+	SPARKLINK_ATTR_GT_ROLE,		/* u8: GT role (0=T, 1=G) */
 	SPARKLINK_ATTR_BANDWIDTH,	/* u8: bandwidth in MHz */
 	SPARKLINK_ATTR_MCS_INDEX,	/* u8: MCS index */
 	SPARKLINK_ATTR_TX_BYTES,	/* u64: total TX bytes */

@@ -1319,6 +1319,8 @@ fn init_subsystem() -> Result<SubsystemGuard> {
     let mut conn = ConnManager::new(addr);
     conn.set_max_connections(sle_configfs::max_connections() as usize);
 
+    sle_workers::init_event_pump_ref();
+
     let pump = EventPump::new().ok();
     if let Some(ref p) = pump {
         p.start();

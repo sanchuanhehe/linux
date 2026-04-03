@@ -1184,6 +1184,9 @@ impl VirtualController {
         }
         self.pending_events.borrow_mut()[tail] = Some(ev);
         self.event_tail.set(next);
+        // Wake the EventPump immediately so the event is processed
+        // without waiting for the heartbeat cycle.
+        super::sle_workers::kick_event_pump();
     }
 }
 

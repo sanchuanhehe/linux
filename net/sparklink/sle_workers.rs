@@ -23,14 +23,48 @@ use super::SubsystemShared;
 use super::SUBSYSTEM;
 
 // ---------------------------------------------------------------------------
+// Global EventPump reference for interrupt-driven wakeup
+// ---------------------------------------------------------------------------
+
+kernel::sync::global_lock! {
+    /// Global reference to the EventPump Arc, set during initialisation.
+    /// Accessed from USB completion callbacks (soft IRQ context) via
+    /// `kick_event_pump()` to schedule immediate event processing.
+    unsafe(uninit) static EVENT_PUMP_REF: Mutex<Option<Arc<EventPump>>> = None;
+}
+
+/// Initialise the global EVENT_PUMP_REF lock. Must be called once
+/// during module init before any kick_event_pump() call.
+pub(crate) fn init_event_pump_ref() {
+    // SAFETY: called once from module_init, single-threaded.
+    unsafe { EVENT_PUMP_REF.init() };
+    *EVENT_PUMP_REF.lock() = None;
+}
+
+/// Store a reference to the EventPump in the global slot.
+fn set_event_pump_ref(pump: &Arc<EventPump>) {
+    *EVENT_PUMP_REF.lock() = Some(pump.clone());
+}
+
+/// Schedule the EventPump for immediate execution.
+///
+/// Safe to call from any context including USB soft-IRQ completion
+/// callbacks.  If no EventPump is registered yet, this is a no-op.
+pub(crate) fn kick_event_pump() {
+    if let Some(ref pump) = *EVENT_PUMP_REF.lock() {
+        let _ = workqueue::system().enqueue_delayed(pump.clone(), 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Background event pump
 // ---------------------------------------------------------------------------
 
-/// Interval between event pump polls (milliseconds).
-const EVENT_PUMP_INTERVAL_MS: u32 = 100;
-
-/// Shortened interval when events were drained (adaptive polling).
-const EVENT_PUMP_FAST_MS: u32 = 10;
+/// Heartbeat interval for supervision timeouts and cleanup (ms).
+/// The pump no longer self-schedules at this interval for event
+/// processing — it is kicked immediately by producers.  The heartbeat
+/// ensures periodic maintenance even when no events arrive.
+const EVENT_PUMP_HEARTBEAT_MS: u32 = 500;
 
 /// Background worker that periodically polls the controller for DLI events
 /// and publishes them to the global broadcast ring.
@@ -388,10 +422,12 @@ impl EventPump {
         )
     }
 
-    /// Schedule the first pump cycle.
+    /// Schedule the first pump cycle and register the global reference
+    /// so that interrupt-context producers can kick the pump.
     pub(crate) fn start(self: &Arc<Self>) {
+        set_event_pump_ref(self);
         let _ = workqueue::system()
-            .enqueue_delayed(self.clone(), msecs_to_jiffies(EVENT_PUMP_INTERVAL_MS));
+            .enqueue_delayed(self.clone(), msecs_to_jiffies(EVENT_PUMP_HEARTBEAT_MS));
     }
 }
 
@@ -484,23 +520,17 @@ impl WorkItem for EventPump {
                 }
             }
         }
-        // Re-arm with adaptive interval: use fast interval when events
-        // were processed to reduce latency under load.
-        let interval = if _pumped > 0 {
-            EVENT_PUMP_FAST_MS
-        } else {
-            EVENT_PUMP_INTERVAL_MS
-        };
-        let _ = workqueue::system().enqueue_delayed(this, msecs_to_jiffies(interval));
+        // Re-arm with heartbeat interval for periodic maintenance
+        // (supervision timeouts, command expiry, GC).  Immediate event
+        // processing is triggered by kick_event_pump() from producers.
+        let _ = workqueue::system()
+            .enqueue_delayed(this, msecs_to_jiffies(EVENT_PUMP_HEARTBEAT_MS));
     }
 }
 
 // ---------------------------------------------------------------------------
 // Background command worker (TX dispatch)
 // ---------------------------------------------------------------------------
-
-/// Minimum interval between command dispatch cycles (milliseconds).
-const CMD_WORKER_INTERVAL_MS: u32 = 10;
 
 /// Background worker that dequeues command requests from `cmd_queue`
 /// and sends them to the controller in workqueue context.
@@ -530,10 +560,10 @@ impl CommandWorker {
         )
     }
 
-    /// Schedule the command worker to run soon.
+    /// Schedule the command worker to run immediately.
     pub(crate) fn kick(self: &Arc<Self>) {
         let _ = workqueue::system()
-            .enqueue_delayed(self.clone(), msecs_to_jiffies(CMD_WORKER_INTERVAL_MS));
+            .enqueue_delayed(self.clone(), 0);
     }
 }
 

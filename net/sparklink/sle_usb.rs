@@ -368,6 +368,7 @@ pub(crate) extern "C" fn sparklink_usb_complete(
         if let Some(ref mut ring) = *USB_EVENT_RING.lock() {
             ring.push_tagged(dev_id, sle_evt);
         }
+        super::sle_workers::kick_event_pump();
         return;
     }
 
@@ -378,6 +379,7 @@ pub(crate) extern "C" fn sparklink_usb_complete(
                 if let Some(ref mut ring) = *USB_EVENT_RING.lock() {
                     ring.push_tagged(dev_id, sle_evt);
                 }
+                super::sle_workers::kick_event_pump();
             } else {
                 pr_debug!(
                     "sparklink-usb: unknown event code=0x{:04x} len={}\n",

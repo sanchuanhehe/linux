@@ -458,8 +458,7 @@ int sle_usb_dev_register(int dev_id, void *intf_ptr)
 			d->ep_intr_in_interval);
 	}
 
-	d->evt_urb = sle_usb_alloc_ctx(d->ep_intr_in_size > 0 ?
-					d->ep_intr_in_size : SLE_EVENT_BUF_SIZE);
+	d->evt_urb = sle_usb_alloc_ctx(SLE_EVENT_BUF_SIZE);
 	if (!d->evt_urb)
 		return -ENOMEM;
 

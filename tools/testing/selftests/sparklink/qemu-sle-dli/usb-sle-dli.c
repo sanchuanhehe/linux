@@ -448,7 +448,7 @@ static const USBDescIface desc_iface_sle_dli = {
         {
             .bEndpointAddress = USB_DIR_IN | 0x11,  /* 0x91: interrupt IN (events) */
             .bmAttributes     = USB_ENDPOINT_XFER_INT,
-            .wMaxPacketSize   = 64,
+            .wMaxPacketSize   = 16,
             .bInterval        = 4,
         },
         {
@@ -1075,7 +1075,7 @@ static void usb_sle_dli_realize(USBDevice *dev, Error **errp)
     }
 
     /* Cache interrupt endpoint for wakeup signaling */
-    s->intr = usb_ep_get(dev, USB_TOKEN_IN, 0x11);
+    s->intr = usb_ep_get(dev, USB_TOKEN_IN, 1);
 
     /* Create deferred wakeup timer for cross-device event delivery */
     s->deferred_wakeup = timer_new_ns(QEMU_CLOCK_VIRTUAL,

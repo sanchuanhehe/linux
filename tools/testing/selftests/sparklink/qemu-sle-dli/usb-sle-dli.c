@@ -65,13 +65,26 @@
 #define DLI_OP_READ_MAC           0x0406
 #define DLI_OP_RESET              0x0408
 #define DLI_OP_ENABLE_BROADCAST   0x0C05
-#define DLI_OP_DISABLE_BROADCAST  0x0C06
 #define DLI_OP_ENABLE_SCAN        0x1002
-#define DLI_OP_DISABLE_SCAN       0x1003
 #define DLI_OP_CREATE_CONN        0x1401
 #define DLI_OP_DISCONNECT         0x1403
 #define DLI_OP_FW_DL_START        0xF810
 #define DLI_OP_FW_DL_DONE         0xF811
+
+/* Broadcast configuration opcodes (§8.2) */
+#define DLI_OP_SET_BCAST_PARAM    0x0C02
+#define DLI_OP_SET_BCAST_DATA     0x0C03
+#define DLI_OP_SET_BCAST_SCAN_RSP 0x0C04
+#define DLI_OP_READ_MAX_BCAST_LEN 0x0C06
+#define DLI_OP_READ_BCAST_SET_SZ  0x0C07
+#define DLI_OP_DELETE_BCAST_SET   0x0C08
+
+/* Scan opcodes (§8.3) */
+#define DLI_OP_SET_SCAN_PARAM     0x1001
+#define DLI_OP_SET_SCAN_REQ_DATA  0x1003
+
+/* Connection opcodes (§8.4) */
+#define DLI_OP_CANCEL_CONN        0x1402
 
 /* Link control opcodes (§8.5) */
 #define DLI_OP_READ_PEER_FEATURES 0x1801
@@ -200,6 +213,12 @@ struct USBSleDliState {
     bool     fw_downloading;
     uint32_t fw_total_size;
     uint32_t fw_received;
+
+    /* Broadcast configuration */
+    uint8_t  bcast_data[251];
+    int      bcast_data_len;
+    uint8_t  bcast_scan_rsp[251];
+    int      bcast_scan_rsp_len;
 
     /* Connections */
     SleDliConn connections[MAX_CONNECTIONS];
@@ -980,29 +999,100 @@ static void sle_dli_process_command(USBSleDliState *s,
         sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
         break;
 
-    case DLI_OP_ENABLE_BROADCAST:
-        s->broadcasting = true;
-        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
-        /* Notify all scanning devices on the air medium */
-        sle_air_broadcast_notify(s);
+    /* ----------------------------------------------------------------
+     * Broadcast configuration commands (§8.2)
+     * ---------------------------------------------------------------- */
+
+    case DLI_OP_SET_BCAST_PARAM:
+        /* params: [adv_handle:1] [mode:1] [gt_role:1] ... (variable)
+         * Accept any params, return CmdComplete with tx_power */
+        {
+            uint8_t rp[1] = { 0 }; /* selected tx_power = 0 dBm */
+            sle_dli_cmd_complete(s, opcode, 0x00, rp, 1);
+        }
         break;
 
-    case DLI_OP_DISABLE_BROADCAST:
-        s->broadcasting = false;
-        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
-        break;
-
-    case DLI_OP_ENABLE_SCAN:
-        s->scanning = true;
-        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
-        /* Generate broadcast reports for built-in static peers */
-        for (int i = 0; i < MAX_PEERS; i++) {
-            if (s->peers[i].active) {
-                sle_dli_broadcast_report(s, &s->peers[i]);
+    case DLI_OP_SET_BCAST_DATA:
+        /* params: [adv_handle:1] [frag_op:1] [frag_sel:1]
+         *         [data_len:1] [data:N] */
+        if (plen >= 4) {
+            int data_len = params[3];
+            if (data_len > 0 && plen >= 4 + data_len &&
+                data_len <= (int)sizeof(s->bcast_data)) {
+                memcpy(s->bcast_data, &params[4], data_len);
+                s->bcast_data_len = data_len;
             }
         }
-        /* Also discover broadcasting devices on the air medium */
-        {
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+
+    case DLI_OP_SET_BCAST_SCAN_RSP:
+        /* params: [adv_handle:1] [frag_op:1] [frag_sel:1]
+         *         [data_len:1] [data:N] */
+        if (plen >= 4) {
+            int data_len = params[3];
+            if (data_len > 0 && plen >= 4 + data_len &&
+                data_len <= (int)sizeof(s->bcast_scan_rsp)) {
+                memcpy(s->bcast_scan_rsp, &params[4], data_len);
+                s->bcast_scan_rsp_len = data_len;
+            }
+        }
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+
+    case DLI_OP_ENABLE_BROADCAST: {
+        bool enable = (plen >= 1) ? (params[0] != 0) : true;
+        s->broadcasting = enable;
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        if (enable) {
+            /* Notify all scanning devices on the air medium */
+            sle_air_broadcast_notify(s);
+        }
+        break;
+    }
+
+    case DLI_OP_READ_MAX_BCAST_LEN: {
+        /* no params → CmdComplete with [max_len:2] */
+        uint8_t rp[2];
+        rp[0] = 251 & 0xFF; /* 251 bytes */
+        rp[1] = 0;
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 2);
+        break;
+    }
+
+    case DLI_OP_READ_BCAST_SET_SZ: {
+        /* no params → CmdComplete with [num_sets:1] */
+        uint8_t rp[1] = { 4 }; /* Support 4 broadcast sets */
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 1);
+        break;
+    }
+
+    case DLI_OP_DELETE_BCAST_SET:
+        /* params: [set_id:1] → CmdComplete */
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+
+    /* ----------------------------------------------------------------
+     * Scan commands (§8.3)
+     * ---------------------------------------------------------------- */
+
+    case DLI_OP_SET_SCAN_PARAM:
+        /* Accept any scan parameters, return success */
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+
+    case DLI_OP_ENABLE_SCAN: {
+        bool enable = (plen >= 1) ? (params[0] != 0) : true;
+        s->scanning = enable;
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        if (enable) {
+            /* Generate broadcast reports for built-in static peers */
+            for (int i = 0; i < MAX_PEERS; i++) {
+                if (s->peers[i].active) {
+                    sle_dli_broadcast_report(s, &s->peers[i]);
+                }
+            }
+            /* Also discover broadcasting devices on the air medium */
             USBSleDliState *air_dev;
             QTAILQ_FOREACH(air_dev, &sle_air_devices, air_link) {
                 if (air_dev == s || !air_dev->broadcasting) {
@@ -1021,9 +1111,19 @@ static void sle_dli_process_command(USBSleDliState *s,
             }
         }
         break;
+    }
 
-    case DLI_OP_DISABLE_SCAN:
-        s->scanning = false;
+    case DLI_OP_SET_SCAN_REQ_DATA:
+        /* Accept scan request payload, return success */
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+
+    /* ----------------------------------------------------------------
+     * Connection commands (§8.4)
+     * ---------------------------------------------------------------- */
+
+    case DLI_OP_CANCEL_CONN:
+        /* Cancel pending connection → CmdComplete */
         sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
         break;
 

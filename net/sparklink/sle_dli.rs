@@ -44,6 +44,8 @@ pub(crate) struct ControllerEventRing {
     events: [(Option<u16>, Option<SleEvent>); CTRL_EVENT_RING_SIZE],
     head: usize,
     tail: usize,
+    /// Cumulative count of events dropped due to ring overflow.
+    pub(crate) dropped: u32,
 }
 
 impl ControllerEventRing {
@@ -52,17 +54,21 @@ impl ControllerEventRing {
             events: [const { (None, None) }; CTRL_EVENT_RING_SIZE],
             head: 0,
             tail: 0,
+            dropped: 0,
         }
     }
 
     /// Push an event with an optional source device id.
-    pub(crate) fn push_tagged(&mut self, dev_id: Option<u16>, ev: SleEvent) {
+    /// Returns `true` if the event was stored, `false` if dropped (ring full).
+    pub(crate) fn push_tagged(&mut self, dev_id: Option<u16>, ev: SleEvent) -> bool {
         let next = (self.tail + 1) % CTRL_EVENT_RING_SIZE;
         if next == self.head {
-            return;
+            self.dropped = self.dropped.wrapping_add(1);
+            return false;
         }
         self.events[self.tail] = (dev_id, Some(ev));
         self.tail = next;
+        true
     }
 
     /// Push an event without device routing (processed on active device).

@@ -29,6 +29,9 @@ use super::SUBSYSTEM;
 /// Interval between event pump polls (milliseconds).
 const EVENT_PUMP_INTERVAL_MS: u32 = 100;
 
+/// Shortened interval when events were drained (adaptive polling).
+const EVENT_PUMP_FAST_MS: u32 = 10;
+
 /// Background worker that periodically polls the controller for DLI events
 /// and publishes them to the global broadcast ring.
 ///
@@ -283,7 +286,7 @@ pub(crate) fn drain_controller_events(shared: &mut SubsystemShared) {
     while let Some(ev) = shared.controller.poll_event() {
         process_controller_event(shared, &ev);
         drained += 1;
-        if drained >= 32 {
+        if drained >= 64 {
             break;
         }
     }
@@ -320,9 +323,20 @@ impl WorkItem for EventPump {
         let mut _pumped = 0u32;
 
         // Collect tagged events from USB event ring first (minimal lock hold).
-        let mut tagged_events: [(Option<u16>, Option<sle_dli::SleEvent>); 32] =
-            [const { (None, None) }; 32];
+        let mut tagged_events: [(Option<u16>, Option<sle_dli::SleEvent>); 64] =
+            [const { (None, None) }; 64];
         let tagged_count = sle_usb::drain_usb_events(&mut tagged_events);
+
+        // Log USB event ring overflow if any events were dropped.
+        {
+            let usb_dropped = sle_usb::take_dropped_count();
+            if usb_dropped > 0 {
+                pr_warn!(
+                    "sparklink: USB event ring overflow: {} event(s) dropped\n",
+                    usb_dropped
+                );
+            }
+        }
 
         {
             let mut ss = SUBSYSTEM.lock();
@@ -331,7 +345,7 @@ impl WorkItem for EventPump {
                 while let Some(ev) = shared.controller.poll_event() {
                     process_controller_event(shared, &ev);
                     _pumped += 1;
-                    if _pumped >= 32 {
+                    if _pumped >= 64 {
                         break;
                     }
                 }
@@ -353,6 +367,11 @@ impl WorkItem for EventPump {
                                 if let Some(orig_id) = active {
                                     let _ = shared.switch_to_device(orig_id);
                                 }
+                            } else {
+                                pr_warn!(
+                                    "sparklink: dropped event for device {} (switch failed)\n",
+                                    target_id
+                                );
                             }
                         }
                         _pumped += 1;
@@ -383,8 +402,14 @@ impl WorkItem for EventPump {
                 }
             }
         }
-        // Re-arm the delayed work for the next cycle.
-        let _ = workqueue::system().enqueue_delayed(this, msecs_to_jiffies(EVENT_PUMP_INTERVAL_MS));
+        // Re-arm with adaptive interval: use fast interval when events
+        // were processed to reduce latency under load.
+        let interval = if _pumped > 0 {
+            EVENT_PUMP_FAST_MS
+        } else {
+            EVENT_PUMP_INTERVAL_MS
+        };
+        let _ = workqueue::system().enqueue_delayed(this, msecs_to_jiffies(interval));
     }
 }
 

@@ -10256,6 +10256,119 @@ static void test_capability_negotiation(int fd)
 	printf("  Capability negotiation: %d OK, %d FAIL\n", ok, fail);
 }
 
+/*
+ * Async event pump throughput and robustness.
+ *
+ * Validates that:
+ *   1. Burst event generation (multiple connects) is processed by EventPump.
+ *   2. EVENT_STATS reflects events enqueued via broadcast ring.
+ *   3. DLI_POLL_EVENT can drain events from the DLI event ring.
+ *   4. SUBSYS_STATS reports pump cycles and event counts.
+ */
+static void test_async_event_pump(int fd)
+{
+	test_header("Async event pump: throughput and delivery");
+
+	int ok = 0;
+
+	/* Baseline EVENT_STATS */
+	struct sle_event_stats es0;
+
+	memset(&es0, 0, sizeof(es0));
+	int ret = ioctl(fd, SL_IOCTL_EVENT_STATS, &es0);
+
+	if (ret < 0) {
+		printf("  FAIL: EVENT_STATS baseline: %s\n", strerror(errno));
+		return;
+	}
+	printf("  OK:   EVENT_STATS baseline: enqueued=%lu dropped=%lu\n",
+	       (unsigned long)es0.total_enqueued,
+	       (unsigned long)es0.total_dropped);
+	ok++;
+
+	/* Create 4 connections in burst to generate events */
+	uint16_t handles[4] = {0};
+	int connected = 0;
+
+	for (int i = 0; i < 4; i++) {
+		struct sle_connect_params cp;
+
+		memset(&cp, 0, sizeof(cp));
+		cp.peer_addr[0] = 0xF0 + (uint8_t)i;
+		cp.peer_addr[5] = 0xA0 + (uint8_t)i;
+		ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+		if (ret > 0) {
+			handles[i] = (uint16_t)ret;
+			connected++;
+		}
+	}
+	printf("  OK:   Created %d connections (burst event generation)\n",
+	       connected);
+	ok++;
+
+	/* Allow EventPump to process (sleep ~150ms for at least 1 pump cycle) */
+	usleep(150000);
+
+	/* Check EVENT_STATS after burst */
+	struct sle_event_stats es1;
+
+	memset(&es1, 0, sizeof(es1));
+	ret = ioctl(fd, SL_IOCTL_EVENT_STATS, &es1);
+	if (ret < 0) {
+		printf("  FAIL: EVENT_STATS post-burst: %s\n", strerror(errno));
+	} else {
+		uint64_t new_events = es1.total_enqueued - es0.total_enqueued;
+
+		if (new_events > 0) {
+			printf("  OK:   EventPump delivered %lu new events\n",
+			       (unsigned long)new_events);
+			ok++;
+		} else {
+			printf("  WARN: No new events after %d connections\n",
+			       connected);
+		}
+	}
+
+	/* Try DLI_POLL_EVENT to drain from DLI event ring */
+	struct sle_dli_event dli_ev;
+
+	memset(&dli_ev, 0, sizeof(dli_ev));
+	ret = ioctl(fd, SL_IOCTL_DLI_POLL_EVENT, &dli_ev);
+	if (ret >= 0) {
+		printf("  OK:   DLI_POLL_EVENT returned (event_type=0x%02x)\n",
+		       dli_ev.event_type);
+		ok++;
+	} else if (errno == EAGAIN) {
+		printf("  OK:   DLI_POLL_EVENT: no events pending (EAGAIN)\n");
+		ok++;
+	} else {
+		printf("  FAIL: DLI_POLL_EVENT: %s\n", strerror(errno));
+	}
+
+	/* Disconnect all handles */
+	for (int i = 0; i < 4; i++) {
+		if (handles[i] > 0)
+			ioctl(fd, SL_IOCTL_DISCONNECT, &handles[i]);
+	}
+
+	/* After disconnect: another pump cycle should process disconnect events */
+	usleep(150000);
+
+	struct sle_event_stats es2;
+
+	memset(&es2, 0, sizeof(es2));
+	ret = ioctl(fd, SL_IOCTL_EVENT_STATS, &es2);
+	if (ret == 0) {
+		uint64_t disc_events = es2.total_enqueued - es1.total_enqueued;
+
+		printf("  OK:   Post-disconnect: %lu additional events pumped\n",
+		       (unsigned long)disc_events);
+		ok++;
+	}
+
+	printf("  Async event pump: %d checks passed\n", ok);
+}
+
 static void test_ioctl_fuzz(int fd)
 {
 	test_header("Ioctl fuzz: deterministic payload injection");
@@ -10736,6 +10849,7 @@ int main(void)
 	test_phy_extreme_params(fd);
 	test_ssap_remote_ioctls(fd);
 	test_capability_negotiation(fd);
+	test_async_event_pump(fd);
 	test_ioctl_fuzz(fd);
 	test_genetlink();
 

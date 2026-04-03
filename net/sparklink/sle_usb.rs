@@ -74,6 +74,17 @@ pub(crate) fn drain_usb_events(out: &mut [(Option<u16>, Option<SleEvent>)]) -> u
     count
 }
 
+/// Take and reset the cumulative dropped-event count from the USB event ring.
+pub(crate) fn take_dropped_count() -> u32 {
+    if let Some(ref mut ring) = *USB_EVENT_RING.lock() {
+        let d = ring.dropped;
+        ring.dropped = 0;
+        d
+    } else {
+        0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // USB FFI — C wrapper functions from sle_usb_ffi.c
 // ---------------------------------------------------------------------------

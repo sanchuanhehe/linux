@@ -17,7 +17,7 @@ use super::sle_phy;
 
 pub(crate) const SL_MAGIC: u32 = 'S' as u32;
 
-/// Register a new virtual SCI device (for testing).
+/// Register a new SCI device (for testing).
 pub(crate) const SL_IOCTL_DEV_REGISTER: u32 = _IO(SL_MAGIC, 0x01);
 
 /// Unregister a SCI device by index.
@@ -1565,7 +1565,7 @@ pub(crate) struct SleEventStats {
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 pub(crate) struct SleDliInfo {
-    /// Bus type (0=Virtual, 1=UART, 2=USB, 3=SDIO).
+    /// Bus type (0=None, 1=UART, 2=USB, 3=SDIO).
     pub bus: u8,
     pub(crate) _pad: [u8; 3],
     /// Firmware version (major.minor.patch packed as u32).
@@ -2586,7 +2586,7 @@ unsafe impl FromBytes for SleMeasAction {}
 #[derive(Copy, Clone, PartialEq, Eq, Default)]
 #[allow(dead_code)]
 pub(crate) enum SciBus {
-    /// Virtual controller (for testing).
+    /// No controller attached.
     #[default]
     Virtual = 0,
     /// UART-attached controller.

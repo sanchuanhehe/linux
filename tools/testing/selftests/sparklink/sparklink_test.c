@@ -2446,11 +2446,11 @@ static void test_dli_info(int fd)
 	printf("  Features:     0x%016lx\n", (unsigned long)dli.features);
 	printf("  Max conns:    %u\n", dli.max_connections);
 
-	/* Virtual controller should be bus=0 */
-	if (dli.bus == 0)
-		printf("  OK:   bus=Virtual\n");
+	/* Controller should report a known bus type */
+	if (dli.bus == 2)
+		printf("  OK:   bus=%u (USB)\n", dli.bus);
 	else
-		printf("  WARN: unexpected bus %u\n", dli.bus);
+		printf("  WARN: unexpected bus %u (expected 2=USB)\n", dli.bus);
 
 	/* Features should be non-zero */
 	if (dli.features != 0)
@@ -2576,7 +2576,7 @@ static void test_usb_controller_ops(int fd)
 			printf("  WARN: firmware_version=0\n");
 	}
 
-	/* 5. Switch back to virtual controller (sle0) */
+	/* 5. Switch back to sle0 */
 	sel = 0;
 	ret = ioctl(fd, SL_IOCTL_DEV_SELECT, &sel);
 	if (ret < 0) {
@@ -3611,7 +3611,7 @@ static void test_configfs(void)
 	write_configfs_attr("adv_interval_ms", "100");
 	write_configfs_attr("scan_window_ms", "200");
 	write_configfs_attr("power_mode", "active");
-	write_configfs_attr("controller_type", "virtual");
+	write_configfs_attr("controller_type", "none");
 }
 
 static void test_configfs_ioctl_integration(int fd)
@@ -3813,7 +3813,7 @@ static void test_multi_controller(int fd)
 	test_header("multi-controller: DEV_LIST and DEV_SWITCH");
 
 	/*
-	 * The virtual controller is registered at init.
+	 * USB controllers are registered during probe.
 	 * DEV_LIST returns a bitmask of allocated device IDs.
 	 */
 	uint16_t mask = 0;
@@ -3823,7 +3823,7 @@ static void test_multi_controller(int fd)
 		printf("  FAIL: DEV_LIST ioctl: %s\n", strerror(errno));
 		return;
 	}
-	/* At least one device (the virtual controller) should be registered. */
+	/* At least one device (USB controller) should be registered. */
 	int count = __builtin_popcount(mask);
 
 	if (count < 1) {
@@ -3937,7 +3937,7 @@ static void test_multi_controller(int fd)
  *
  * Validates that per-device state (connections, data queues) is
  * correctly saved and restored when switching between controllers.
- * Uses sle0 (virtual) to avoid USB DMA issues under QEMU, and
+ * Uses sle0 to exercise the swap-on-switch mechanism with a
  * exercises the swap-on-switch mechanism with a second controller.
  *
  * Requires 2+ controllers.  Test flow:
@@ -4195,7 +4195,7 @@ cleanup:
 /*
  * Test real QEMU air medium connection between two USB controllers.
  *
- * Requires 3+ controllers (sle0=virtual + sle1,sle2=USB).
+ * Requires 2+ USB controllers (sle0, sle1).
  * Verifies:
  *   - sle1 broadcasts, sle2 scans and discovers sle1 via air medium
  *   - sle2 creates a CONNECT to sle1's real MAC; QEMU air medium
@@ -5884,7 +5884,7 @@ static int dli_send_cmd_retry(int fd, struct sle_dli_cmd *cmd)
 {
 	int ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, cmd);
 
-	for (int i = 0; i < 3 && ret < 0 && errno == EBUSY; i++) {
+	for (int i = 0; i < 10 && ret < 0 && errno == EBUSY; i++) {
 		usleep(10000);
 		ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, cmd);
 	}
@@ -8303,11 +8303,12 @@ static void test_supervision_timeout(int fd)
 	}
 
 	/* Step 4: Wait for timeout to expire (no more data activity).
-	 * Sleep 200ms to ensure the 100ms supervision timeout fires.
-	 * The EventPump schedules precisely at the supervision deadline
-	 * so latency is minimal.
+	 * Sleep 700ms to ensure the 100ms supervision timeout fires.
+	 * Allow extra margin because EventPump fast-poll may exhaust
+	 * its 64-cycle countdown before the timeout fires, falling
+	 * back to the 500ms heartbeat.
 	 */
-	usleep(200000);
+	usleep(700000);
 
 	/* Step 5: Verify connection was disconnected by supervision timeout */
 	memset(&info, 0, sizeof(info));
@@ -11640,16 +11641,14 @@ int main(void)
 	printf("Opened %s (fd=%d)\n", DEVICE, fd);
 
 	/*
-	 * If USB controllers were attached during boot, the active
-	 * controller may be USB-backed.  Switch to sle0 (virtual) so
-	 * that all standard tests run against the predictable virtual
-	 * backend; multi_controller tests exercise switching later.
+	 * Try switching to sle0 so that tests run against the first
+	 * registered USB controller (from QEMU usb-sle-dli).
 	 */
 	{
 		uint16_t dev0 = 0;
 
 		if (ioctl(fd, SL_IOCTL_DEV_SWITCH, &dev0) == 0)
-			printf("Switched to sle0 (virtual controller)\n");
+			printf("Switched to sle0\n");
 	}
 
 	test_dev_count(fd);

@@ -861,7 +861,7 @@ impl SsapInner {
         self.register_service(svc_uuid, true)?;
 
         // Property: Device Name (readable)
-        let name = b"SparkLink Virtual Device";
+        let name = b"SparkLink Device";
         self.add_property(SsapUuid::Uuid16(0x1001), OpIndicator::READ, name)?;
 
         // Property: Firmware Version (readable)

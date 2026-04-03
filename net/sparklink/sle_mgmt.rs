@@ -129,7 +129,7 @@ impl CmdPendingEntry {
 // ---------------------------------------------------------------------------
 
 /// Maximum number of simultaneously pending commands.
-const CMD_QUEUE_DEPTH: usize = 16;
+const CMD_QUEUE_DEPTH: usize = 32;
 
 /// Fixed-size ring buffer of pending commands.
 ///

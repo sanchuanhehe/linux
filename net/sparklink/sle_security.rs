@@ -248,8 +248,10 @@ impl SecurityInner {
         reply[8] = 0x03;
         reply[9] = 0x01;
         reply[10] = 0x02;
-        // PSK indicator
-        reply[11] = if self.psk.is_some() { 1 } else { 0 };
+        // PSK indicator: only advertise PSK if this pairing session
+        // was specifically requested as PSK method.  Otherwise the
+        // controller would override the intended method with PSK.
+        reply[11] = if self.method == PairingMethod::Psk && self.psk.is_some() { 1 } else { 0 };
 
         pr_info!(
             "sparklink: pair info exchange received (io_cap={}, auth_req=0x{:02x})\n",
@@ -394,7 +396,7 @@ impl SecurityInner {
         }
 
         // Compute shared secret using local private key + peer public key.
-        // If ECDH fails (e.g. virtual controller with synthetic keys),
+        // If ECDH fails (e.g. controller with synthetic keys),
         // fall back to a deterministic test key derived from the nonces.
         let kp = self.local_keypair.as_ref().ok_or(EINVAL)?;
         let remote_pk = self.remote_pubkey.as_ref().ok_or(EINVAL)?;

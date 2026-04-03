@@ -317,6 +317,12 @@ struct USBSleDliState {
     SleDliConn connections[MAX_CONNECTIONS];
     uint16_t   next_handle;
 
+    /* Standalone pairing state for connectionless pairing flows.
+     * Used when the host drives pairing without an active connection
+     * (the kernel security state machine operates independently of
+     * connection state). */
+    SleDliConn pair_conn;
+
     /* Simulated peers */
     SleDliPeer peers[MAX_PEERS];
 
@@ -1739,7 +1745,7 @@ static void sle_dli_process_command(USBSleDliState *s,
 
     case DLI_OP_REQUEST_PAIR: {
         /* T-node host requests pairing (§8.6.4).
-         * Standard params: [handle:2][auth_req:1]
+         * Standard params: [handle:2][auth_req:1][method_hint:1]
          * Legacy params:   [method:1]
          * Controller ACKs, then simulates G-node response by queuing
          * PairInfoExchange event (0x001E) back to T-node host. */
@@ -1748,11 +1754,13 @@ static void sle_dli_process_command(USBSleDliState *s,
         /* Find the connection (use handle from params or first active) */
         uint16_t handle = 0;
         uint8_t auth_req = 0;
+        uint8_t method_hint = 0;
         SleDliConn *conn = NULL;
         if (plen >= 3) {
-            /* Standard format: [handle:2][auth_req:1] */
+            /* Standard format: [handle:2][auth_req:1][method_hint:1] */
             handle = params[0] | ((uint16_t)params[1] << 8);
             auth_req = params[2];
+            method_hint = (plen >= 4) ? params[3] : 0;
             conn = sle_dli_find_conn(s, handle);
         } else {
             /* Legacy: [method:1] or no params — use first active conn */
@@ -1768,12 +1776,20 @@ static void sle_dli_process_command(USBSleDliState *s,
         if (conn) {
             conn->pair_state = PAIR_REQUESTED;
             conn->pair_auth_req = auth_req;
+            conn->pair_method = method_hint;
+        } else {
+            conn = &s->pair_conn;
+            conn->handle = handle;
+            conn->pair_state = PAIR_REQUESTED;
+            conn->pair_auth_req = auth_req;
+            conn->pair_method = method_hint;
+        }
 
-            /* Simulate G-node response: send PairInfoExchange event
-             * (0x001E) to T-node host with G-node's capabilities.
-             * Format: [handle:2][io_cap:1][oob:1][auth_req:1]
-             *         [max_key:1][sec_dist:1][crypto_cap:4][psk:1] */
-            uint8_t buf[4 + 12];
+        /* Always generate PairInfoExchange event, even without a live
+         * connection.  This matches the kernel's security state machine
+         * which drives pairing independently of connection state. */
+        {
+            uint8_t buf[16];
             buf[0] = DLI_EVT_PAIR_INFO_EXCH & 0xFF;
             buf[1] = (DLI_EVT_PAIR_INFO_EXCH >> 8) & 0xFF;
             buf[2] = 12;  /* param length */
@@ -1894,23 +1910,42 @@ static void sle_dli_process_command(USBSleDliState *s,
         uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
         SleDliConn *conn = sle_dli_find_conn(s, handle);
         if (!conn) {
-            sle_dli_cmd_status(s, opcode, 0x02);
-            break;
+            conn = &s->pair_conn;
+            conn->handle = handle;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
 
         conn->pair_state = PAIR_INFO_EXCHANGED;
 
-        /* Decide pairing method based on capabilities:
-         * Default: JustWorks (0x01). If MITM requested, use
-         * NumericComparison (0x00). If PSK available, use PSK (0x05). */
-        uint8_t auth_req = (plen >= 5) ? params[4] : 0;
-        uint8_t psk_ind = (plen >= 12) ? params[11] : 0;
-        uint8_t method = 0x01; /* JustWorks */
-        if (psk_ind != 0) {
-            method = 0x05; /* PSK */
-        } else if (auth_req & 0x04) {
-            method = 0x00; /* NumericComparison (MITM required) */
+        /* Use the method_hint saved from REQUEST_PAIR to map the
+         * kernel PairingMethod enum to DLI auth_method codes:
+         *   1 → JustWorks (0x01)
+         *   2 → PSK (0x05)
+         *   3 → NumericComparison (0x00)
+         *   4 → PasskeyEntry (0x02)
+         *   5 → OOB (0x04)
+         *   6 → Password (0x03)
+         * If no hint was saved, fall back to capability-based selection. */
+        uint8_t method;
+        switch (conn->pair_method) {
+        case 1:  method = 0x01; break; /* JustWorks */
+        case 2:  method = 0x05; break; /* PSK */
+        case 3:  method = 0x00; break; /* NumericComparison */
+        case 4:  method = 0x02; break; /* PasskeyEntry */
+        case 5:  method = 0x04; break; /* OOB */
+        case 6:  method = 0x03; break; /* Password */
+        default: {
+            /* Fallback: infer from capabilities */
+            uint8_t auth_req = (plen >= 5) ? params[4] : 0;
+            uint8_t psk_ind = (plen >= 12) ? params[11] : 0;
+            method = 0x01; /* JustWorks */
+            if (psk_ind != 0) {
+                method = 0x05; /* PSK */
+            } else if (auth_req & 0x04) {
+                method = 0x00; /* NumericComparison */
+            }
+            break;
+        }
         }
         conn->pair_method = method;
 
@@ -1966,8 +2001,8 @@ static void sle_dli_process_command(USBSleDliState *s,
         uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
         SleDliConn *conn = sle_dli_find_conn(s, handle);
         if (!conn) {
-            sle_dli_cmd_status(s, opcode, 0x02);
-            break;
+            conn = &s->pair_conn;
+            conn->handle = handle;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
 
@@ -2029,8 +2064,8 @@ static void sle_dli_process_command(USBSleDliState *s,
         uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
         SleDliConn *conn = sle_dli_find_conn(s, handle);
         if (!conn) {
-            sle_dli_cmd_status(s, opcode, 0x02);
-            break;
+            conn = &s->pair_conn;
+            conn->handle = handle;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
 
@@ -2073,8 +2108,8 @@ static void sle_dli_process_command(USBSleDliState *s,
         uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
         SleDliConn *conn = sle_dli_find_conn(s, handle);
         if (!conn) {
-            sle_dli_cmd_status(s, opcode, 0x02);
-            break;
+            conn = &s->pair_conn;
+            conn->handle = handle;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
 
@@ -2117,8 +2152,8 @@ static void sle_dli_process_command(USBSleDliState *s,
         uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
         SleDliConn *conn = sle_dli_find_conn(s, handle);
         if (!conn) {
-            sle_dli_cmd_status(s, opcode, 0x02);
-            break;
+            conn = &s->pair_conn;
+            conn->handle = handle;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
 
@@ -2144,8 +2179,8 @@ static void sle_dli_process_command(USBSleDliState *s,
         uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
         SleDliConn *conn = sle_dli_find_conn(s, handle);
         if (!conn) {
-            sle_dli_cmd_status(s, opcode, 0x02);
-            break;
+            conn = &s->pair_conn;
+            conn->handle = handle;
         }
         sle_dli_cmd_status(s, opcode, 0x00);
         conn->pair_state = PAIR_IDLE;

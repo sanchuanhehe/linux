@@ -65,13 +65,13 @@ pub(crate) enum SleProtoId {
     UsbBulk = 1,
     /// SPI register-based transport.
     Spi = 2,
-    /// Virtual loopback (testing only).
+    /// Reserved (was virtual loopback, removed).
     Virtual = 3,
 }
 
 /// Static properties of a transport protocol (like `hci_uart_proto`).
 ///
-/// Each transport framing format (H4, USB bulk, SPI register, virtual)
+/// Each transport framing format (H4, USB bulk, SPI register)
 /// registers one of these at module init time.
 pub(crate) struct SleProtoEntry {
     /// Protocol identifier.
@@ -331,20 +331,9 @@ pub(crate) const SPI_REG_PROTO: SleProtoEntry = SleProtoEntry {
     oper_speed: 0,
 };
 
-/// Built-in virtual loopback protocol entry.
-pub(crate) const VIRTUAL_PROTO: SleProtoEntry = SleProtoEntry {
-    id: SleProtoId::Virtual,
-    name: "sparklink-virtual",
-    bus: SleBus::Virtual,
-    max_pdu: 255,
-    init_speed: 0,
-    oper_speed: 0,
-};
-
 /// Register all built-in transport protocols into the given registry.
 pub(crate) fn register_builtin_protos(reg: &mut SleProtoRegistry) {
     let _ = reg.register(H4_UART_PROTO);
     let _ = reg.register(USB_BULK_PROTO);
     let _ = reg.register(SPI_REG_PROTO);
-    let _ = reg.register(VIRTUAL_PROTO);
 }

@@ -56,6 +56,13 @@ pub(crate) fn kick_event_pump() {
     }
 }
 
+/// Fast-poll countdown. When events are processed, this is set to a
+/// positive value. Each subsequent run() that finds no events decrements
+/// it. While non-zero, EventPump rearms at 1 jiffy instead of heartbeat,
+/// giving USB round-trips time to complete during multi-step flows.
+static FAST_POLL_REMAINING: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
 // ---------------------------------------------------------------------------
 // Background event pump
 // ---------------------------------------------------------------------------
@@ -110,8 +117,7 @@ pub(crate) fn send_credit_grant(
 /// state machine transitions, and publish to broadcast ring / DLI ring.
 ///
 /// Called from both `EventPump` (periodic background) and inline after
-/// ioctl commands (immediate drain for synchronous controller backends
-/// like VirtualController).
+/// ioctl commands (immediate drain for synchronous controller backends).
 #[inline(never)]
 pub(crate) fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dli::SleEvent) {
     // 1. Resolve pending management commands.
@@ -170,9 +176,11 @@ pub(crate) fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dl
             status,
         } => {
             if *status == sle_dli::SleStatus::Success {
-                if shared.conn.confirm_connecting_by_addr(addr).is_none() {
-                    // Incoming connection — no prior ConnectPending entry.
-                    // Auto-create a Connected entry for the acceptor side.
+                if shared.conn.confirm_connecting_by_addr(addr).is_none()
+                    && !shared.conn.has_addr(addr)
+                {
+                    // Incoming connection — no prior ConnectPending entry
+                    // and no existing entry for this address.
                     let _ = shared.conn.accept_incoming(*evt_handle, addr);
                 }
                 genl_bridge::notify_event(0x01, 0, addr);
@@ -364,7 +372,7 @@ pub(crate) fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dl
 /// Drain all immediately available controller events and process them.
 ///
 /// Used after ioctl commands to handle synchronous controller responses
-/// (VirtualController, UartController) inline without waiting for the
+/// (UartController, SpiController) inline without waiting for the
 /// next EventPump cycle. Also drains USB event ring entries so that
 /// multi-step protocol exchanges (e.g. pairing) can complete within
 /// a single ioctl call.
@@ -376,7 +384,7 @@ pub(crate) fn drain_controller_events(shared: &mut SubsystemShared) {
     for _round in 0..16 {
         let mut drained_this_round = 0u32;
 
-        // 1. VirtualController events
+        // 1. Inline controller events (UART/SPI synchronous responses)
         while let Some(ev) = shared.controller.poll_event() {
             process_controller_event(shared, &ev);
             drained_this_round += 1;
@@ -386,14 +394,29 @@ pub(crate) fn drain_controller_events(shared: &mut SubsystemShared) {
             }
         }
 
-        // 2. USB event ring entries
+        // 2. USB event ring entries (with device-ID filtering)
         let mut tagged: [(Option<u16>, Option<sle_dli::SleEvent>); 64] =
             [const { (None, None) }; 64];
         let count = sle_usb::drain_usb_events(&mut tagged);
+        let active = shared.active_dev_id;
         for item in tagged.iter_mut().take(count) {
-            let (_dev_id, ev_opt) = core::mem::take(item);
+            let (dev_id, ev_opt) = core::mem::take(item);
             if let Some(ev) = ev_opt {
-                process_controller_event(shared, &ev);
+                if dev_id.is_none() || dev_id == active {
+                    process_controller_event(shared, &ev);
+                } else {
+                    let is_conn_lifecycle = matches!(
+                        ev,
+                        sle_dli::SleEvent::ConnComplete { .. }
+                            | sle_dli::SleEvent::Disconnected { .. }
+                    );
+                    if is_conn_lifecycle {
+                        drained_this_round += 1;
+                        total += 1;
+                        continue;
+                    }
+                    process_controller_event(shared, &ev);
+                }
                 drained_this_round += 1;
                 total += 1;
                 if total >= 256 {
@@ -438,13 +461,15 @@ impl WorkItem for EventPump {
         // Drain all pending controller events into both the broadcast ring
         // (for read() delivery) and the DLI event ring (for DLI_POLL_EVENT).
         // Also resolve pending commands from the management plane.
+        //
+        // The outer loop retries after processing events because
+        // process_controller_event() may send new DLI commands whose
+        // USB responses arrive while we still hold the SUBSYSTEM lock.
+        // Without retrying, those responses would wait until the next
+        // heartbeat (up to 500ms) — too slow for multi-step sequences
+        // like pairing which need sub-millisecond round-trips.
         let mut _pumped = 0u32;
         let mut rearm_jiffies = msecs_to_jiffies(EVENT_PUMP_HEARTBEAT_MS) as u64;
-
-        // Collect tagged events from USB event ring first (minimal lock hold).
-        let mut tagged_events: [(Option<u16>, Option<sle_dli::SleEvent>); 64] =
-            [const { (None, None) }; 64];
-        let tagged_count = sle_usb::drain_usb_events(&mut tagged_events);
 
         // Log USB event ring overflow if any events were dropped.
         {
@@ -457,80 +482,120 @@ impl WorkItem for EventPump {
             }
         }
 
-        {
-            let mut ss = SUBSYSTEM.lock();
-            if let Some(ref mut shared) = *ss {
-                // Process VirtualController events (untagged, always active device).
-                while let Some(ev) = shared.controller.poll_event() {
-                    process_controller_event(shared, &ev);
-                    _pumped += 1;
-                    if _pumped >= 64 {
-                        break;
-                    }
-                }
+        // Outer retry loop: keep draining until no new events arrive.
+        // Limit iterations to avoid hogging the CPU if events keep arriving.
+        for _pass in 0..16u32 {
+            let mut tagged_events: [(Option<u16>, Option<sle_dli::SleEvent>); 64] =
+                [const { (None, None) }; 64];
+            let tagged_count = sle_usb::drain_usb_events(&mut tagged_events);
+            let mut drained_this_pass = 0u32;
 
-                // Process tagged USB events, routing to correct device.
-                for item in tagged_events.iter_mut().take(tagged_count) {
-                    let (dev_id, ev_opt) = core::mem::take(item);
-                    if let Some(ev) = ev_opt {
-                        let active = shared.active_dev_id;
-                        if dev_id.is_none() || dev_id == active {
-                            // Event belongs to active device: process directly.
-                            process_controller_event(shared, &ev);
-                        } else if let Some(target_id) = dev_id {
-                            // Event belongs to a non-active device.
-                            // Temporarily swap to the target device, process,
-                            // then swap back.
-                            if shared.switch_to_device(target_id).is_ok() {
+            {
+                let mut ss = SUBSYSTEM.lock();
+                if let Some(ref mut shared) = *ss {
+                    // Process inline controller events (untagged, always active device).
+                    while let Some(ev) = shared.controller.poll_event() {
+                        process_controller_event(shared, &ev);
+                        _pumped += 1;
+                        drained_this_pass += 1;
+                        if _pumped >= 256 {
+                            break;
+                        }
+                    }
+
+                    // Process tagged USB events, routing to correct device.
+                    for item in tagged_events.iter_mut().take(tagged_count) {
+                        let (dev_id, ev_opt) = core::mem::take(item);
+                        if let Some(ev) = ev_opt {
+                            let active = shared.active_dev_id;
+                            if dev_id.is_none() || dev_id == active {
                                 process_controller_event(shared, &ev);
-                                if let Some(orig_id) = active {
-                                    let _ = shared.switch_to_device(orig_id);
-                                }
-                            } else {
-                                pr_warn!(
-                                    "sparklink: dropped event for device {} (switch failed)\n",
-                                    target_id
+                            } else if let Some(target_id) = dev_id {
+                                // Events from non-active USB devices: skip
+                                // connection lifecycle events (ConnComplete /
+                                // Disconnected) because those are the
+                                // acceptor-side mirrors of connections already
+                                // tracked on the active device.  Processing
+                                // them would create duplicate entries in the
+                                // shared ConnManager.
+                                let is_conn_lifecycle = matches!(
+                                    ev,
+                                    sle_dli::SleEvent::ConnComplete { .. }
+                                        | sle_dli::SleEvent::Disconnected { .. }
                                 );
+                                if is_conn_lifecycle {
+                                    _pumped += 1;
+                                    drained_this_pass += 1;
+                                    continue;
+                                }
+                                if shared.switch_to_device(target_id).is_ok() {
+                                    process_controller_event(shared, &ev);
+                                    if let Some(orig_id) = active {
+                                        let _ = shared.switch_to_device(orig_id);
+                                    }
+                                } else {
+                                    pr_warn!(
+                                        "sparklink: dropped event for device {} (switch failed)\n",
+                                        target_id
+                                    );
+                                }
+                            }
+                            _pumped += 1;
+                            drained_this_pass += 1;
+                        }
+                    }
+
+                    // Only perform maintenance on the final pass.
+                    if drained_this_pass == 0 || _pumped >= 256 {
+                        let expired = shared.cmd_pending.expire_stale();
+                        if expired > 0 {
+                            pr_warn!("sparklink: {} pending command(s) timed out\n", expired);
+                        }
+                        shared.cmd_pending.gc();
+
+                        let timed_out = shared.conn.check_supervision_timeouts();
+                        for &h in timed_out.iter() {
+                            if let Ok(peer) = shared.conn.timeout_disconnect(h) {
+                                shared
+                                    .broadcast
+                                    .publish(sle_event::SleWireEvent::conn_state(
+                                        h,
+                                        sle_conn::ConnState::Connected as u8,
+                                        sle_conn::ConnState::Idle as u8,
+                                        peer,
+                                        0x08,
+                                    ));
                             }
                         }
-                        _pumped += 1;
+
+                        let heartbeat = msecs_to_jiffies(EVENT_PUMP_HEARTBEAT_MS) as u64;
+                        rearm_jiffies = match shared.conn.next_supervision_jiffies() {
+                            Some(j) if j < heartbeat => j,
+                            _ => heartbeat,
+                        };
                     }
                 }
+            }
 
-                // Expire stale commands and garbage-collect resolved entries.
-                let expired = shared.cmd_pending.expire_stale();
-                if expired > 0 {
-                    pr_warn!("sparklink: {} pending command(s) timed out\n", expired);
-                }
-                shared.cmd_pending.gc();
-
-                // Check supervision timeouts on all connected entries.
-                let timed_out = shared.conn.check_supervision_timeouts();
-                for &h in timed_out.iter() {
-                    if let Ok(peer) = shared.conn.timeout_disconnect(h) {
-                        shared
-                            .broadcast
-                            .publish(sle_event::SleWireEvent::conn_state(
-                                h,
-                                sle_conn::ConnState::Connected as u8,
-                                sle_conn::ConnState::Idle as u8,
-                                peer,
-                                0x08, // supervision timeout
-                            ));
-                    }
-                }
-
-                // Compute rearm delay: use the nearest supervision
-                // deadline when connections exist, capped by heartbeat.
-                let heartbeat = msecs_to_jiffies(EVENT_PUMP_HEARTBEAT_MS) as u64;
-                rearm_jiffies = match shared.conn.next_supervision_jiffies() {
-                    Some(j) if j < heartbeat => j,
-                    _ => heartbeat,
-                };
+            if drained_this_pass == 0 || _pumped >= 256 {
+                break;
             }
         }
-        // Re-arm with computed interval — either the nearest supervision
-        // deadline or the heartbeat, whichever is sooner.
+        // Re-arm: if events were processed this cycle, new USB responses
+        // may be in-flight (e.g. pairing multi-step flow).  Set a fast-poll
+        // countdown so subsequent empty runs still rearm at 1 jiffy,
+        // giving USB round-trips (~1-8ms) time to deliver responses.
+        if _pumped > 0 {
+            // Reset countdown: stay in fast-poll for up to 64 more runs.
+            FAST_POLL_REMAINING.store(64, core::sync::atomic::Ordering::Relaxed);
+            rearm_jiffies = 1;
+        } else {
+            let remaining = FAST_POLL_REMAINING.load(core::sync::atomic::Ordering::Relaxed);
+            if remaining > 0 {
+                FAST_POLL_REMAINING.store(remaining - 1, core::sync::atomic::Ordering::Relaxed);
+                rearm_jiffies = 1;
+            }
+        }
         let _ = workqueue::system()
             .enqueue_delayed(this, rearm_jiffies as kernel::time::Jiffies);
     }

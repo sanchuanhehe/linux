@@ -1003,6 +1003,11 @@ impl ConnManager {
         None
     }
 
+    /// Check if any connection entry (in any state) references this peer address.
+    pub fn has_addr(&self, addr: &[u8; 6]) -> bool {
+        self.connections.iter().any(|e| e.peer_addr == *addr)
+    }
+
     /// Accept an incoming connection from a remote peer.
     /// Creates a Connected entry using the controller-provided handle.
     pub fn accept_incoming(&mut self, handle: u16, addr: &[u8; 6]) -> Result {

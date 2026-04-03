@@ -507,7 +507,7 @@ pub(crate) struct SubsystemShared {
     pub(crate) cmd_pending: sle_mgmt::CmdPendingQueue,
     /// Outgoing command request queue (async dispatch).
     pub(crate) cmd_queue: sle_mgmt::CmdRequestQueue,
-    /// Transport protocol registry (H4, USB, SPI, virtual).
+    /// Transport protocol registry (H4, USB, SPI).
     pub(crate) proto_registry: sle_transport::SleProtoRegistry,
     /// Device-to-transport binding table.
     pub(crate) dev_bindings: sle_transport::SleBindingTable,
@@ -564,7 +564,7 @@ impl SubsystemShared {
         let placeholder = [0u8; 6];
         let boxed = match PerDeviceState::new_boxed(
             placeholder,
-            sle_dli::ControllerBackend::new_virtual(placeholder),
+            sle_dli::ControllerBackend::new_none(),
         ) {
             Ok(b) => b,
             Err(_) => {
@@ -750,7 +750,7 @@ pub(crate) fn sle_attach_device(info: &sle_transport::SleAttachInfo) -> Result<u
 ///
 /// Called from USB disconnect, serdev remove, or module unload cleanup.
 /// Removes the transport binding and unregisters the SleDev.  If the
-/// device was the active one, reverts to the virtual backend.  If it
+/// device was the active one, reverts to the no-controller state.  If it
 /// was inactive, its saved state is discarded.
 pub(crate) fn sle_detach_device(dev_id: u16) {
     let mut ss = SUBSYSTEM.lock();
@@ -759,19 +759,18 @@ pub(crate) fn sle_detach_device(dev_id: u16) {
         ss.dev_bindings.remove(dev_id);
 
         if ss.active_dev_id == Some(dev_id) {
-            // Active device detached: revert to virtual controller.
-            let virt_addr = [0x5E, 0x00, 0x00, 0x00, 0x00, 0x00];
-            let backend = sle_dli::ControllerBackend::new_virtual(virt_addr);
-            match PerDeviceState::new_boxed(virt_addr, backend) {
-                Ok(virt_state) => {
+            // Active device detached: revert to no-controller state.
+            let addr = [0x5E, 0x00, 0x00, 0x00, 0x00, 0x00];
+            let backend = sle_dli::ControllerBackend::new_none();
+            match PerDeviceState::new_boxed(addr, backend) {
+                Ok(empty_state) => {
                     // Don't save the detaching device's state.
                     ss.active_dev_id = None;
-                    PerDeviceState::restore_box_into(virt_state, ss);
-                    // active_dev_id stays None (no registered virtual device).
-                    pr_info!("sparklink: reverted to virtual controller\n");
+                    PerDeviceState::restore_box_into(empty_state, ss);
+                    pr_info!("sparklink: reverted to no-controller state\n");
                 }
                 Err(_) => {
-                    pr_err!("sparklink: OOM reverting to virtual controller\n");
+                    pr_err!("sparklink: OOM reverting controller state\n");
                 }
             }
         } else {
@@ -1312,9 +1311,11 @@ fn init_subsystem() -> Result<SubsystemGuard> {
     let controller = match sle_configfs::controller_type() {
         1 => sle_dli::ControllerBackend::new_uart(addr, sle_uart::UartConfig::default()),
         2 => sle_dli::ControllerBackend::new_spi(addr, sle_spi::SpiConfig::default()),
-        _ => sle_dli::ControllerBackend::new_virtual(addr),
+        _ => sle_dli::ControllerBackend::new_none(),
     };
-    controller.open()?;
+    // Only open if a real backend was configured; None is deferred
+    // until a USB/serdev device attaches.
+    let _ = controller.open();
 
     let mut conn = ConnManager::new(addr);
     conn.set_max_connections(sle_configfs::max_connections() as usize);
@@ -1331,9 +1332,16 @@ fn init_subsystem() -> Result<SubsystemGuard> {
     let mut proto_registry = sle_transport::SleProtoRegistry::new();
     sle_transport::register_builtin_protos(&mut proto_registry);
 
-    let ctrl_info = controller.info();
     let mut dev_registry = sle_dev::SleDevRegistry::new();
-    let dev_id = dev_registry.register(&ctrl_info).ok();
+    // Only register a device at init if a real controller backend is
+    // configured (UART/SPI via configfs).  For None (the default),
+    // the first device is registered when a USB/serdev driver probes.
+    let dev_id = if !controller.is_none() {
+        let ctrl_info = controller.info();
+        dev_registry.register(&ctrl_info).ok()
+    } else {
+        None
+    };
 
     *ss = Some(KBox::init(
         init!(SubsystemShared {
@@ -1521,7 +1529,7 @@ fn ioctl_dispatch_adv_basic(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Res
                 };
             } else {
                 info.state = SciState::Idle as u8;
-                info.bus = SciBus::Virtual as u8;
+                info.bus = SciBus::Virtual as u8; // 0 = no controller
                 info.addr = SleAddr {
                     b: [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01],
                 };

@@ -6,7 +6,7 @@
 //! stack and hardware controller drivers, following T/XS 10003-2025.
 //! Every SLE radio chip driver implements the [`SleController`] trait;
 //! the core dispatches operations through this trait without knowing
-//! the underlying transport (USB, UART, SPI, SDIO, or virtual loopback).
+//! the underlying transport (USB, UART, SPI, or SDIO).
 //!
 //! The DLI packet model uses typed channels identical to the standard:
 //!   - Command (Host → Controller): opcode + parameters
@@ -20,8 +20,6 @@
 
 #![allow(dead_code, unreachable_pub)]
 
-use core::cell::Cell;
-use core::cell::RefCell;
 use kernel::alloc::KVec;
 use kernel::prelude::*;
 
@@ -1093,7 +1091,7 @@ pub enum SleEvent {
 
 /// The SparkLink Driver Layer Interface.
 ///
-/// Each SLE controller driver (USB, UART, SPI, virtual, etc.) implements
+/// Each SLE controller driver (USB, UART, SPI, etc.) implements
 /// this trait. The host protocol stack holds a reference to the active
 /// controller and calls these methods to drive the radio.
 ///
@@ -1138,244 +1136,6 @@ pub trait SleController: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Virtual controller (built-in loopback for testing)
-// ---------------------------------------------------------------------------
-
-/// A purely software-based SLE controller for testing.
-///
-/// All operations are loopback: advertising data is immediately available
-/// as scan results, connections are looped back locally, etc.
-pub struct VirtualController {
-    addr: [u8; 6],
-    opened: Cell<bool>,
-    pending_events: RefCell<[Option<SleEvent>; CTRL_EVENT_RING_SIZE]>,
-    event_head: Cell<usize>,
-    event_tail: Cell<usize>,
-    /// Pairing method hint from the most recent RequestPair command.
-    pair_method_hint: Cell<u8>,
-}
-
-// SAFETY: VirtualController is only used inside Mutex<ControllerBackend> in
-// SparkLinkCtl.  The Mutex ensures exclusive access, making Cell/RefCell safe.
-unsafe impl Send for VirtualController {}
-// SAFETY: VirtualController is only used inside Mutex<ControllerBackend> in
-// SparkLinkCtl.  The Mutex ensures exclusive access, making Cell/RefCell safe.
-unsafe impl Sync for VirtualController {}
-
-impl VirtualController {
-    /// Create a new virtual controller with the given address.
-    pub fn new(addr: [u8; 6]) -> Self {
-        Self {
-            addr,
-            opened: Cell::new(false),
-            pending_events: RefCell::new([const { None }; CTRL_EVENT_RING_SIZE]),
-            event_head: Cell::new(0),
-            event_tail: Cell::new(0),
-            pair_method_hint: Cell::new(0),
-        }
-    }
-
-    fn enqueue_event(&self, ev: SleEvent) {
-        let tail = self.event_tail.get();
-        let next = (tail + 1) % CTRL_EVENT_RING_SIZE;
-        if next == self.event_head.get() {
-            pr_warn!("sparklink-virtual: controller event ring full, dropping event\n");
-            return; // queue full, drop
-        }
-        self.pending_events.borrow_mut()[tail] = Some(ev);
-        self.event_tail.set(next);
-        // Wake the EventPump immediately so the event is processed
-        // without waiting for the heartbeat cycle.
-        super::sle_workers::kick_event_pump();
-    }
-}
-
-impl SleController for VirtualController {
-    fn info(&self) -> SleControllerInfo {
-        let mut info = SleControllerInfo::default();
-        let name = b"sparklink-virtual";
-        info.name[..name.len()].copy_from_slice(name);
-        info.bus = SleBus::Virtual;
-        info.addr = self.addr;
-        info.fw_version = 0x0001_0000; // 1.0.0
-        info.features = (SleFeature::Encryption as u64)
-            | (SleFeature::Mcs4 as u64)
-            | (SleFeature::Pilot8to1 as u64)
-            | (SleFeature::Crc32 as u64);
-        info.max_pdu_payload = 255;
-        info.max_connections = 8;
-        info.max_mtu = 512;
-        info.max_mps = 247;
-        info.transport_modes = SLE_TRANSPORT_UNRELIABLE | SLE_TRANSPORT_RELIABLE;
-        info.measurement_cap = SLE_MEAS_RSSI;
-        info.security_cap = SLE_SEC_AES_CCM | SLE_SEC_ECDH_P256;
-        info
-    }
-
-    fn open(&self) -> Result {
-        if self.opened.get() {
-            return Err(EBUSY);
-        }
-        self.opened.set(true);
-        pr_info!("sparklink-virtual: controller opened\n");
-        Ok(())
-    }
-
-    fn close(&self) {
-        self.opened.set(false);
-        pr_info!("sparklink-virtual: controller closed\n");
-    }
-
-    fn send_command(&self, opcode: SleOpcode, params: &[u8]) -> Result {
-        pr_debug!(
-            "sparklink-virtual: cmd {:?} (0x{:04x})\n",
-            opcode,
-            opcode as u16
-        );
-        // Generate a CommandComplete event for loopback testing
-        self.enqueue_event(SleEvent::CommandComplete {
-            opcode,
-            status: SleStatus::Success,
-            data: KVec::new(),
-        });
-        // Generate additional events for operations that produce separate
-        // asynchronous notifications in real DLI controllers.
-        match opcode {
-            SleOpcode::CreateConnection if params.len() >= 6 => {
-                let mut addr = [0u8; 6];
-                addr.copy_from_slice(&params[..6]);
-                // Simulate ConnComplete with handle = first non-zero addr byte
-                let handle = u16::from(params[5]);
-                self.enqueue_event(SleEvent::ConnComplete {
-                    handle: if handle == 0 { 1 } else { handle },
-                    addr,
-                    status: SleStatus::Success,
-                });
-            }
-            SleOpcode::Disconnect if params.len() >= 2 => {
-                let handle = u16::from_le_bytes([params[0], params[1]]);
-                self.enqueue_event(SleEvent::Disconnected {
-                    handle,
-                    reason: 0, // success
-                });
-            }
-
-            // --- Pairing simulation (T/XS 10003-2025 §8.6) ---
-            // Each command triggers the next event in the pairing sequence.
-            SleOpcode::RequestPair if params.len() >= 3 => {
-                let handle = u16::from_le_bytes([params[0], params[1]]);
-                let auth_req = params[2];
-                // Save method hint (4th byte) for PairOptionReport
-                let method_hint = if params.len() >= 4 { params[3] } else { 0 };
-                self.pair_method_hint.set(method_hint);
-                self.enqueue_event(SleEvent::PairInfoExchange {
-                    handle,
-                    io_cap: 0x01,        // DisplayYesNo
-                    oob_flag: 0x00,
-                    auth_req,
-                    max_key_len: 16,
-                    sec_dist: 0x03,      // IRK + identity
-                    psk_ind: 0x00,
-                    crypto_cap: [0x03, 0x03, 0x01, 0x02], // AC1|AC2, AC1|AC2, HA1, KE2
-                });
-            }
-            SleOpcode::PairInfoExchange => {
-                // Reply received: produce PairOptionReport
-                let handle = if params.len() >= 2 {
-                    u16::from_le_bytes([params[0], params[1]])
-                } else {
-                    0
-                };
-                let mut pubkey = KVec::new();
-                for _ in 0..32 {
-                    let _ = pubkey.push(0xAB, GFP_KERNEL);
-                }
-                // Map method_hint to DLI auth_method code
-                let auth_method = match self.pair_method_hint.get() {
-                    1 => 0x01, // JustWorks
-                    2 => 0x05, // PSK
-                    3 => 0x00, // NumericComparison
-                    4 => 0x02, // PasskeyEntry
-                    5 => 0x04, // OOB
-                    6 => 0x03, // Password
-                    _ => 0x01, // default: JustWorks
-                };
-                self.enqueue_event(SleEvent::PairOptionReport {
-                    handle,
-                    key_len: 16,
-                    auth_method,
-                    crypto_alg: [0x01, 0x01, 0x01, 0x02],
-                    public_key: pubkey,
-                });
-            }
-            SleOpcode::PairOptionAccept => {
-                let handle = if params.len() >= 2 {
-                    u16::from_le_bytes([params[0], params[1]])
-                } else {
-                    0
-                };
-                self.enqueue_event(SleEvent::PairRandom {
-                    handle,
-                    random: [0x11; 16],
-                });
-            }
-            SleOpcode::PairRandom => {
-                let handle = if params.len() >= 2 {
-                    u16::from_le_bytes([params[0], params[1]])
-                } else {
-                    0
-                };
-                self.enqueue_event(SleEvent::PairConfirm {
-                    handle,
-                    confirm: [0x22; 16],
-                });
-            }
-            SleOpcode::PairConfirm => {
-                let handle = if params.len() >= 2 {
-                    u16::from_le_bytes([params[0], params[1]])
-                } else {
-                    0
-                };
-                self.enqueue_event(SleEvent::DHKeyCheck {
-                    handle,
-                    dhkey_check: [0x33; 16],
-                });
-            }
-            SleOpcode::DhkeyVerify => {
-                // Final step: no further events needed, security state
-                // machine transitions to Paired in on_dhkey_verify().
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn send_data(&self, handle: u16, data: &[u8]) -> Result {
-        pr_debug!(
-            "sparklink-virtual: data tx handle={} len={}\n",
-            handle,
-            data.len()
-        );
-        Ok(())
-    }
-
-    fn poll_event(&self) -> Option<SleEvent> {
-        let head = self.event_head.get();
-        if head == self.event_tail.get() {
-            return None;
-        }
-        let ev = self.pending_events.borrow_mut()[head].take();
-        self.event_head.set((head + 1) % CTRL_EVENT_RING_SIZE);
-        ev
-    }
-
-    fn reset(&self) -> Result {
-        pr_info!("sparklink-virtual: controller reset\n");
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Controller dispatch enum (avoids trait objects)
 // ---------------------------------------------------------------------------
 
@@ -1384,7 +1144,8 @@ impl SleController for VirtualController {
 /// This enum wraps all supported controller backends, allowing static
 /// dispatch without heap-allocated trait objects.
 pub enum ControllerBackend {
-    Virtual(VirtualController),
+    /// No controller attached. All operations return `ENODEV`.
+    None,
     Uart(super::sle_uart::UartController),
     Spi(super::sle_spi::SpiController),
     Usb(super::sle_usb::UsbController),
@@ -1401,8 +1162,14 @@ unsafe impl Send for ControllerBackend {}
 unsafe impl Sync for ControllerBackend {}
 
 impl ControllerBackend {
-    pub fn new_virtual(addr: [u8; 6]) -> Self {
-        Self::Virtual(VirtualController::new(addr))
+    /// Create a placeholder backend with no hardware attached.
+    pub fn new_none() -> Self {
+        Self::None
+    }
+
+    /// Returns `true` if no controller hardware is attached.
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
     }
 
     pub fn new_uart(addr: [u8; 6], config: super::sle_uart::UartConfig) -> Self {
@@ -1652,7 +1419,7 @@ impl ControllerBackend {
 impl SleController for ControllerBackend {
     fn info(&self) -> SleControllerInfo {
         match self {
-            Self::Virtual(c) => c.info(),
+            Self::None => SleControllerInfo::default(),
             Self::Uart(c) => c.info(),
             Self::Spi(c) => c.info(),
             Self::Usb(c) => c.info(),
@@ -1662,7 +1429,7 @@ impl SleController for ControllerBackend {
 
     fn open(&self) -> Result {
         match self {
-            Self::Virtual(c) => c.open(),
+            Self::None => Err(ENODEV),
             Self::Uart(c) => c.open(),
             Self::Spi(c) => c.open(),
             Self::Usb(c) => c.open(),
@@ -1672,7 +1439,7 @@ impl SleController for ControllerBackend {
 
     fn close(&self) {
         match self {
-            Self::Virtual(c) => c.close(),
+            Self::None => {},
             Self::Uart(c) => c.close(),
             Self::Spi(c) => c.close(),
             Self::Usb(c) => c.close(),
@@ -1682,7 +1449,7 @@ impl SleController for ControllerBackend {
 
     fn send_command(&self, opcode: SleOpcode, params: &[u8]) -> Result {
         match self {
-            Self::Virtual(c) => c.send_command(opcode, params),
+            Self::None => Err(ENODEV),
             Self::Uart(c) => c.send_command(opcode, params),
             Self::Spi(c) => c.send_command(opcode, params),
             Self::Usb(c) => c.send_command(opcode, params),
@@ -1692,7 +1459,7 @@ impl SleController for ControllerBackend {
 
     fn send_data(&self, handle: u16, data: &[u8]) -> Result {
         match self {
-            Self::Virtual(c) => c.send_data(handle, data),
+            Self::None => Err(ENODEV),
             Self::Uart(c) => c.send_data(handle, data),
             Self::Spi(c) => c.send_data(handle, data),
             Self::Usb(c) => c.send_data(handle, data),
@@ -1702,7 +1469,7 @@ impl SleController for ControllerBackend {
 
     fn poll_event(&self) -> Option<SleEvent> {
         match self {
-            Self::Virtual(c) => c.poll_event(),
+            Self::None => None,
             Self::Uart(c) => c.poll_event(),
             Self::Spi(c) => c.poll_event(),
             Self::Usb(c) => c.poll_event(),
@@ -1712,7 +1479,7 @@ impl SleController for ControllerBackend {
 
     fn reset(&self) -> Result {
         match self {
-            Self::Virtual(c) => c.reset(),
+            Self::None => Err(ENODEV),
             Self::Uart(c) => c.reset(),
             Self::Spi(c) => c.reset(),
             Self::Usb(c) => c.reset(),

@@ -4,7 +4,7 @@
 //!
 //! Provides the `SleDev` struct — the SparkLink equivalent of Bluetooth's
 //! `hci_dev`.  Each registered `SleDev` represents a single SLE controller
-//! attached via a transport bus (UART, USB, SPI, SDIO, or virtual loopback).
+//! attached via a transport bus (UART, USB, SPI, or SDIO).
 //!
 //! The global `SLE_DEV_REGISTRY` tracks all registered devices and provides
 //! index-based lookup.  Device lifecycle is modelled as a set of atomic

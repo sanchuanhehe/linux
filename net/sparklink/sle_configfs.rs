@@ -28,7 +28,7 @@ static POWER_MODE: AtomicU8 = AtomicU8::new(0);
 static CONTROLLER_TYPE: AtomicU8 = AtomicU8::new(0);
 
 /// Get the configured controller type.
-/// 0 = Virtual, 1 = UART, 2 = SPI.
+/// 0 = None (no controller), 1 = UART, 2 = SPI.
 pub(crate) fn controller_type() -> u8 {
     CONTROLLER_TYPE.load(Ordering::Relaxed)
 }
@@ -195,7 +195,7 @@ impl configfs::AttributeOperations<4> for SparkLinkConfig {
     }
 }
 
-// Attribute 5: controller_type (read/write, 0=virtual, 1=uart, 2=spi)
+// Attribute 5: controller_type (read/write, 0=none, 1=uart, 2=spi)
 #[vtable]
 impl configfs::AttributeOperations<5> for SparkLinkConfig {
     type Data = SparkLinkConfig;
@@ -203,7 +203,7 @@ impl configfs::AttributeOperations<5> for SparkLinkConfig {
     fn show(_data: &SparkLinkConfig, page: &mut [u8; PAGE_SIZE]) -> Result<usize> {
         let ct = CONTROLLER_TYPE.load(Ordering::Relaxed);
         let label = match ct {
-            0 => b"virtual\n" as &[u8],
+            0 => b"none\n" as &[u8],
             1 => b"uart\n",
             2 => b"spi\n",
             _ => b"unknown\n",
@@ -215,7 +215,7 @@ impl configfs::AttributeOperations<5> for SparkLinkConfig {
     fn store(_data: &SparkLinkConfig, page: &[u8]) -> Result {
         let s = core::str::from_utf8(page).map_err(|_| EINVAL)?;
         let val = match s.trim() {
-            "virtual" | "0" => 0u8,
+            "none" | "0" => 0u8,
             "uart" | "1" => 1u8,
             "spi" | "2" => 2u8,
             _ => return Err(EINVAL),

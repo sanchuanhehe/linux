@@ -37,7 +37,7 @@ struct sle_adv_params {
 	__u16 interval_ms;
 	__u8  discovery_level;
 	__u8  _reserved[11];
-};
+} __attribute__((packed));
 
 struct sle_scan_params {
 	__u16 dev_index;
@@ -259,7 +259,7 @@ struct sle_sm4_block_test {
 	__u8  output[16];
 	__u8  decrypt;
 	__u8  _pad[15];
-};
+} __attribute__((packed));
 
 struct sle_hmac_test {
 	__u16 key_len;
@@ -267,7 +267,7 @@ struct sle_hmac_test {
 	__u8  key[64];
 	__u8  data[160];
 	__u8  digest[32];
-};
+} __attribute__((packed));
 
 struct sle_oob_data {
 	__u8 data[64];
@@ -435,7 +435,8 @@ struct sle_sync_cig_config {
 	__u8  retransmit_g2t;
 	__u8  retransmit_t2g;
 	__u16 handles_out[8];
-};
+	__u8  _tail_pad[2];
+} __attribute__((packed));
 
 struct sle_sync_big_config {
 	__u8  big_id;
@@ -451,14 +452,15 @@ struct sle_sync_big_config {
 	__u8  retransmit_g2t;
 	__u8  retransmit_t2g;
 	__u16 handles_out[8];
-};
+	__u8  _tail_pad[2];
+} __attribute__((packed));
 
 struct sle_sync_create_cmd {
 	__u8  group_id;
 	__u8  link_count;
 	__u8  _pad[2];
 	__u16 acl_handles[8];
-};
+} __attribute__((packed));
 
 struct sle_sync_datapath_cmd {
 	__u16 sync_handle;
@@ -466,7 +468,7 @@ struct sle_sync_datapath_cmd {
 	__u8  path_id;
 	__u8  codec_id;
 	__u8  _pad[3];
-};
+} __attribute__((packed));
 
 struct sle_sync_link_info {
 	__u16 sync_handle;
@@ -481,7 +483,7 @@ struct sle_sync_link_info {
 	__u16 max_sdu_t2g;
 	__u8  datapath_configured;
 	__u8  _pad2[3];
-};
+} __attribute__((packed));
 
 /* --- DLI controller ----------------------------------------------------- */
 
@@ -511,7 +513,22 @@ struct sle_dli_event {
 	__u8  data[240];
 	__u8  addr[6];
 	__u8  _pad[2];
-};
+} __attribute__((packed));
+
+struct sle_dli_cmd {
+	__u16 opcode;
+	__u16 param_len;
+	__u32 seq;
+	__u8  params[240];
+} __attribute__((packed));
+
+struct sle_mgmt_stats {
+	__u16 pending;
+	__u16 _pad;
+	__u32 total_submitted;
+	__u32 total_resolved;
+	__u32 total_timeouts;
+} __attribute__((packed));
 
 /* --- PHY layer ---------------------------------------------------------- */
 
@@ -604,7 +621,7 @@ struct sle_event_stats {
 	__u64 total_enqueued;
 	__u64 total_dropped;
 	__u64 total_delivered;
-};
+} __attribute__((packed));
 
 /* =========================================================================
  * IOCTL magic and command definitions
@@ -731,14 +748,14 @@ struct sle_event_stats {
 struct ssap_remote_cmd {
 	__u16 conn_handle;
 	__u8  _reserved[2];
-};
+} __attribute__((packed));
 
 struct ssap_remote_discover {
 	__u16 conn_handle;
 	__u16 start_handle;
 	__u16 end_handle;
 	__u16 count;		/* output: number of entries discovered */
-};
+} __attribute__((packed));
 
 struct ssap_remote_read_write {
 	__u16 conn_handle;
@@ -746,7 +763,7 @@ struct ssap_remote_read_write {
 	__u16 length;
 	__u8  _pad[2];
 	__u8  data[248];
-};
+} __attribute__((packed));
 
 #define SL_IOCTL_SSAP_EXCHANGE_INFO	_IOW(SL_MAGIC, 0x5A, struct ssap_remote_cmd)
 #define SL_IOCTL_SSAP_REMOTE_DISCOVER	_IOWR(SL_MAGIC, 0x5B, struct ssap_remote_discover)
@@ -786,6 +803,8 @@ struct ssap_remote_read_write {
 #define SL_IOCTL_USB_DEV_COUNT		_IO(SL_MAGIC, 0x81)
 #define SL_IOCTL_DLI_POLL_EVENT		_IOR(SL_MAGIC, 0x82, struct sle_dli_event)
 #define SL_IOCTL_DLI_RESET		_IO(SL_MAGIC, 0x83)
+#define SL_IOCTL_DLI_SEND_CMD		_IOWR(SL_MAGIC, 0x84, struct sle_dli_cmd)
+#define SL_IOCTL_MGMT_STATS		_IOR(SL_MAGIC, 0x85, struct sle_mgmt_stats)
 
 /* --- Subsystem statistics ----------------------------------------------- */
 
@@ -813,7 +832,7 @@ struct sle_conn_peer_cap {
 	__u16	subversion;
 	__u8	version_valid;
 	__u8	_reserved[3];
-};
+} __attribute__((packed));
 
 struct sle_conn_param_update {
 	__u16	handle;
@@ -822,13 +841,13 @@ struct sle_conn_param_update {
 	__u16	latency;
 	__u16	supervision_timeout;
 	__u8	_reserved[2];
-};
+} __attribute__((packed));
 
 struct sle_conn_phy_update {
 	__u16	handle;
 	__u8	mcs_index;
 	__u8	bandwidth_mhz;
-};
+} __attribute__((packed));
 
 #define SL_IOCTL_CONN_READ_PEER_FEATURES _IOWR(SL_MAGIC, 0x98, struct sle_conn_peer_cap)
 #define SL_IOCTL_CONN_READ_PEER_VERSION	 _IOWR(SL_MAGIC, 0x99, struct sle_conn_peer_cap)

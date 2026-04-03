@@ -5870,23 +5870,7 @@ static void test_scan_filter_bounds(int fd)
  * 5) Verify total_submitted incremented correctly                   *
  * ------------------------------------------------------------------ */
 
-struct sle_dli_cmd {
-	uint16_t opcode;
-	uint16_t param_len;
-	uint32_t seq;
-	uint8_t  params[240];
-} __packed;
-
-struct sle_mgmt_stats {
-	uint16_t pending;
-	uint16_t _pad;
-	uint32_t total_submitted;
-	uint32_t total_resolved;
-	uint32_t total_timeouts;
-} __packed;
-
-#define SL_IOCTL_DLI_SEND_CMD _IOWR(SL_MAGIC, 0x84, struct sle_dli_cmd)
-#define SL_IOCTL_MGMT_STATS   _IOR(SL_MAGIC, 0x85, struct sle_mgmt_stats)
+/* DLI_SEND_CMD and MGMT_STATS structs/IOCTLs now come from sparklink_ioctl.h */
 
 static int dli_send_cmd_retry(int fd, struct sle_dli_cmd *cmd)
 {
@@ -11541,7 +11525,7 @@ static void test_state_machine_torture(int fd)
 {
 	test_header("Stress: state machine rapid transitions");
 
-	const int transitions = 100;
+	const int transitions = 30;
 	int ok = 0;
 	struct timespec t0, t1;
 

@@ -28,7 +28,7 @@ struct sci_dev_info {
 	__u8  addr[6];
 	__u8  name[32];
 	__u8  _reserved[24];
-} __attribute__((packed));
+};
 
 /* --- Advertising / scanning --------------------------------------------- */
 
@@ -37,7 +37,7 @@ struct sle_adv_params {
 	__u16 interval_ms;
 	__u8  discovery_level;
 	__u8  _reserved[11];
-} __attribute__((packed));
+};
 
 struct sle_scan_params {
 	__u16 dev_index;
@@ -45,7 +45,7 @@ struct sle_scan_params {
 	__u16 interval_ms;
 	__u8  filter_discovery_level;
 	__u8  _reserved[9];
-} __attribute__((packed));
+};
 
 /* Extended scan filter for service UUID matching (T/XS 20001-2025 §6.4).
  * Up to 4 standard 16-bit service UUIDs; a result passes if its
@@ -56,7 +56,7 @@ struct sle_scan_filter {
 	__u8  uuid_count;
 	__u8  _reserved[3];
 	__u16 uuids[4];
-} __attribute__((packed));
+};
 
 struct sle_ext_adv_config {
 	__u8  handle;
@@ -70,14 +70,14 @@ struct sle_ext_adv_config {
 	__u16 interval_ms;
 	__u8  ext_adv_timing;
 	__u8  _reserved[5];
-} __attribute__((packed));
+};
 
 struct sle_ext_adv_data {
 	__u8  handle;
 	__u8  _pad;
 	__u16 data_len;
 	__u8  data[252];
-} __attribute__((packed));
+};
 
 struct sle_ext_adv_info {
 	__u8  handle;
@@ -90,14 +90,14 @@ struct sle_ext_adv_info {
 	__u64 tx_count;
 	__u32 events_sent;
 	__u8  _pad[4];
-} __attribute__((packed));
+};
 
 struct sle_ext_adv_enable_params {
 	__u8  handle;
 	__u8  max_adv_events;
 	__u16 duration_10ms;
 	__u8  _reserved[4];
-} __attribute__((packed));
+};
 
 struct sle_inject_adv {
 	__u8  addr[6];
@@ -106,14 +106,14 @@ struct sle_inject_adv {
 	__u8  name[32];
 	__u8  name_len;
 	__u8  _reserved[7];
-} __attribute__((packed));
+};
 
 struct sle_inject_raw_adv {
 	__s8  rssi;
 	__u8  _pad;
 	__u16 pdu_len;
 	__u8  pdu_data[264];
-} __attribute__((packed));
+};
 
 /* --- Connection management ---------------------------------------------- */
 
@@ -125,7 +125,7 @@ struct sle_connect_params {
 	__u8  _pad;
 	__u16 timeout_10ms;
 	__u8  _reserved[4];
-} __attribute__((packed));
+};
 
 struct sle_conn_info {
 	__u64 tx_bytes;
@@ -152,14 +152,14 @@ struct sle_conn_info {
 	__u16 smtc_rx_credits;
 	__u16 dudtc_tx_credits;
 	__u16 dudtc_rx_credits;
-} __attribute__((packed));
+};
 
 struct sle_conn_data {
 	__u16 handle;
 	__u16 length;
 	__u8  data[255];
 	__u8  _reserved;
-} __attribute__((packed));
+};
 
 struct sle_inject_conn_resp {
 	__u16 handle;
@@ -170,21 +170,21 @@ struct sle_inject_conn_resp {
 	__u16 supervision_timeout;
 	__u16 data_mtu;
 	__u16 data_mps;
-} __attribute__((packed));
+};
 
 struct sle_conn_list {
 	__u16 count;
 	__u16 _pad;
 	__u16 handles[8];
 	__u8  _reserved[4];
-} __attribute__((packed));
+};
 
 struct sle_conn_mtu_params {
 	__u16 handle;
 	__u16 mtu;
 	__u16 mps;
 	__u16 _pad;
-} __attribute__((packed));
+};
 
 /* --- AFH (Adaptive Frequency Hopping) ----------------------------------- */
 
@@ -195,13 +195,13 @@ struct sle_afh_map_params {
 	__u8  map[10];
 	__u8  used_count;
 	__u8  _pad2;
-} __attribute__((packed));
+};
 
 struct sle_afh_rssi_report {
 	__u16 handle;
 	__u8  channel;
 	__s8  rssi_dbm;
-} __attribute__((packed));
+};
 
 struct sle_afh_classify_params {
 	__u16 handle;
@@ -210,7 +210,7 @@ struct sle_afh_classify_params {
 	__u8  map_out[10];
 	__u8  used_count;
 	__u8  _pad;
-} __attribute__((packed));
+};
 
 struct sle_afh_hop_info {
 	__u16 handle;
@@ -218,24 +218,24 @@ struct sle_afh_hop_info {
 	__u8  _pad;
 	__u16 freq_mhz;
 	__u16 event_counter;
-} __attribute__((packed));
+};
 
 struct sle_afh_retx_report {
 	__u16 handle;
 	__u8  channel;
 	__u8  retransmitted;
-} __attribute__((packed));
+};
 
 /* --- Security management ------------------------------------------------ */
 
 struct sle_psk_params {
 	__u8 psk[16];
-} __attribute__((packed));
+};
 
 struct sle_pair_params {
 	__u8 method;
 	__u8 _reserved[3];
-} __attribute__((packed));
+};
 
 struct sle_sec_info {
 	__u8 state;
@@ -244,14 +244,14 @@ struct sle_sec_info {
 	__u8 enc_enabled;
 	__u8 enc_key_fingerprint[4];
 	__u8 _reserved[8];
-} __attribute__((packed));
+};
 
 struct sle_hash_test {
 	__u16 in_len;
 	__u16 _pad;
 	__u8  data[220];
 	__u8  digest[32];
-} __attribute__((packed));
+};
 
 struct sle_sm4_block_test {
 	__u8  key[16];
@@ -259,7 +259,7 @@ struct sle_sm4_block_test {
 	__u8  output[16];
 	__u8  decrypt;
 	__u8  _pad[15];
-} __attribute__((packed));
+};
 
 struct sle_hmac_test {
 	__u16 key_len;
@@ -267,21 +267,21 @@ struct sle_hmac_test {
 	__u8  key[64];
 	__u8  data[160];
 	__u8  digest[32];
-} __attribute__((packed));
+};
 
 struct sle_oob_data {
 	__u8 data[64];
-} __attribute__((packed));
+};
 
 struct sle_passkey_input {
 	__u32 passkey;
-} __attribute__((packed));
+};
 
 struct sle_password_params {
 	__u8  len;
 	__u8  _reserved[3];
 	__u8  data[32];
-} __attribute__((packed));
+};
 
 /* --- RAL / RPA management ----------------------------------------------- */
 
@@ -294,13 +294,13 @@ struct sle_ral_add_params {
 	__u8  _reserved[2];
 	__u8  peer_irk[16];
 	__u8  local_irk[16];
-} __attribute__((packed));
+};
 
 struct sle_ral_remove_params {
 	__u8  peer_id_type;
 	__u8  _reserved;
 	__u8  peer_id[6];
-} __attribute__((packed));
+};
 
 struct sle_ral_query_params {
 	__u8  id_type;
@@ -308,7 +308,7 @@ struct sle_ral_query_params {
 	__u8  id[6];
 	__u8  rpa[6];
 	__u8  _pad[2];
-} __attribute__((packed));
+};
 
 /* --- Narrowband AFH measurement (T/XS 10003-2025 §8.7) ----------------- */
 
@@ -317,7 +317,7 @@ struct sle_meas_cap {
 	__u8  max_instances;
 	__u8  antenna_count;
 	__u8  _reserved;
-} __attribute__((packed));
+};
 
 struct sle_meas_link_param {
 	__u16 handle;
@@ -325,13 +325,13 @@ struct sle_meas_link_param {
 	__u8  config_index;
 	__u16 interval;
 	__u16 duration;
-} __attribute__((packed));
+};
 
 struct sle_meas_action {
 	__u16 handle;
 	__u8  action;
 	__u8  config_index;
-} __attribute__((packed));
+};
 
 /* --- SSAP service layer ------------------------------------------------- */
 
@@ -342,13 +342,13 @@ struct ssap_summary {
 	__u16 mtu;
 	__u16 notification_count;
 	__u8  _reserved[6];
-} __attribute__((packed));
+};
 
 struct ssap_read_write {
 	__u16 handle;
 	__u16 length;
 	__u8  data[252];
-} __attribute__((packed));
+};
 
 struct ssap_service_entry {
 	__u16 start_handle;
@@ -356,20 +356,20 @@ struct ssap_service_entry {
 	__u16 uuid16;
 	__u8  primary;
 	__u8  _pad;
-} __attribute__((packed));
+};
 
 struct ssap_service_list {
 	__u16 count;
 	__u8  _pad[2];
 	struct ssap_service_entry services[15];
-} __attribute__((packed));
+};
 
 struct ssap_notification {
 	__u16 handle;
 	__u8  indication;
 	__u8  length;
 	__u8  data[252];
-} __attribute__((packed));
+};
 
 struct ssap_add_service {
 	__u16 uuid16;
@@ -378,7 +378,7 @@ struct ssap_add_service {
 	__u8  uuid128[16];
 	__u16 start_handle;
 	__u8  _reserved[6];
-} __attribute__((packed));
+};
 
 struct ssap_add_property {
 	__u16 uuid16;
@@ -387,7 +387,7 @@ struct ssap_add_property {
 	__u8  value[248];
 	__u16 handle;
 	__u8  _reserved[2];
-} __attribute__((packed));
+};
 
 /* --- Power management --------------------------------------------------- */
 
@@ -405,19 +405,19 @@ struct sle_pm_info {
 	__u64 sniff_events;
 	__u64 idle_events;
 	__u8  _reserved[8];
-} __attribute__((packed));
+};
 
 struct sle_pm_state_cmd {
 	__u8 target_state;
 	__u8 _reserved[3];
-} __attribute__((packed));
+};
 
 struct sle_pm_interval {
 	__u16 min_interval;
 	__u16 max_interval;
 	__u16 latency;
 	__u16 supervision_timeout;
-} __attribute__((packed));
+};
 
 /* --- Sync link management ----------------------------------------------- */
 
@@ -436,7 +436,7 @@ struct sle_sync_cig_config {
 	__u8  retransmit_t2g;
 	__u16 handles_out[8];
 	__u8  _tail_pad[2];
-} __attribute__((packed));
+};
 
 struct sle_sync_big_config {
 	__u8  big_id;
@@ -453,14 +453,14 @@ struct sle_sync_big_config {
 	__u8  retransmit_t2g;
 	__u16 handles_out[8];
 	__u8  _tail_pad[2];
-} __attribute__((packed));
+};
 
 struct sle_sync_create_cmd {
 	__u8  group_id;
 	__u8  link_count;
 	__u8  _pad[2];
 	__u16 acl_handles[8];
-} __attribute__((packed));
+};
 
 struct sle_sync_datapath_cmd {
 	__u16 sync_handle;
@@ -468,7 +468,7 @@ struct sle_sync_datapath_cmd {
 	__u8  path_id;
 	__u8  codec_id;
 	__u8  _pad[3];
-} __attribute__((packed));
+};
 
 struct sle_sync_link_info {
 	__u16 sync_handle;
@@ -483,7 +483,7 @@ struct sle_sync_link_info {
 	__u16 max_sdu_t2g;
 	__u8  datapath_configured;
 	__u8  _pad2[3];
-} __attribute__((packed));
+};
 
 /* --- DLI controller ----------------------------------------------------- */
 
@@ -502,7 +502,7 @@ struct sle_dli_info {
 	__u16 features_ext;
 	__u8  name[32];
 	__u8  _reserved[4];
-} __attribute__((packed));
+};
 
 struct sle_dli_event {
 	__u8  event_type;
@@ -513,14 +513,14 @@ struct sle_dli_event {
 	__u8  data[240];
 	__u8  addr[6];
 	__u8  _pad[2];
-} __attribute__((packed));
+};
 
 struct sle_dli_cmd {
 	__u16 opcode;
 	__u16 param_len;
 	__u32 seq;
 	__u8  params[240];
-} __attribute__((packed));
+};
 
 struct sle_mgmt_stats {
 	__u16 pending;
@@ -528,7 +528,7 @@ struct sle_mgmt_stats {
 	__u32 total_submitted;
 	__u32 total_resolved;
 	__u32 total_timeouts;
-} __attribute__((packed));
+};
 
 /* --- PHY layer ---------------------------------------------------------- */
 
@@ -550,17 +550,17 @@ struct sle_phy_info {
 	__u8  code_rate_num;
 	__u8  code_rate_den;
 	__u8  _reserved[5];
-} __attribute__((packed));
+};
 
 struct sle_phy_mcs_cmd {
 	__u8  mcs_index;
 	__u8  _reserved[3];
-} __attribute__((packed));
+};
 
 struct sle_phy_txpower_cmd {
 	__s8  tx_power_dbm;
 	__u8  _reserved[3];
-} __attribute__((packed));
+};
 
 struct sle_phy_mcs_select {
 	__u32 min_kbps;
@@ -568,7 +568,7 @@ struct sle_phy_mcs_select {
 	__s16 sinr_db_x10;
 	__u8  bandwidth_mhz;
 	__u8  selected_mcs;
-} __attribute__((packed));
+};
 
 struct sle_phy_hop_info {
 	__u8  channel;
@@ -576,17 +576,17 @@ struct sle_phy_hop_info {
 	__u16 freq_mhz;
 	__u16 event_counter;
 	__u8  _reserved[2];
-} __attribute__((packed));
+};
 
 struct sle_phy_bw_cmd {
 	__u8  bandwidth_mhz;
 	__u8  _reserved[3];
-} __attribute__((packed));
+};
 
 struct sle_sinr_thresholds {
 	__s16 thresholds[13];
 	__u8  _pad[2];
-} __attribute__((packed));
+};
 
 /* --- Subsystem statistics ----------------------------------------------- */
 
@@ -604,7 +604,7 @@ struct sle_subsys_stats {
 	__u8  _pad2[3];
 	__u32 power_transitions;
 	__u32 crc_errors;
-} __attribute__((packed));
+};
 
 /* --- Event wire format -------------------------------------------------- */
 
@@ -613,7 +613,7 @@ struct sle_wire_event {
 	__u8  payload_len;
 	__u8  payload[40];
 	__u8  _pad[2];
-} __attribute__((packed));
+};
 
 struct sle_event_stats {
 	__u32 pending;
@@ -621,7 +621,7 @@ struct sle_event_stats {
 	__u64 total_enqueued;
 	__u64 total_dropped;
 	__u64 total_delivered;
-} __attribute__((packed));
+};
 
 /* =========================================================================
  * IOCTL magic and command definitions
@@ -748,14 +748,14 @@ struct sle_event_stats {
 struct ssap_remote_cmd {
 	__u16 conn_handle;
 	__u8  _reserved[2];
-} __attribute__((packed));
+};
 
 struct ssap_remote_discover {
 	__u16 conn_handle;
 	__u16 start_handle;
 	__u16 end_handle;
 	__u16 count;		/* output: number of entries discovered */
-} __attribute__((packed));
+};
 
 struct ssap_remote_read_write {
 	__u16 conn_handle;
@@ -763,7 +763,7 @@ struct ssap_remote_read_write {
 	__u16 length;
 	__u8  _pad[2];
 	__u8  data[248];
-} __attribute__((packed));
+};
 
 #define SL_IOCTL_SSAP_EXCHANGE_INFO	_IOW(SL_MAGIC, 0x5A, struct ssap_remote_cmd)
 #define SL_IOCTL_SSAP_REMOTE_DISCOVER	_IOWR(SL_MAGIC, 0x5B, struct ssap_remote_discover)
@@ -832,7 +832,7 @@ struct sle_conn_peer_cap {
 	__u16	subversion;
 	__u8	version_valid;
 	__u8	_reserved[3];
-} __attribute__((packed));
+};
 
 struct sle_conn_param_update {
 	__u16	handle;
@@ -841,13 +841,13 @@ struct sle_conn_param_update {
 	__u16	latency;
 	__u16	supervision_timeout;
 	__u8	_reserved[2];
-} __attribute__((packed));
+};
 
 struct sle_conn_phy_update {
 	__u16	handle;
 	__u8	mcs_index;
 	__u8	bandwidth_mhz;
-} __attribute__((packed));
+};
 
 #define SL_IOCTL_CONN_READ_PEER_FEATURES _IOWR(SL_MAGIC, 0x98, struct sle_conn_peer_cap)
 #define SL_IOCTL_CONN_READ_PEER_VERSION	 _IOWR(SL_MAGIC, 0x99, struct sle_conn_peer_cap)

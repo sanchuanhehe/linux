@@ -82,7 +82,7 @@
 #define DLI_EVT_CONN_ESTABLISHED  0x0015
 #define DLI_EVT_BROADCAST_REPORT  0x001A
 #define DLI_EVT_PAIR_REQUEST      0x001D
-#define DLI_EVT_DATA_RECEIVED     0x0020
+#define DLI_EVT_DATA_RECEIVED     0xFC01  /* vendor-defined, avoids 0x0020 PairOptionReport */
 
 /* Controller limits */
 #define MAX_CONNECTIONS   8
@@ -1128,10 +1128,11 @@ static void usb_sle_dli_handle_control(USBDevice *dev, USBPacket *p,
 
     /*
      * EP0 control path for DLI commands (standards path).
-     * Class-specific requests: bmRequestType = 0x21 (host-to-device, class,
-     * interface), bRequest = 0x00 (DLI command).
+     * T/XS 10003-2025 §6.2.2:
+     *   0x20 = single-function device (target: device)
+     *   0x21 = multi-function device (target: interface)
      */
-    if ((request >> 8) == 0x21) {
+    if ((request >> 8) == 0x20 || (request >> 8) == 0x21) {
         /* data contains a DLI command payload */
         if (length >= 4) {
             uint16_t opcode = data[0] | ((uint16_t)data[1] << 8);

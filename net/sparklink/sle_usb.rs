@@ -708,8 +708,8 @@ pub fn event_to_sle(evt: &DliUsbEvent) -> Option<SleEvent> {
                 method: evt.params[6],
             })
         }
-        // DataReceived (0x0020): [handle:2] [payload:N]
-        0x0020 => {
+        // DataReceived (0xFC01, vendor-defined): [handle:2] [payload:N]
+        0xFC01 => {
             if evt.params.len() < 2 {
                 return None;
             }

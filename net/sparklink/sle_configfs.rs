@@ -195,7 +195,7 @@ impl configfs::AttributeOperations<4> for SparkLinkConfig {
     }
 }
 
-// Attribute 5: controller_type (read/write, 0=none, 1=uart, 2=spi)
+// Attribute 5: controller_type (read/write, 0=none, 1=uart, 2=spi, 4=usb)
 #[vtable]
 impl configfs::AttributeOperations<5> for SparkLinkConfig {
     type Data = SparkLinkConfig;
@@ -206,6 +206,7 @@ impl configfs::AttributeOperations<5> for SparkLinkConfig {
             0 => b"none\n" as &[u8],
             1 => b"uart\n",
             2 => b"spi\n",
+            4 => b"usb\n",
             _ => b"unknown\n",
         };
         page[..label.len()].copy_from_slice(label);
@@ -218,6 +219,7 @@ impl configfs::AttributeOperations<5> for SparkLinkConfig {
             "none" | "0" => 0u8,
             "uart" | "1" => 1u8,
             "spi" | "2" => 2u8,
+            "usb" | "4" => 4u8,
             _ => return Err(EINVAL),
         };
         CONTROLLER_TYPE.store(val, Ordering::Relaxed);

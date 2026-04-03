@@ -65,8 +65,8 @@ pub(crate) enum SleProtoId {
     UsbBulk = 1,
     /// SPI register-based transport.
     Spi = 2,
-    /// Reserved (was virtual loopback, removed).
-    Virtual = 3,
+    /// Reserved.
+    Reserved = 3,
 }
 
 /// Static properties of a transport protocol (like `hci_uart_proto`).

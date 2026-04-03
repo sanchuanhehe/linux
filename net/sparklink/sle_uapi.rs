@@ -2588,7 +2588,7 @@ unsafe impl FromBytes for SleMeasAction {}
 pub(crate) enum SciBus {
     /// No controller attached.
     #[default]
-    Virtual = 0,
+    None = 0,
     /// UART-attached controller.
     Uart = 1,
     /// USB-attached controller.

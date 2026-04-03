@@ -1457,8 +1457,10 @@ fn ioctl_dev_select(me: Pin<&SparkLinkCtl>, arg: usize) -> Result<isize> {
         if s.dev_registry.get(target).is_none() {
             return Err(ENODEV);
         }
+        me.target_dev_id.store(val as i32, core::sync::atomic::Ordering::Release);
+    } else {
+        me.target_dev_id.store(val as i32, core::sync::atomic::Ordering::Release);
     }
-    me.target_dev_id.store(val as i32, core::sync::atomic::Ordering::Relaxed);
     Ok(0)
 }
 
@@ -1529,7 +1531,7 @@ fn ioctl_dispatch_adv_basic(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Res
                 };
             } else {
                 info.state = SciState::Idle as u8;
-                info.bus = SciBus::Virtual as u8; // 0 = no controller
+                info.bus = SciBus::None as u8; // 0 = no controller
                 info.addr = SleAddr {
                     b: [0x5E, 0x00, 0x00, 0x00, 0x00, 0x01],
                 };

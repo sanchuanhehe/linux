@@ -117,7 +117,7 @@ pub enum DliPacketType {
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SleBus {
-    Virtual = 0,
+    None = 0,
     Uart = 1,
     Spi = 2,
     Sdio = 3,
@@ -325,7 +325,7 @@ impl Default for SleControllerInfo {
     fn default() -> Self {
         Self {
             name: [0u8; 32],
-            bus: SleBus::Virtual,
+            bus: SleBus::None,
             addr: [0u8; 6],
             fw_version: 0,
             features: 0,

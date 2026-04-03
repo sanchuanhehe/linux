@@ -351,6 +351,24 @@ pub(crate) const SL_IOCTL_PHY_GET_SINR: u32 = _IOR::<SleSinrThresholds>(SL_MAGIC
 /// Set SINR thresholds (dB x10, 13 entries for MCS 0-12).
 pub(crate) const SL_IOCTL_PHY_SET_SINR: u32 = _IOW::<SleSinrThresholds>(SL_MAGIC, 0x97);
 
+// --- Capability / channel negotiation ioctls ---
+
+/// Trigger or query peer feature exchange for a connection.
+pub(crate) const SL_IOCTL_CONN_READ_PEER_FEATURES: u32 =
+    _IOWR::<SleConnPeerCap>(SL_MAGIC, 0x98);
+
+/// Trigger or query peer version exchange for a connection.
+pub(crate) const SL_IOCTL_CONN_READ_PEER_VERSION: u32 =
+    _IOWR::<SleConnPeerCap>(SL_MAGIC, 0x99);
+
+/// Request connection parameter update for a specific handle.
+pub(crate) const SL_IOCTL_CONN_UPDATE_PARAMS: u32 =
+    _IOW::<SleConnParamUpdate>(SL_MAGIC, 0x9A);
+
+/// Request PHY parameter update (MCS / bandwidth) for a connection.
+pub(crate) const SL_IOCTL_CONN_PHY_UPDATE: u32 =
+    _IOW::<SleConnPhyUpdate>(SL_MAGIC, 0x9B);
+
 /// Set local GT node role (0=TNode, 1=GNode).
 pub(crate) const SL_IOCTL_SET_ROLE: u32 = _IOW::<u8>(SL_MAGIC, 0xA0);
 
@@ -2404,6 +2422,67 @@ unsafe impl FromBytes for SlePhyHopInfo {}
 unsafe impl FromBytes for SlePhyBwCmd {}
 // SAFETY: repr(C), all fields are primitives.
 unsafe impl FromBytes for SleSinrThresholds {}
+
+// ---------------------------------------------------------------------------
+// Capability / channel negotiation (T/XS 10003-2025 §8.5)
+// ---------------------------------------------------------------------------
+
+/// Peer capability query/response for READ_PEER_FEATURES and READ_PEER_VERSION.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub(crate) struct SleConnPeerCap {
+    /// Connection handle.
+    pub handle: u16,
+    /// Feature bitmap (10 bytes, §10 feature bits).
+    pub features: [u8; 10],
+    /// Whether features have been exchanged.
+    pub features_valid: u8,
+    /// Protocol version.
+    pub version: u8,
+    /// Manufacturer identifier.
+    pub manufacturer: u16,
+    /// Sub-version number.
+    pub subversion: u16,
+    /// Whether version has been exchanged.
+    pub version_valid: u8,
+    pub(crate) _reserved: [u8; 3],
+}
+
+/// Connection parameter update request.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub(crate) struct SleConnParamUpdate {
+    /// Connection handle.
+    pub handle: u16,
+    /// Minimum connection interval (in event group periods).
+    pub interval_min: u16,
+    /// Maximum connection interval (in event group periods).
+    pub interval_max: u16,
+    /// Latency period (in event group period multiples).
+    pub latency: u16,
+    /// Supervision timeout (in 10 ms units).
+    pub supervision_timeout: u16,
+    pub(crate) _reserved: [u8; 2],
+}
+
+/// PHY parameter update request.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub(crate) struct SleConnPhyUpdate {
+    /// Connection handle.
+    pub handle: u16,
+    /// Desired MCS index (0-12, 0xFF = no change).
+    pub mcs_index: u8,
+    /// Desired bandwidth in MHz (1/2/4, 0 = no change).
+    pub bandwidth_mhz: u8,
+}
+
+// SAFETY: repr(C), all fields are primitives.
+unsafe impl FromBytes for SleConnPeerCap {}
+// SAFETY: repr(C), all fields are primitives.
+unsafe impl FromBytes for SleConnParamUpdate {}
+// SAFETY: repr(C), all fields are primitives.
+unsafe impl FromBytes for SleConnPhyUpdate {}
 
 // ---------------------------------------------------------------------------
 // Extended scan filter (T/XS 20001-2025 §6.4)

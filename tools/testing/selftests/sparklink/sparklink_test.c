@@ -9845,6 +9845,236 @@ static void test_ssap_remote_ioctls(int fd)
 	}
 }
 
+/* -----------------------------------------------------------------------
+ * P1 5.4 — Capability / channel negotiation closure
+ *
+ * Tests the post-connect capability exchange ioctls:
+ *   - CONN_READ_PEER_FEATURES (0x98): query/trigger feature exchange
+ *   - CONN_READ_PEER_VERSION  (0x99): query/trigger version exchange
+ *   - CONN_UPDATE_PARAMS      (0x9A): connection parameter renegotiation
+ *   - CONN_PHY_UPDATE         (0x9B): PHY parameter update (MCS/BW)
+ *
+ * Phase 1: No-connection error paths (all should return ENOTCONN/EPIPE)
+ * Phase 2: With loopback connection, exercise the full exchange flow
+ * ----------------------------------------------------------------------- */
+static void test_capability_negotiation(int fd)
+{
+	test_header("P1 5.4: capability / channel negotiation closure");
+	int ret, ok = 0, fail = 0;
+
+	/* ---- Phase 1: No-connection error paths ---- */
+
+	/*  READ_PEER_FEATURES without connection */
+	struct sle_conn_peer_cap pcap;
+	memset(&pcap, 0, sizeof(pcap));
+	pcap.handle = 0x0001;
+	ret = ioctl(fd, SL_IOCTL_CONN_READ_PEER_FEATURES, &pcap);
+	if (ret < 0) {
+		printf("  OK:   READ_PEER_FEATURES rejects no connection: errno=%d\n", errno);
+		ok++;
+	} else {
+		printf("  FAIL: READ_PEER_FEATURES should fail without connection\n");
+		fail++;
+	}
+
+	/* READ_PEER_VERSION without connection */
+	memset(&pcap, 0, sizeof(pcap));
+	pcap.handle = 0x0001;
+	ret = ioctl(fd, SL_IOCTL_CONN_READ_PEER_VERSION, &pcap);
+	if (ret < 0) {
+		printf("  OK:   READ_PEER_VERSION rejects no connection: errno=%d\n", errno);
+		ok++;
+	} else {
+		printf("  FAIL: READ_PEER_VERSION should fail without connection\n");
+		fail++;
+	}
+
+	/* CONN_UPDATE_PARAMS without connection */
+	struct sle_conn_param_update upd;
+	memset(&upd, 0, sizeof(upd));
+	upd.handle = 0x0001;
+	upd.interval_min = 20;
+	upd.interval_max = 40;
+	upd.latency = 0;
+	upd.supervision_timeout = 200;
+	ret = ioctl(fd, SL_IOCTL_CONN_UPDATE_PARAMS, &upd);
+	if (ret < 0) {
+		printf("  OK:   CONN_UPDATE_PARAMS rejects no connection: errno=%d\n", errno);
+		ok++;
+	} else {
+		printf("  FAIL: CONN_UPDATE_PARAMS should fail without connection\n");
+		fail++;
+	}
+
+	/* CONN_PHY_UPDATE without connection */
+	struct sle_conn_phy_update phy;
+	memset(&phy, 0, sizeof(phy));
+	phy.handle = 0x0001;
+	phy.mcs_index = 6;
+	phy.bandwidth_mhz = 2;
+	ret = ioctl(fd, SL_IOCTL_CONN_PHY_UPDATE, &phy);
+	if (ret < 0) {
+		printf("  OK:   CONN_PHY_UPDATE rejects no connection: errno=%d\n", errno);
+		ok++;
+	} else {
+		printf("  FAIL: CONN_PHY_UPDATE should fail without connection\n");
+		fail++;
+	}
+
+	/* ---- Phase 2: With loopback connection ---- */
+
+	/* Establish loopback connection */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[5] = 0x01;
+	cp.gt_role = 1;
+	int handle = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+
+	if (handle < 0) {
+		printf("  SKIP: cannot create connection for cap test\n");
+		return;
+	}
+
+	/* Inject connection response to move to Connected state */
+	struct sle_inject_conn_resp resp;
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = (uint16_t)handle;
+	resp.response_type = 0; /* Accepted */
+	resp.bandwidth_mhz = 2;
+	resp.mcs_index = 4;
+	resp.supervision_timeout = 100;
+	resp.data_mtu = 247;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+	if (ret < 0) {
+		printf("  SKIP: cannot inject conn resp: %s\n", strerror(errno));
+		ioctl(fd, SL_IOCTL_DISCONNECT, &handle);
+		return;
+	}
+
+	/* READ_PEER_FEATURES on connected handle */
+	memset(&pcap, 0, sizeof(pcap));
+	pcap.handle = (uint16_t)handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_READ_PEER_FEATURES, &pcap);
+	if (ret == 0) {
+		printf("  OK:   READ_PEER_FEATURES succeeded (valid=%u)\n",
+		       pcap.features_valid);
+		ok++;
+	} else {
+		printf("  FAIL: READ_PEER_FEATURES errno=%d\n", errno);
+		fail++;
+	}
+
+	/* READ_PEER_VERSION on connected handle */
+	memset(&pcap, 0, sizeof(pcap));
+	pcap.handle = (uint16_t)handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_READ_PEER_VERSION, &pcap);
+	if (ret == 0) {
+		printf("  OK:   READ_PEER_VERSION succeeded (valid=%u ver=%u mfr=0x%04x)\n",
+		       pcap.version_valid, pcap.version, pcap.manufacturer);
+		ok++;
+	} else {
+		printf("  FAIL: READ_PEER_VERSION errno=%d\n", errno);
+		fail++;
+	}
+
+	/* CONN_UPDATE_PARAMS on connected handle */
+	memset(&upd, 0, sizeof(upd));
+	upd.handle = (uint16_t)handle;
+	upd.interval_min = 20;
+	upd.interval_max = 40;
+	upd.latency = 2;
+	upd.supervision_timeout = 200;
+	ret = ioctl(fd, SL_IOCTL_CONN_UPDATE_PARAMS, &upd);
+	if (ret == 0) {
+		printf("  OK:   CONN_UPDATE_PARAMS succeeded\n");
+		ok++;
+	} else {
+		printf("  FAIL: CONN_UPDATE_PARAMS errno=%d\n", errno);
+		fail++;
+	}
+
+	/* Verify params are updated via CONN_INFO */
+	struct sle_conn_info ci;
+	memset(&ci, 0, sizeof(ci));
+	ci.handle = (uint16_t)handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &ci);
+	if (ret == 0 && ci.supervision_timeout == 200) {
+		printf("  OK:   CONN_INFO confirms timeout=200 after update\n");
+		ok++;
+	} else if (ret == 0) {
+		printf("  FAIL: CONN_INFO timeout=%u (expected 200)\n",
+		       ci.supervision_timeout);
+		fail++;
+	} else {
+		printf("  FAIL: CONN_INFO errno=%d\n", errno);
+		fail++;
+	}
+
+	/* CONN_PHY_UPDATE on connected handle */
+	memset(&phy, 0, sizeof(phy));
+	phy.handle = (uint16_t)handle;
+	phy.mcs_index = 8;
+	phy.bandwidth_mhz = 4;
+	ret = ioctl(fd, SL_IOCTL_CONN_PHY_UPDATE, &phy);
+	if (ret == 0) {
+		printf("  OK:   CONN_PHY_UPDATE succeeded (mcs=8 bw=4)\n");
+		ok++;
+	} else {
+		printf("  FAIL: CONN_PHY_UPDATE errno=%d\n", errno);
+		fail++;
+	}
+
+	/* Verify PHY params via CONN_INFO */
+	memset(&ci, 0, sizeof(ci));
+	ci.handle = (uint16_t)handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &ci);
+	if (ret == 0 && ci.mcs_index == 8 && ci.bandwidth_mhz == 4) {
+		printf("  OK:   CONN_INFO confirms mcs=8 bw=4 after PHY update\n");
+		ok++;
+	} else if (ret == 0) {
+		printf("  FAIL: CONN_INFO mcs=%u bw=%u (expected 8, 4)\n",
+		       ci.mcs_index, ci.bandwidth_mhz);
+		fail++;
+	} else {
+		printf("  FAIL: CONN_INFO errno=%d\n", errno);
+		fail++;
+	}
+
+	/* PHY_UPDATE with no-change sentinel values */
+	memset(&phy, 0, sizeof(phy));
+	phy.handle = (uint16_t)handle;
+	phy.mcs_index = 0xFF; /* no change */
+	phy.bandwidth_mhz = 0; /* no change */
+	ret = ioctl(fd, SL_IOCTL_CONN_PHY_UPDATE, &phy);
+	if (ret == 0) {
+		printf("  OK:   CONN_PHY_UPDATE no-op accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: CONN_PHY_UPDATE no-op errno=%d\n", errno);
+		fail++;
+	}
+
+	/* Confirm params unchanged after no-op */
+	memset(&ci, 0, sizeof(ci));
+	ci.handle = (uint16_t)handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &ci);
+	if (ret == 0 && ci.mcs_index == 8 && ci.bandwidth_mhz == 4) {
+		printf("  OK:   CONN_INFO still mcs=8 bw=4 after no-op\n");
+		ok++;
+	} else if (ret == 0) {
+		printf("  FAIL: params changed after no-op mcs=%u bw=%u\n",
+		       ci.mcs_index, ci.bandwidth_mhz);
+		fail++;
+	}
+
+	/* Cleanup: disconnect */
+	uint16_t h16 = (uint16_t)handle;
+
+	ioctl(fd, SL_IOCTL_DISCONNECT, &h16);
+
+	printf("  Capability negotiation: %d OK, %d FAIL\n", ok, fail);
+}
+
 static void test_ioctl_fuzz(int fd)
 {
 	test_header("Ioctl fuzz: deterministic payload injection");
@@ -10323,6 +10553,7 @@ int main(void)
 	test_sync_link_management(fd);
 	test_phy_extreme_params(fd);
 	test_ssap_remote_ioctls(fd);
+	test_capability_negotiation(fd);
 	test_ioctl_fuzz(fd);
 	test_genetlink();
 

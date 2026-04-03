@@ -781,6 +781,39 @@ struct ssap_remote_read_write {
 #define SL_IOCTL_PHY_GET_SINR		_IOR(SL_MAGIC, 0x96, struct sle_sinr_thresholds)
 #define SL_IOCTL_PHY_SET_SINR		_IOW(SL_MAGIC, 0x97, struct sle_sinr_thresholds)
 
+/* --- Capability / channel negotiation ----------------------------------- */
+
+struct sle_conn_peer_cap {
+	__u16	handle;
+	__u8	features[10];
+	__u8	features_valid;
+	__u8	version;
+	__u16	manufacturer;
+	__u16	subversion;
+	__u8	version_valid;
+	__u8	_reserved[3];
+};
+
+struct sle_conn_param_update {
+	__u16	handle;
+	__u16	interval_min;
+	__u16	interval_max;
+	__u16	latency;
+	__u16	supervision_timeout;
+	__u8	_reserved[2];
+};
+
+struct sle_conn_phy_update {
+	__u16	handle;
+	__u8	mcs_index;
+	__u8	bandwidth_mhz;
+};
+
+#define SL_IOCTL_CONN_READ_PEER_FEATURES _IOWR(SL_MAGIC, 0x98, struct sle_conn_peer_cap)
+#define SL_IOCTL_CONN_READ_PEER_VERSION	 _IOWR(SL_MAGIC, 0x99, struct sle_conn_peer_cap)
+#define SL_IOCTL_CONN_UPDATE_PARAMS	 _IOW(SL_MAGIC, 0x9A, struct sle_conn_param_update)
+#define SL_IOCTL_CONN_PHY_UPDATE	 _IOW(SL_MAGIC, 0x9B, struct sle_conn_phy_update)
+
 /* --- Role management ---------------------------------------------------- */
 
 #define SL_IOCTL_SET_ROLE		_IOW(SL_MAGIC, 0xA0, __u8)

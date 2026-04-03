@@ -445,6 +445,54 @@ impl AccessResponseType {
 }
 
 // ---------------------------------------------------------------------------
+// Peer capability storage (post-connect feature/version exchange)
+// ---------------------------------------------------------------------------
+
+/// Peer device capabilities learned via ReadFeatures / ReadVersion after
+/// connection establishment.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct PeerCapability {
+    /// Feature bitmap (10 bytes, TXS-10003-2025 section 10).
+    pub features: [u8; 10],
+    /// Protocol version (TXS-10003 8.1.4).
+    pub version: u8,
+    /// Manufacturer identifier.
+    pub manufacturer: u16,
+    /// Sub-version number.
+    pub subversion: u16,
+    /// Whether feature exchange has been completed.
+    pub features_valid: bool,
+    /// Whether version exchange has been completed.
+    pub version_valid: bool,
+}
+
+impl PeerCapability {
+    /// Store features received from ReadPeerFeatures event.
+    pub fn set_features(&mut self, features: [u8; 10]) {
+        self.features = features;
+        self.features_valid = true;
+    }
+
+    /// Store version info received from ReadPeerVersion event.
+    pub fn set_version(&mut self, version: u8, manufacturer: u16, subversion: u16) {
+        self.version = version;
+        self.manufacturer = manufacturer;
+        self.subversion = subversion;
+        self.version_valid = true;
+    }
+
+    /// Check if a specific feature bit is set (bit index 0..79).
+    pub fn has_feature(&self, bit: u8) -> bool {
+        if bit >= 80 {
+            return false;
+        }
+        let byte_idx = (bit / 8) as usize;
+        let bit_idx = bit % 8;
+        (self.features[byte_idx] & (1 << bit_idx)) != 0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Negotiated connection parameters
 // ---------------------------------------------------------------------------
 
@@ -722,6 +770,8 @@ pub struct ConnEntry {
     pub local_cap: AccessCapability,
     /// Negotiated connection parameters.
     pub params: NegotiatedParams,
+    /// Peer device capabilities (populated via post-connect exchange).
+    pub peer_cap: PeerCapability,
     /// Transport channels (management, service management, data).
     pub channels: ChannelSet,
     /// SSAP session for service management (created on connection).
@@ -762,6 +812,7 @@ impl ConnEntry {
             local_role: GtRole::TNode,
             local_cap: AccessCapability::default(),
             params: NegotiatedParams::default(),
+            peer_cap: PeerCapability::default(),
             channels: ChannelSet::default(),
             ssap_session: None,
             seq: SeqTracker::new_async(),
@@ -1159,6 +1210,97 @@ impl ConnManager {
             return Err(EPIPE);
         }
         Ok(entry)
+    }
+
+    /// Store peer features received from a ReadPeerFeatures event.
+    pub fn store_peer_features(&mut self, handle: u16, features: [u8; 10]) -> Result {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
+            return Err(EPIPE);
+        }
+        entry.peer_cap.set_features(features);
+        Ok(())
+    }
+
+    /// Store peer version info received from a ReadPeerVersion event.
+    pub fn store_peer_version(
+        &mut self,
+        handle: u16,
+        version: u8,
+        manufacturer: u16,
+        subversion: u16,
+    ) -> Result {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
+            return Err(EPIPE);
+        }
+        entry.peer_cap.set_version(version, manufacturer, subversion);
+        Ok(())
+    }
+
+    /// Update connection parameters after a ConnParamUpdate event.
+    pub fn update_conn_params(
+        &mut self,
+        handle: u16,
+        interval: u16,
+        latency: u16,
+        timeout: u16,
+    ) -> Result {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
+            return Err(EPIPE);
+        }
+        if interval > 0 {
+            entry.params.event_group_period = interval;
+        }
+        if latency > 0 {
+            entry.params.latency_period = latency;
+        }
+        if timeout > 0 {
+            entry.params.supervision_timeout = timeout;
+        }
+        entry.last_activity = jiffies_now();
+        Ok(())
+    }
+
+    /// Update PHY parameters after a PhyUpdate event.
+    pub fn update_phy_params(
+        &mut self,
+        handle: u16,
+        mcs_index: u8,
+        bandwidth_mhz: u8,
+    ) -> Result {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
+            return Err(EPIPE);
+        }
+        if mcs_index <= 12 {
+            entry.params.mcs_index = mcs_index;
+        }
+        if bandwidth_mhz == 1 || bandwidth_mhz == 2 || bandwidth_mhz == 4 {
+            entry.params.bandwidth_mhz = bandwidth_mhz;
+        }
+        entry.last_activity = jiffies_now();
+        Ok(())
+    }
+
+    /// Update maximum data length after a DataLenChange event.
+    pub fn update_data_length(
+        &mut self,
+        handle: u16,
+        max_tx_octets: u16,
+        max_rx_octets: u16,
+    ) -> Result {
+        let entry = self.find_mut(handle)?;
+        if entry.state != ConnState::Connected {
+            return Err(EPIPE);
+        }
+        let effective = max_tx_octets.min(max_rx_octets);
+        if effective > 0 {
+            entry.params.max_pdu_size = effective;
+            entry.channels.negotiate(effective, effective);
+        }
+        Ok(())
     }
 
     /// Get a list of active connection handles (stack-allocated).

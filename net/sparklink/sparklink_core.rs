@@ -1884,6 +1884,106 @@ fn ioctl_dispatch_conn(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<i
             s.conn.set_data_mtu(handle, params.mtu, mps)?;
             Ok(0)
         }
+        SL_IOCTL_CONN_READ_PEER_FEATURES => {
+            let req: SleConnPeerCap = read_user_struct(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let handle = s.conn.resolve_handle(req.handle)?;
+            let entry = s.conn.info(handle)?;
+            if !entry.peer_cap.features_valid {
+                let hb = handle.to_le_bytes();
+                let _ = s
+                    .controller
+                    .send_command(sle_dli::SleOpcode::ReadFeatures, &hb);
+                drain_controller_events(s);
+            }
+            let entry = s.conn.info(handle)?;
+            let mut out: SleConnPeerCap = unsafe { core::mem::zeroed() };
+            out.handle = handle;
+            out.features = entry.peer_cap.features;
+            out.features_valid = if entry.peer_cap.features_valid { 1 } else { 0 };
+            out.version = entry.peer_cap.version;
+            out.manufacturer = entry.peer_cap.manufacturer;
+            out.subversion = entry.peer_cap.subversion;
+            out.version_valid = if entry.peer_cap.version_valid { 1 } else { 0 };
+            drop(ss);
+            write_user_struct(arg, &out)?;
+            Ok(0)
+        }
+        SL_IOCTL_CONN_READ_PEER_VERSION => {
+            let req: SleConnPeerCap = read_user_struct(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let handle = s.conn.resolve_handle(req.handle)?;
+            let entry = s.conn.info(handle)?;
+            if !entry.peer_cap.version_valid {
+                let hb = handle.to_le_bytes();
+                let _ = s
+                    .controller
+                    .send_command(sle_dli::SleOpcode::ReadVersion, &hb);
+                drain_controller_events(s);
+            }
+            let entry = s.conn.info(handle)?;
+            let mut out: SleConnPeerCap = unsafe { core::mem::zeroed() };
+            out.handle = handle;
+            out.features = entry.peer_cap.features;
+            out.features_valid = if entry.peer_cap.features_valid { 1 } else { 0 };
+            out.version = entry.peer_cap.version;
+            out.manufacturer = entry.peer_cap.manufacturer;
+            out.subversion = entry.peer_cap.subversion;
+            out.version_valid = if entry.peer_cap.version_valid { 1 } else { 0 };
+            drop(ss);
+            write_user_struct(arg, &out)?;
+            Ok(0)
+        }
+        SL_IOCTL_CONN_UPDATE_PARAMS => {
+            let up: SleConnParamUpdate = read_user_struct(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let handle = s.conn.resolve_handle(up.handle)?;
+            let interval = if up.interval_max > 0 {
+                up.interval_max
+            } else {
+                up.interval_min
+            };
+            s.conn
+                .update_conn_params(handle, interval, up.latency, up.supervision_timeout)?;
+            let mut params = [0u8; 10];
+            params[0..2].copy_from_slice(&handle.to_le_bytes());
+            params[2..4].copy_from_slice(&up.interval_min.to_le_bytes());
+            params[4..6].copy_from_slice(&up.interval_max.to_le_bytes());
+            params[6..8].copy_from_slice(&up.latency.to_le_bytes());
+            params[8..10].copy_from_slice(&up.supervision_timeout.to_le_bytes());
+            let _ = s
+                .controller
+                .send_command(sle_dli::SleOpcode::ConnParamUpdate, &params);
+            Ok(0)
+        }
+        SL_IOCTL_CONN_PHY_UPDATE => {
+            let pu: SleConnPhyUpdate = read_user_struct(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let handle = s.conn.resolve_handle(pu.handle)?;
+            let mcs = if pu.mcs_index != 0xFF {
+                pu.mcs_index
+            } else {
+                s.conn.info(handle)?.params.mcs_index
+            };
+            let bw = if pu.bandwidth_mhz != 0 {
+                pu.bandwidth_mhz
+            } else {
+                s.conn.info(handle)?.params.bandwidth_mhz
+            };
+            s.conn.update_phy_params(handle, mcs, bw)?;
+            let mut params = [0u8; 4];
+            params[0..2].copy_from_slice(&handle.to_le_bytes());
+            params[2] = mcs;
+            params[3] = bw;
+            let _ = s
+                .controller
+                .send_command(sle_dli::SleOpcode::SetPhyParam, &params);
+            Ok(0)
+        }
         _ => Err(EINVAL),
     }
 }
@@ -3176,7 +3276,11 @@ impl MiscDevice for SparkLinkCtl {
             | SL_IOCTL_INJECT_CONN_DATA
             | SL_IOCTL_CONN_COUNT
             | SL_IOCTL_CONN_LIST
-            | SL_IOCTL_SET_CONN_MTU => ioctl_dispatch_conn(me, cmd, arg),
+            | SL_IOCTL_SET_CONN_MTU
+            | SL_IOCTL_CONN_READ_PEER_FEATURES
+            | SL_IOCTL_CONN_READ_PEER_VERSION
+            | SL_IOCTL_CONN_UPDATE_PARAMS
+            | SL_IOCTL_CONN_PHY_UPDATE => ioctl_dispatch_conn(me, cmd, arg),
             // --- AFH, security, SSAP ---
             SL_IOCTL_AFH_SET_MAP
             | SL_IOCTL_AFH_GET_MAP

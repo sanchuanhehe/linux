@@ -94,6 +94,15 @@
 #define DLI_OP_SET_PHY_PARAM      0x1806
 #define DLI_OP_CONN_PARAM_UPDATE  0x1807
 #define DLI_OP_READ_RSSI          0x180C
+#define DLI_OP_SET_CODING_MOD     0x180A
+#define DLI_OP_CONN_PARAM_REQ_RPL 0x1808
+#define DLI_OP_READ_AVAIL_CHAN    0x1809
+#define DLI_OP_SET_TX_POWER       0x180D
+#define DLI_OP_READ_TX_POWER      0x180E
+#define DLI_OP_READ_PEER_TX_POWER 0x180F
+#define DLI_OP_CONFIG_POWER_RPT   0x1810
+#define DLI_OP_SET_CTRL_SIGNAL    0x1812
+#define DLI_OP_ENABLE_RSSI_CTRL   0x1813
 
 /* Security opcodes (§8.6) */
 #define DLI_OP_HASH_COMPUTE       0x1C01
@@ -116,10 +125,18 @@
 #define DLI_EVT_PAIR_REQUEST      0x001D
 
 /* Link control events (§9.1.15–§9.1.18) */
+#define DLI_EVT_DATA_LEN_CHANGE   0x0003
+#define DLI_EVT_BROADCAST_END     0x0004
+#define DLI_EVT_PEER_CONN_PARAM   0x0007
+#define DLI_EVT_POWER_CHANGE      0x0008
+#define DLI_EVT_NUM_COMPLETED_PKT 0x0009
+#define DLI_EVT_DATA_BUF_OVERFLOW 0x000B
+#define DLI_EVT_ENC_PARAM_REQ     0x000E
 #define DLI_EVT_PEER_FEATURES     0x0016
 #define DLI_EVT_PEER_VERSION      0x0017
 #define DLI_EVT_PHY_PARAM_UPDATE  0x0018
 #define DLI_EVT_CONN_PARAM_UPDATE 0x0019
+#define DLI_EVT_READ_PEER_POWER   0x001B
 
 /* Controller limits */
 #define MAX_CONNECTIONS   8
@@ -194,6 +211,9 @@ typedef struct SleDliConn {
     uint16_t max_rx_octets;
     /* Security state */
     bool     encrypted;
+    /* Power management */
+    int8_t   tx_power;       /* dBm, default 0 */
+    bool     power_report;   /* auto power reporting enabled */
 } SleDliConn;
 
 struct USBSleDliState {
@@ -1409,6 +1429,155 @@ static void sle_dli_process_command(USBSleDliState *s,
         rp[2] = 0x00;         /* status */
         rp[3] = (uint8_t)-50; /* RSSI: -50 dBm */
         sle_dli_cmd_complete(s, opcode, 0x00, rp, 4);
+        break;
+    }
+
+    case DLI_OP_SET_CODING_MOD: {
+        /* params: [mcs_index:1] → CmdComplete
+         * The driver sends this when selecting a global MCS/coding mode.
+         * We just accept it and return success. */
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+    }
+
+    case DLI_OP_CONN_PARAM_REQ_RPL: {
+        /* params: [handle:2] [accept:1] [interval:2] [latency:2] [timeout:2]
+         * Reply to a PeerConnParamReq event. Accept and apply. */
+        if (plen < 3) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_complete(s, opcode, 0x02, NULL, 0);
+            break;
+        }
+        bool accept = params[2] != 0;
+        if (accept && plen >= 9) {
+            conn->interval = params[3] | ((uint16_t)params[4] << 8);
+            conn->latency  = params[5] | ((uint16_t)params[6] << 8);
+            conn->timeout  = params[7] | ((uint16_t)params[8] << 8);
+        }
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+    }
+
+    case DLI_OP_READ_AVAIL_CHAN: {
+        /* no params → CmdComplete with [num_chan:1] [chan_map:10] */
+        uint8_t rp[11];
+        memset(rp, 0, sizeof(rp));
+        rp[0] = 79; /* 79 channels available */
+        memset(&rp[1], 0xFF, 10); /* all channels marked available */
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 11);
+        break;
+    }
+
+    case DLI_OP_SET_TX_POWER: {
+        /* params: [handle:2] [tx_power:1 signed] → CmdComplete */
+        if (plen < 3) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_complete(s, opcode, 0x02, NULL, 0);
+            break;
+        }
+        conn->tx_power = (int8_t)params[2];
+        uint8_t rp[3];
+        rp[0] = handle & 0xFF;
+        rp[1] = (handle >> 8) & 0xFF;
+        rp[2] = params[2]; /* echo back actual power */
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 3);
+        break;
+    }
+
+    case DLI_OP_READ_TX_POWER: {
+        /* params: [handle:2] → CmdComplete with tx_power */
+        if (plen < 2) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_complete(s, opcode, 0x02, NULL, 0);
+            break;
+        }
+        uint8_t rp[4];
+        rp[0] = handle & 0xFF;
+        rp[1] = (handle >> 8) & 0xFF;
+        rp[2] = 0x00; /* status */
+        rp[3] = (uint8_t)conn->tx_power;
+        sle_dli_cmd_complete(s, opcode, 0x00, rp, 4);
+        break;
+    }
+
+    case DLI_OP_READ_PEER_TX_POWER: {
+        /* params: [handle:2] → CmdStatus + ReadPeerPower event */
+        if (plen < 2) {
+            sle_dli_cmd_status(s, opcode, 0x12);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_status(s, opcode, 0x02);
+            break;
+        }
+        sle_dli_cmd_status(s, opcode, 0x00);
+        /* Generate ReadPeerPower event (0x001B) */
+        uint8_t ev[16];
+        ev[0]  = DLI_EVT_READ_PEER_POWER & 0xFF;
+        ev[1]  = (DLI_EVT_READ_PEER_POWER >> 8) & 0xFF;
+        ev[2]  = 12;   /* param_len */
+        ev[3]  = 0;
+        ev[4]  = handle & 0xFF;
+        ev[5]  = (handle >> 8) & 0xFF;
+        ev[6]  = 0x00; /* status */
+        ev[7]  = 0;    /* frame_type */
+        ev[8]  = conn->bandwidth_mhz; /* bandwidth */
+        ev[9]  = 0;    /* pilot_density */
+        ev[10] = (uint8_t)conn->tx_power; /* tx_power (simulated peer) */
+        ev[11] = 0x02; /* power_level: optimal */
+        ev[12] = 0;    /* offset:4 bytes LE */
+        ev[13] = 0;
+        ev[14] = 0;
+        ev[15] = 0;
+        sle_dli_queue_event(s, ev, 16);
+        break;
+    }
+
+    case DLI_OP_CONFIG_POWER_RPT: {
+        /* params: [handle:2] [enable:1] → CmdComplete */
+        if (plen < 3) {
+            sle_dli_cmd_complete(s, opcode, 0x12, NULL, 0);
+            break;
+        }
+        uint16_t handle = params[0] | ((uint16_t)params[1] << 8);
+        SleDliConn *conn = sle_dli_find_conn(s, handle);
+        if (!conn) {
+            sle_dli_cmd_complete(s, opcode, 0x02, NULL, 0);
+            break;
+        }
+        conn->power_report = (params[2] != 0);
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+    }
+
+    case DLI_OP_SET_CTRL_SIGNAL: {
+        /* params: [handle:2] [signal_id:1] [data_len:1] [data:N]
+         * Accept and return success */
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
+        break;
+    }
+
+    case DLI_OP_ENABLE_RSSI_CTRL: {
+        /* params: [handle:2] [enable:1] [rssi_threshold:1]
+         * Accept and return success */
+        sle_dli_cmd_complete(s, opcode, 0x00, NULL, 0);
         break;
     }
 

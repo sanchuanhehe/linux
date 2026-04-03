@@ -10341,6 +10341,329 @@ static void test_capability_negotiation(int fd)
 	printf("  Capability negotiation: %d OK, %d FAIL\n", ok, fail);
 }
 
+/* ------------------------------------------------------------------ *
+ * test_dli_extended_commands — exercise new DLI opcodes via raw      *
+ *   DLI_SEND_CMD for link control, power, and broadcast config.     *
+ *                                                                    *
+ * Tests opcodes added to the QEMU virtual controller:               *
+ *   0x180A SetCodingModulation                                      *
+ *   0x1809 ReadAvailChannels                                        *
+ *   0x0C02 SetBcastParam                                            *
+ *   0x0C03 SetBcastData                                             *
+ *   0x0C06 ReadMaxBcastLen                                          *
+ *   0x0C07 ReadBcastSetSize                                         *
+ *   0x0C08 DeleteBcastSet                                           *
+ *   0x1001 SetScanParam                                             *
+ *   0x1402 CancelConnection                                         *
+ *   0x180D SetTxPower (with connection)                             *
+ *   0x180E ReadTxPower (with connection)                            *
+ *   0x1810 ConfigPowerReport (with connection)                      *
+ *   0x1808 ConnParamReqReply (with connection)                      *
+ *   0x1812 SetCtrlSignalData (with connection)                      *
+ *   0x1813 EnableRssiPowerCtrl (with connection)                    *
+ * ------------------------------------------------------------------ */
+static void test_dli_extended_commands(int fd)
+{
+	test_header("DLI: extended command coverage (link ctrl + broadcast)");
+	int ret, ok = 0, fail = 0;
+	struct sle_dli_cmd cmd;
+
+	/* ---- Phase 1: No-connection commands ---- */
+
+	/* ReadAvailChannels (0x1809) — no params */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1809;
+	cmd.param_len = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   ReadAvailChannels (0x1809) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: ReadAvailChannels (0x1809) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* SetCodingModulation (0x180A) — [mcs_index:1] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x180A;
+	cmd.param_len = 1;
+	cmd.params[0] = 4; /* MCS index 4 */
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   SetCodingModulation (0x180A) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: SetCodingModulation (0x180A) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* SetBcastParam (0x0C02) — minimal 3 bytes */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x0C02;
+	cmd.param_len = 3;
+	cmd.params[0] = 0;  /* adv_handle */
+	cmd.params[1] = 10; /* interval_min */
+	cmd.params[2] = 20; /* interval_max */
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   SetBcastParam (0x0C02) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: SetBcastParam (0x0C02) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* SetBcastData (0x0C03) — [handle:1][frag_op:1][frag_sel:1][len:1][data...] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x0C03;
+	cmd.param_len = 8;
+	cmd.params[0] = 0;  /* adv_handle */
+	cmd.params[1] = 0;  /* frag_op */
+	cmd.params[2] = 0;  /* frag_sel */
+	cmd.params[3] = 4;  /* data_len */
+	cmd.params[4] = 'S';
+	cmd.params[5] = 'L';
+	cmd.params[6] = 'E';
+	cmd.params[7] = '!';
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   SetBcastData (0x0C03) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: SetBcastData (0x0C03) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* ReadMaxBcastLen (0x0C06) — no params */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x0C06;
+	cmd.param_len = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   ReadMaxBcastLen (0x0C06) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: ReadMaxBcastLen (0x0C06) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* ReadBcastSetSize (0x0C07) — no params */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x0C07;
+	cmd.param_len = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   ReadBcastSetSize (0x0C07) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: ReadBcastSetSize (0x0C07) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* DeleteBcastSet (0x0C08) — [set_id:1] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x0C08;
+	cmd.param_len = 1;
+	cmd.params[0] = 0; /* set_id */
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   DeleteBcastSet (0x0C08) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: DeleteBcastSet (0x0C08) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* SetScanParam (0x1001) — minimal params */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1001;
+	cmd.param_len = 4;
+	cmd.params[0] = 0;  /* scan_type */
+	cmd.params[1] = 10; /* interval */
+	cmd.params[2] = 5;  /* window */
+	cmd.params[3] = 0;  /* addr_type */
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   SetScanParam (0x1001) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: SetScanParam (0x1001) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* CancelConnection (0x1402) — no params */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1402;
+	cmd.param_len = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   CancelConnection (0x1402) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: CancelConnection (0x1402) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* ---- Phase 2: With connection — power + signal commands ---- */
+
+	/* Set up loopback connection */
+	struct sle_connect_params cp;
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[5] = 0x01;
+	cp.gt_role = 1;
+	int handle = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (handle < 0) {
+		printf("  SKIP: cannot create connection for power tests\n");
+		printf("  Extended DLI commands: %d OK, %d FAIL\n", ok, fail);
+		return;
+	}
+
+	/* Inject conn response to get to Connected state */
+	struct sle_inject_conn_resp resp;
+	memset(&resp, 0, sizeof(resp));
+	resp.handle = (uint16_t)handle;
+	resp.response_type = 0;
+	resp.bandwidth_mhz = 2;
+	resp.mcs_index = 4;
+	resp.supervision_timeout = 100;
+	resp.data_mtu = 247;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &resp);
+	if (ret < 0) {
+		printf("  SKIP: cannot inject conn resp\n");
+		uint16_t dh = (uint16_t)handle;
+		ioctl(fd, SL_IOCTL_DISCONNECT, &dh);
+		printf("  Extended DLI commands: %d OK, %d FAIL\n", ok, fail);
+		return;
+	}
+
+	uint16_t h16 = (uint16_t)handle;
+
+	/* SetTxPower (0x180D) — [handle:2] [power:1] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x180D;
+	cmd.param_len = 3;
+	cmd.params[0] = h16 & 0xFF;
+	cmd.params[1] = (h16 >> 8) & 0xFF;
+	cmd.params[2] = (uint8_t)-5; /* -5 dBm */
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   SetTxPower (0x180D) -5 dBm accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: SetTxPower (0x180D) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* ReadTxPower (0x180E) — [handle:2] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x180E;
+	cmd.param_len = 2;
+	cmd.params[0] = h16 & 0xFF;
+	cmd.params[1] = (h16 >> 8) & 0xFF;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   ReadTxPower (0x180E) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: ReadTxPower (0x180E) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* ReadPeerTxPower (0x180F) — [handle:2] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x180F;
+	cmd.param_len = 2;
+	cmd.params[0] = h16 & 0xFF;
+	cmd.params[1] = (h16 >> 8) & 0xFF;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   ReadPeerTxPower (0x180F) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: ReadPeerTxPower (0x180F) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* ConfigPowerReport (0x1810) — [handle:2] [enable:1] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1810;
+	cmd.param_len = 3;
+	cmd.params[0] = h16 & 0xFF;
+	cmd.params[1] = (h16 >> 8) & 0xFF;
+	cmd.params[2] = 1; /* enable */
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   ConfigPowerReport (0x1810) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: ConfigPowerReport (0x1810) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* ConnParamReqReply (0x1808) — [handle:2] [accept:1] [iv:2] [lat:2] [tmo:2] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1808;
+	cmd.param_len = 9;
+	cmd.params[0] = h16 & 0xFF;
+	cmd.params[1] = (h16 >> 8) & 0xFF;
+	cmd.params[2] = 1;  /* accept */
+	cmd.params[3] = 30; /* interval LE16 */
+	cmd.params[4] = 0;
+	cmd.params[5] = 0;  /* latency LE16 */
+	cmd.params[6] = 0;
+	cmd.params[7] = 200 & 0xFF; /* timeout LE16 */
+	cmd.params[8] = 0;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   ConnParamReqReply (0x1808) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: ConnParamReqReply (0x1808) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* SetCtrlSignalData (0x1812) — [handle:2] [signal_id:1] [len:1] [data:N] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1812;
+	cmd.param_len = 6;
+	cmd.params[0] = h16 & 0xFF;
+	cmd.params[1] = (h16 >> 8) & 0xFF;
+	cmd.params[2] = 1;  /* signal_id */
+	cmd.params[3] = 2;  /* data_len */
+	cmd.params[4] = 0xAA;
+	cmd.params[5] = 0xBB;
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   SetCtrlSignalData (0x1812) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: SetCtrlSignalData (0x1812) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* EnableRssiPowerCtrl (0x1813) — [handle:2] [enable:1] [threshold:1] */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opcode = 0x1813;
+	cmd.param_len = 4;
+	cmd.params[0] = h16 & 0xFF;
+	cmd.params[1] = (h16 >> 8) & 0xFF;
+	cmd.params[2] = 1;  /* enable */
+	cmd.params[3] = (uint8_t)-70; /* RSSI threshold -70 dBm */
+	ret = ioctl(fd, SL_IOCTL_DLI_SEND_CMD, &cmd);
+	if (ret == 0) {
+		printf("  OK:   EnableRssiPowerCtrl (0x1813) accepted\n");
+		ok++;
+	} else {
+		printf("  FAIL: EnableRssiPowerCtrl (0x1813) errno=%d\n", errno);
+		fail++;
+	}
+
+	/* Cleanup */
+	ioctl(fd, SL_IOCTL_DISCONNECT, &h16);
+
+	printf("  Extended DLI commands: %d OK, %d FAIL\n", ok, fail);
+}
+
 /*
  * Async event pump throughput and robustness.
  *
@@ -10934,6 +11257,7 @@ int main(void)
 	test_phy_extreme_params(fd);
 	test_ssap_remote_ioctls(fd);
 	test_capability_negotiation(fd);
+	test_dli_extended_commands(fd);
 	test_async_event_pump(fd);
 	test_usb_controller_ops(fd);
 	test_ioctl_fuzz(fd);

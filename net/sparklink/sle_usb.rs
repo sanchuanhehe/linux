@@ -791,6 +791,97 @@ pub fn event_to_sle(evt: &DliUsbEvent) -> Option<SleEvent> {
                 timeout,
             })
         }
+        // DataLenChange (0x0003): [handle:2] [max_tx:2] [max_rx:2]
+        0x0003 => {
+            if evt.params.len() < 6 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let max_tx = u16::from_le_bytes([evt.params[2], evt.params[3]]);
+            let max_rx = u16::from_le_bytes([evt.params[4], evt.params[5]]);
+            Some(SleEvent::DataLenChange {
+                handle,
+                max_tx_octets: max_tx,
+                max_rx_octets: max_rx,
+            })
+        }
+        // PeerConnParamReq (0x0007): [handle:2] [imin:2] [imax:2] [lat:2] [tmo:2]
+        0x0007 => {
+            if evt.params.len() < 10 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            Some(SleEvent::PeerConnParamReq {
+                handle,
+                interval_min: u16::from_le_bytes([evt.params[2], evt.params[3]]),
+                interval_max: u16::from_le_bytes([evt.params[4], evt.params[5]]),
+                latency: u16::from_le_bytes([evt.params[6], evt.params[7]]),
+                timeout: u16::from_le_bytes([evt.params[8], evt.params[9]]),
+            })
+        }
+        // PowerChangeReport (0x0008): [handle:2] [reason:1] [frame:1] [bw:1]
+        //   [pilot:1] [tx_power:1] [level:1] [offset:1]
+        0x0008 => {
+            if evt.params.len() < 9 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            Some(SleEvent::PowerChangeReport {
+                handle,
+                reason: evt.params[2],
+                frame_type: evt.params[3],
+                bandwidth: evt.params[4],
+                pilot_density: evt.params[5],
+                tx_power: evt.params[6] as i8,
+                power_level: evt.params[7],
+                offset: evt.params[8] as i8,
+            })
+        }
+        // NumCompletedPackets (0x0009): [handle:2] [num:1]
+        0x0009 => {
+            if evt.params.len() < 3 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            Some(SleEvent::NumCompletedPackets {
+                handle,
+                num_completed: evt.params[2],
+            })
+        }
+        // DataBufOverflow (0x000B): [link_type:1]
+        0x000B => {
+            if evt.params.is_empty() {
+                return None;
+            }
+            Some(SleEvent::DataBufOverflow {
+                link_type: evt.params[0],
+            })
+        }
+        // EncParamReq (0x000E): [handle:2]
+        0x000E => {
+            if evt.params.len() < 2 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            Some(SleEvent::EncryptionParamReq { handle })
+        }
+        // ReadPeerPower (0x001B): [handle:2] [status:1] [frame:1] [bw:1]
+        //   [pilot:1] [tx_power:1] [level:1]
+        0x001B => {
+            if evt.params.len() < 8 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            Some(SleEvent::ReadPeerPower {
+                handle,
+                status: evt.params[2],
+                frame_type: evt.params[3],
+                bandwidth: evt.params[4],
+                pilot_density: evt.params[5],
+                tx_power: evt.params[6] as i8,
+                power_level: evt.params[7],
+            })
+        }
         _ => None,
     }
 }

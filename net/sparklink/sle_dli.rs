@@ -982,6 +982,7 @@ pub enum SleEvent {
     /// Narrowband measurement info (§9.1.33).
     NarrowbandMeasInfo {
         handle: u16,
+        meas_type: u16,
         status: u8,
         config_index: u8,
     },
@@ -998,9 +999,20 @@ pub enum SleEvent {
         config_index: u8,
     },
     /// Local narrowband measurement capabilities (§9.1.36).
-    LocalNarrowbandMeasCap { status: u8 },
+    LocalNarrowbandMeasCap {
+        status: u8,
+        antenna_count: u8,
+        signal_cap: [u8; 4],
+        report_cap: [u8; 4],
+    },
     /// Peer narrowband measurement capabilities (§9.1.37).
-    PeerNarrowbandMeasCap { handle: u16, status: u8 },
+    PeerNarrowbandMeasCap {
+        handle: u16,
+        status: u8,
+        antenna_count: u8,
+        signal_cap: [u8; 4],
+        report_cap: [u8; 4],
+    },
     /// Measurement state change (§9.1.38).
     MeasStateChange {
         source: u16,
@@ -1011,6 +1023,8 @@ pub enum SleEvent {
     /// Measurement quantity report (§9.1.39).
     MeasQuantityReport {
         source: u16,
+        meas_source: u16,
+        seq: u16,
         instance_handle: u8,
         meas_count: u8,
     },

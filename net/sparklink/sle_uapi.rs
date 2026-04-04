@@ -2185,14 +2185,17 @@ pub(crate) fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
         // --- LOW — Measurement events ---
         sle_dli::SleEvent::NarrowbandMeasInfo {
             handle,
+            meas_type,
             status,
             config_index,
         } => {
             out.event_type = 0x22;
             out.handle = *handle;
             out.status = *status;
-            out.data[0] = *config_index;
-            out.data_len = 1;
+            out.data[0] = (*meas_type & 0xFF) as u8;
+            out.data[1] = (*meas_type >> 8) as u8;
+            out.data[2] = *config_index;
+            out.data_len = 3;
         }
         sle_dli::SleEvent::NarrowbandMeasStateChange {
             status,
@@ -2216,14 +2219,33 @@ pub(crate) fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
             out.data[0] = *config_index;
             out.data_len = 1;
         }
-        sle_dli::SleEvent::LocalNarrowbandMeasCap { status } => {
+        sle_dli::SleEvent::LocalNarrowbandMeasCap {
+            status,
+            antenna_count,
+            signal_cap,
+            report_cap,
+        } => {
             out.event_type = 0x25;
             out.status = *status;
+            out.data[0] = *antenna_count;
+            out.data[1..5].copy_from_slice(signal_cap);
+            out.data[5..9].copy_from_slice(report_cap);
+            out.data_len = 9;
         }
-        sle_dli::SleEvent::PeerNarrowbandMeasCap { handle, status } => {
+        sle_dli::SleEvent::PeerNarrowbandMeasCap {
+            handle,
+            status,
+            antenna_count,
+            signal_cap,
+            report_cap,
+        } => {
             out.event_type = 0x26;
             out.handle = *handle;
             out.status = *status;
+            out.data[0] = *antenna_count;
+            out.data[1..5].copy_from_slice(signal_cap);
+            out.data[5..9].copy_from_slice(report_cap);
+            out.data_len = 9;
         }
         sle_dli::SleEvent::MeasStateChange {
             source,
@@ -2241,15 +2263,21 @@ pub(crate) fn sle_dli_event_to_wire(ev: &sle_dli::SleEvent) -> SleDliEvent {
         }
         sle_dli::SleEvent::MeasQuantityReport {
             source,
+            meas_source,
+            seq,
             instance_handle,
             meas_count,
         } => {
             out.event_type = 0x28;
             out.data[0] = (*source & 0xFF) as u8;
             out.data[1] = (*source >> 8) as u8;
-            out.data[2] = *instance_handle;
-            out.data[3] = *meas_count;
-            out.data_len = 4;
+            out.data[2] = (*meas_source & 0xFF) as u8;
+            out.data[3] = (*meas_source >> 8) as u8;
+            out.data[4] = (*seq & 0xFF) as u8;
+            out.data[5] = (*seq >> 8) as u8;
+            out.data[6] = *instance_handle;
+            out.data[7] = *meas_count;
+            out.data_len = 8;
         }
 
         // --- LOW — SLB events ---

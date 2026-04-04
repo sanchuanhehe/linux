@@ -1038,6 +1038,106 @@ pub fn event_to_sle(evt: &DliUsbEvent) -> Option<SleEvent> {
                 power_level: evt.params[7],
             })
         }
+        // NbfhMeasInfo (0x0028): [handle:2][meas_type:2][status:1][config_index:1]
+        0x0028 => {
+            if evt.params.len() < 6 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let meas_type = u16::from_le_bytes([evt.params[2], evt.params[3]]);
+            Some(SleEvent::NarrowbandMeasInfo {
+                handle,
+                meas_type,
+                status: evt.params[4],
+                config_index: evt.params[5],
+            })
+        }
+        // NbfhMeasStateChange (0x0029): [status:1][config_index:1][meas_state:1]
+        0x0029 => {
+            if evt.params.len() < 3 {
+                return None;
+            }
+            Some(SleEvent::NarrowbandMeasStateChange {
+                status: evt.params[0],
+                config_index: evt.params[1],
+                meas_state: evt.params[2],
+            })
+        }
+        // NbfhMeasParams (0x002A): [handle:2][status:1][config_index:1]
+        0x002A => {
+            if evt.params.len() < 4 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            Some(SleEvent::NarrowbandMeasParamReport {
+                handle,
+                status: evt.params[2],
+                config_index: evt.params[3],
+            })
+        }
+        // LocalNbfhMeasCap (0x002B): [status:1][antenna_count:1][signal_cap:4][report_cap:4]
+        0x002B => {
+            if evt.params.len() < 10 {
+                return None;
+            }
+            let mut signal_cap = [0u8; 4];
+            signal_cap.copy_from_slice(&evt.params[2..6]);
+            let mut report_cap = [0u8; 4];
+            report_cap.copy_from_slice(&evt.params[6..10]);
+            Some(SleEvent::LocalNarrowbandMeasCap {
+                status: evt.params[0],
+                antenna_count: evt.params[1],
+                signal_cap,
+                report_cap,
+            })
+        }
+        // RemoteNbfhMeasCap (0x002C): [handle:2][status:1][antenna_count:1][signal_cap:4][report_cap:4]
+        0x002C => {
+            if evt.params.len() < 12 {
+                return None;
+            }
+            let handle = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let mut signal_cap = [0u8; 4];
+            signal_cap.copy_from_slice(&evt.params[4..8]);
+            let mut report_cap = [0u8; 4];
+            report_cap.copy_from_slice(&evt.params[8..12]);
+            Some(SleEvent::PeerNarrowbandMeasCap {
+                handle,
+                status: evt.params[2],
+                antenna_count: evt.params[3],
+                signal_cap,
+                report_cap,
+            })
+        }
+        // MeasStateChange (0x002D): [source:2][status:1][instance_handle:1][instance_state:1]
+        0x002D => {
+            if evt.params.len() < 5 {
+                return None;
+            }
+            let source = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            Some(SleEvent::MeasStateChange {
+                source,
+                status: evt.params[2],
+                instance_handle: evt.params[3],
+                instance_state: evt.params[4],
+            })
+        }
+        // MeasReport (0x002E): [source:2][meas_source:2][seq:2][instance_handle:1][meas_count:1]
+        0x002E => {
+            if evt.params.len() < 8 {
+                return None;
+            }
+            let source = u16::from_le_bytes([evt.params[0], evt.params[1]]);
+            let meas_source = u16::from_le_bytes([evt.params[2], evt.params[3]]);
+            let seq = u16::from_le_bytes([evt.params[4], evt.params[5]]);
+            Some(SleEvent::MeasQuantityReport {
+                source,
+                meas_source,
+                seq,
+                instance_handle: evt.params[6],
+                meas_count: evt.params[7],
+            })
+        }
         _ => None,
     }
 }

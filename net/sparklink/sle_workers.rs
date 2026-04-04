@@ -1082,12 +1082,13 @@ fn sle_dli_event_to_broadcast(ev: &sle_dli::SleEvent) -> sle_event::SleWireEvent
         // --- LOW — Measurement events ---
         sle_dli::SleEvent::NarrowbandMeasInfo {
             handle,
+            meas_type,
             status,
             config_index,
         } => {
             let evt = sle_event::NarrowbandMeasInfoEvent {
                 handle: *handle,
-                meas_type: 0,
+                meas_type: *meas_type,
                 status: *status,
                 config_index: *config_index,
                 _pad: [0u8; 2],
@@ -1128,25 +1129,36 @@ fn sle_dli_event_to_broadcast(ev: &sle_dli::SleEvent) -> sle_event::SleWireEvent
                 &evt,
             )
         }
-        sle_dli::SleEvent::LocalNarrowbandMeasCap { status } => {
+        sle_dli::SleEvent::LocalNarrowbandMeasCap {
+            status,
+            antenna_count,
+            signal_cap,
+            report_cap,
+        } => {
             let evt = sle_event::LocalNarrowbandMeasCapEvent {
                 status: *status,
-                antenna_count: 0,
-                signal_cap: [0u8; 4],
-                report_cap: [0u8; 4],
+                antenna_count: *antenna_count,
+                signal_cap: *signal_cap,
+                report_cap: *report_cap,
             };
             sle_event::SleWireEvent::from_payload_pub(
                 sle_event::SleEventType::LocalNarrowbandMeasCap,
                 &evt,
             )
         }
-        sle_dli::SleEvent::PeerNarrowbandMeasCap { handle, status } => {
+        sle_dli::SleEvent::PeerNarrowbandMeasCap {
+            handle,
+            status,
+            antenna_count,
+            signal_cap,
+            report_cap,
+        } => {
             let evt = sle_event::PeerNarrowbandMeasCapEvent {
                 handle: *handle,
                 status: *status,
-                antenna_count: 0,
-                signal_cap: [0u8; 4],
-                report_cap: [0u8; 4],
+                antenna_count: *antenna_count,
+                signal_cap: *signal_cap,
+                report_cap: *report_cap,
             };
             sle_event::SleWireEvent::from_payload_pub(
                 sle_event::SleEventType::PeerNarrowbandMeasCap,
@@ -1173,13 +1185,15 @@ fn sle_dli_event_to_broadcast(ev: &sle_dli::SleEvent) -> sle_event::SleWireEvent
         }
         sle_dli::SleEvent::MeasQuantityReport {
             source,
+            meas_source,
+            seq,
             instance_handle,
             meas_count,
         } => {
             let evt = sle_event::MeasQuantityReportEvent {
                 source: *source,
-                meas_source: 0,
-                seq: 0,
+                meas_source: *meas_source,
+                seq: *seq,
                 instance_handle: *instance_handle,
                 meas_count: *meas_count,
             };

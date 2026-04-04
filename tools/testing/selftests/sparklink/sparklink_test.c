@@ -8140,7 +8140,7 @@ static void test_credit_flow_control(int fd)
 	}
 
 	/* Step 6: Inject credit grant PDU from "peer" to replenish TX.
-	 * Format: [TCID 0x02] [0xFC] [target=0x0A] [credits=16 LE16]
+	 * Format: [TCID 0x02] [0xFC] [pdu_len 0x03] [target=0x0A] [credits=16 LE16]
 	 * TX should go from 3 to 19.
 	 */
 	{
@@ -8150,10 +8150,11 @@ static void test_credit_flow_control(int fd)
 		grant.handle = handle;
 		grant.data[0] = 0x02; /* TCID: CMTC */
 		grant.data[1] = 0xFC; /* Credit grant PDU type */
-		grant.data[2] = 0x0A; /* Target channel: SMTC */
-		grant.data[3] = 16;   /* Credits LE16 low */
-		grant.data[4] = 0;    /* Credits LE16 high */
-		grant.length = 5;
+		grant.data[2] = 0x03; /* PDU length */
+		grant.data[3] = 0x0A; /* Target channel: SMTC */
+		grant.data[4] = 16;   /* Credits LE16 low */
+		grant.data[5] = 0;    /* Credits LE16 high */
+		grant.length = 6;
 		ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &grant);
 		check("INJECT credit grant PDU", ret);
 	}

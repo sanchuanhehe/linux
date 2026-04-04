@@ -2572,7 +2572,8 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
         | SL_IOCTL_SSAP_REMOTE_DISCOVER
         | SL_IOCTL_SSAP_REMOTE_READ
         | SL_IOCTL_SSAP_REMOTE_WRITE
-        | SL_IOCTL_SSAP_REMOTE_EVENT => ioctl_ssap_remote(cmd, arg),
+        | SL_IOCTL_SSAP_REMOTE_EVENT
+        | SL_IOCTL_SSAP_CALL_METHOD => ioctl_ssap_remote(cmd, arg),
         _ => Err(EINVAL),
     }
 }
@@ -2691,6 +2692,29 @@ fn ioctl_ssap_remote(cmd: u32, arg: usize) -> Result<isize> {
                 }
                 None => Err(EAGAIN),
             }
+        }
+        SL_IOCTL_SSAP_CALL_METHOD => {
+            let params: SsapRemoteReadWrite = read_user_struct(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let handle = s.conn.resolve_handle(params.conn_handle)?;
+            let data_len = (params.length as usize).min(params.data.len());
+            let mut buf = [0u8; sle_ssap::SSAP_PDU_MAX];
+            let session = s.conn.get_ssap_session(handle).ok_or(ENOENT)?;
+            let pdu_len = session.build_call_method_req(
+                params.handle,
+                &params.data[..data_len],
+                &mut buf,
+            )?;
+            if pdu_len > 0 {
+                s.conn
+                    .consume_tx_credit(handle, sle_conn::tcid::SERVICE_MGMT)?;
+                let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                tx_buf[1..1 + pdu_len].copy_from_slice(&buf[..pdu_len]);
+                s.controller.send_data(handle, &tx_buf[..1 + pdu_len])?;
+            }
+            Ok(0)
         }
         _ => Err(EINVAL),
     }

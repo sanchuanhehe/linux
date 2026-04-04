@@ -357,6 +357,8 @@ pub enum SsapError {
     ServiceNotFound = 0x09,
     /// Property not found.
     PropertyNotFound = 0x0A,
+    /// Method access error.
+    MethodAccessError = 0x0C,
 }
 
 impl SsapError {
@@ -374,6 +376,7 @@ impl SsapError {
             0x08 => Self::InsufficientResources,
             0x09 => Self::ServiceNotFound,
             0x0A => Self::PropertyNotFound,
+            0x0C => Self::MethodAccessError,
             _ => Self::RequestNotSupported,
         }
     }
@@ -987,6 +990,12 @@ pub enum SsapPdu {
     ValueInd { handle: u16, data: KVec<u8> },
     /// Value acknowledgement: handle.
     ValueAck { handle: u16 },
+    /// Call method command (no response): handle + input data.
+    CallMethodCmd { handle: u16, data: KVec<u8> },
+    /// Call method request (with response): handle + input data.
+    CallMethodReq { handle: u16, data: KVec<u8> },
+    /// Call method response: handle + output data.
+    CallMethodRsp { handle: u16, data: KVec<u8> },
 }
 
 impl SsapPdu {
@@ -1139,6 +1148,36 @@ impl SsapPdu {
                 buf[0] = SsapMsgCode::ValueAck as u8;
                 buf[1..3].copy_from_slice(&handle.to_le_bytes());
                 Ok(3)
+            }
+            SsapPdu::CallMethodCmd { handle, data } => {
+                let need = 3 + data.len();
+                if buf.len() < need {
+                    return Err(ENOMEM);
+                }
+                buf[0] = SsapMsgCode::CallMethodCmd as u8;
+                buf[1..3].copy_from_slice(&handle.to_le_bytes());
+                buf[3..3 + data.len()].copy_from_slice(data);
+                Ok(need)
+            }
+            SsapPdu::CallMethodReq { handle, data } => {
+                let need = 3 + data.len();
+                if buf.len() < need {
+                    return Err(ENOMEM);
+                }
+                buf[0] = SsapMsgCode::CallMethodReq as u8;
+                buf[1..3].copy_from_slice(&handle.to_le_bytes());
+                buf[3..3 + data.len()].copy_from_slice(data);
+                Ok(need)
+            }
+            SsapPdu::CallMethodRsp { handle, data } => {
+                let need = 3 + data.len();
+                if buf.len() < need {
+                    return Err(ENOMEM);
+                }
+                buf[0] = SsapMsgCode::CallMethodRsp as u8;
+                buf[1..3].copy_from_slice(&handle.to_le_bytes());
+                buf[3..3 + data.len()].copy_from_slice(data);
+                Ok(need)
             }
         }
     }
@@ -1314,6 +1353,32 @@ impl SsapPdu {
                     handle: u16::from_le_bytes([payload[0], payload[1]]),
                 })
             }
+            0x12 | 0x13 => {
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
+                let handle = u16::from_le_bytes([payload[0], payload[1]]);
+                let mut data = KVec::new();
+                for &b in &payload[2..] {
+                    data.push(b, GFP_KERNEL)?;
+                }
+                if opcode == 0x12 {
+                    Ok(SsapPdu::CallMethodCmd { handle, data })
+                } else {
+                    Ok(SsapPdu::CallMethodReq { handle, data })
+                }
+            }
+            0x14 => {
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
+                let handle = u16::from_le_bytes([payload[0], payload[1]]);
+                let mut data = KVec::new();
+                for &b in &payload[2..] {
+                    data.push(b, GFP_KERNEL)?;
+                }
+                Ok(SsapPdu::CallMethodRsp { handle, data })
+            }
             _ => Err(EINVAL),
         }
     }
@@ -1405,6 +1470,22 @@ impl SsapSession {
         let mut d = KVec::new();
         d.extend_from_slice(data, GFP_KERNEL)?;
         let pdu = SsapPdu::WriteCmd {
+            handle,
+            data: d,
+        };
+        pdu.encode(buf)
+    }
+
+    /// Build a CallMethodReq PDU for remote method invocation.
+    pub fn build_call_method_req(
+        &self,
+        handle: u16,
+        input: &[u8],
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        let mut d = KVec::new();
+        d.extend_from_slice(input, GFP_KERNEL)?;
+        let pdu = SsapPdu::CallMethodReq {
             handle,
             data: d,
         };
@@ -1521,10 +1602,36 @@ impl SsapSession {
                 self.remote_db.last_error = Some(error);
                 Ok(0)
             }
-            // All known PDU variants are handled above.
-            // If SsapPdu is extended with new variants, they will
-            // produce a compile error here rather than silently
-            // being rejected.
+            SsapPdu::CallMethodCmd { handle, data } => {
+                // Fire-and-forget method invocation from remote peer
+                let _ = ssap.call_method(handle, &data);
+                Ok(0) // No response for commands
+            }
+            SsapPdu::CallMethodReq { handle, data } => {
+                // Method invocation with response expected
+                match ssap.call_method(handle, &data) {
+                    Ok(output) => {
+                        let rsp = SsapPdu::CallMethodRsp {
+                            handle,
+                            data: output,
+                        };
+                        rsp.encode(resp_buf)
+                    }
+                    Err(_) => {
+                        let err_rsp = SsapPdu::ErrorRsp {
+                            req_opcode: SsapMsgCode::CallMethodReq as u8,
+                            handle,
+                            error: SsapError::MethodAccessError,
+                        };
+                        err_rsp.encode(resp_buf)
+                    }
+                }
+            }
+            SsapPdu::CallMethodRsp { handle, data } => {
+                // Response to our outbound method call — store result
+                let _ = self.remote_db.push_remote_event(handle, false, &data);
+                Ok(0)
+            }
         }
     }
 }

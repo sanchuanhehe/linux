@@ -770,6 +770,7 @@ struct ssap_remote_read_write {
 #define SL_IOCTL_SSAP_REMOTE_READ	_IOWR(SL_MAGIC, 0x5C, struct ssap_remote_read_write)
 #define SL_IOCTL_SSAP_REMOTE_WRITE	_IOW(SL_MAGIC, 0x5D, struct ssap_remote_read_write)
 #define SL_IOCTL_SSAP_REMOTE_EVENT	_IOR(SL_MAGIC, 0x5E, struct ssap_notification)
+#define SL_IOCTL_SSAP_CALL_METHOD	_IOWR(SL_MAGIC, 0x5F, struct ssap_remote_read_write)
 
 /* --- Power management --------------------------------------------------- */
 

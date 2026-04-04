@@ -338,6 +338,9 @@ pub(crate) const SL_IOCTL_SSAP_REMOTE_WRITE: u32 = _IOW::<SsapRemoteReadWrite>(S
 /// Dequeue one inbound remote notification/indication.
 pub(crate) const SL_IOCTL_SSAP_REMOTE_EVENT: u32 = _IOR::<SsapNotification>(SL_MAGIC, 0x5E);
 
+/// Invoke a method on a remote peer's SSAP service.
+pub(crate) const SL_IOCTL_SSAP_CALL_METHOD: u32 = _IOWR::<SsapRemoteReadWrite>(SL_MAGIC, 0x5F);
+
 // --- Power management ioctls ---
 
 /// Get power management status.

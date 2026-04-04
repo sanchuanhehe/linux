@@ -64,6 +64,10 @@ pub(crate) const FW_UART_DEFAULT: &[u8] = b"sparklink/sle_uart_v1.bin\0";
 /// 0 means auto-detect from endpoint max packet size.
 pub(crate) const FW_DEFAULT_CHUNK_SIZE: i32 = 0;
 
+/// Maximum firmware size (4 MiB) — prevents i32 overflow in FFI call and
+/// rejects unreasonably large blobs early.
+const FW_MAX_SIZE: usize = 4 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Firmware download result
 // ---------------------------------------------------------------------------
@@ -113,6 +117,14 @@ pub(crate) fn load_usb_firmware(
     if size == 0 {
         pr_warn!("sparklink-fw: firmware file is empty\n");
         return Err(EINVAL);
+    }
+    if size > FW_MAX_SIZE {
+        pr_err!(
+            "sparklink-fw: firmware too large ({} bytes, max {})\n",
+            size,
+            FW_MAX_SIZE
+        );
+        return Err(EFBIG);
     }
 
     pr_info!("sparklink-fw: loaded {} bytes, starting download\n", size);

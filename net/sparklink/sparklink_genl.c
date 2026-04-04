@@ -27,17 +27,17 @@ extern u8   sparklink_genl_get_role(void);
 extern int  sparklink_genl_set_role(u8 role);
 
 struct genl_conn_info {
-	__u16 handle;
-	__u8  state;
-	__u8  role;
-	__u8  peer_addr[6];
-	__u8  bandwidth_mhz;
-	__u8  mcs_index;
 	__u64 tx_bytes;
 	__u64 rx_bytes;
+	__u16 handle;
 	__u16 data_mtu;
 	__u16 data_mps;
 	__u16 svc_mtu;
+	__u8  peer_addr[6];
+	__u8  state;
+	__u8  role;
+	__u8  bandwidth_mhz;
+	__u8  mcs_index;
 	__u8  data_mode;
 	__u8  _pad;
 };
@@ -63,7 +63,7 @@ struct genl_dli_info {
 	__u16 max_mtu;
 	__u16 max_mps;
 	__u16 security_cap;
-	__u8  _pad[2];
+	__u16 features_ext;
 };
 extern int sparklink_genl_get_dli_info(struct genl_dli_info *out);
 

@@ -550,6 +550,13 @@ pub fn parse_event_packet(data: &[u8]) -> Result<DliUsbEvent> {
     let event_code = u16::from_le_bytes([data[0], data[1]]);
     let param_len = u16::from_le_bytes([data[2], data[3]]) as usize;
 
+    // T/XS 10003-2025: controller must support at least 255 bytes.
+    // Cap at DLI_PARAM_MAX to prevent excessive allocation from
+    // malformed hardware responses.
+    if param_len > super::sle_uapi::DLI_PARAM_MAX {
+        return Err(EINVAL);
+    }
+
     if data.len() < 4 + param_len {
         return Err(EINVAL);
     }

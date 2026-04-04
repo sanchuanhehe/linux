@@ -162,33 +162,37 @@ pub extern "C" fn sparklink_genl_set_role(role: u8) -> i32 {
 }
 
 /// Connection info result for genl (C FFI).
+///
+/// Field order and explicit padding ensure identical layout on 32-bit
+/// and 64-bit ABIs.  All u64 fields are placed at 8-byte aligned
+/// offsets and explicit `_pad` fields replace compiler-inserted gaps.
 #[repr(C)]
 pub struct GenlConnInfo {
-    /// Connection handle.
-    pub handle: u16,
-    /// Connection state.
-    pub state: u8,
-    /// Local GT role (0=T, 1=G).
-    pub role: u8,
-    /// Peer SLE address (6 bytes).
-    pub peer_addr: [u8; 6],
-    /// Bandwidth in MHz.
-    pub bandwidth_mhz: u8,
-    /// MCS index.
-    pub mcs_index: u8,
-    /// Total TX bytes.
+    /// Total TX bytes (offset 0, 8-byte aligned).
     pub tx_bytes: u64,
-    /// Total RX bytes.
+    /// Total RX bytes (offset 8).
     pub rx_bytes: u64,
-    /// Data channel MTU.
+    /// Connection handle (offset 16).
+    pub handle: u16,
+    /// Data channel MTU (offset 18).
     pub data_mtu: u16,
-    /// Data channel MPS.
+    /// Data channel MPS (offset 20).
     pub data_mps: u16,
-    /// Service management channel MTU.
+    /// Service management channel MTU (offset 22).
     pub svc_mtu: u16,
-    /// Data channel transport mode (0=unreliable, 1=reliable).
+    /// Peer SLE address (6 bytes, offset 24).
+    pub peer_addr: [u8; 6],
+    /// Connection state (offset 30).
+    pub state: u8,
+    /// Local GT role (0=T, 1=G) (offset 31).
+    pub role: u8,
+    /// Bandwidth in MHz (offset 32).
+    pub bandwidth_mhz: u8,
+    /// MCS index (offset 33).
+    pub mcs_index: u8,
+    /// Data channel transport mode (0=unreliable, 1=reliable) (offset 34).
     pub data_mode: u8,
-    /// Padding.
+    /// Explicit padding to 4-byte boundary (offset 35).
     pub _pad: [u8; 1],
 }
 

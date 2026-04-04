@@ -242,6 +242,8 @@ pub struct PropertyEntry {
     pub descriptors: KVec<Descriptor>,
     /// Client-config: notifications/indications enabled.
     pub client_cfg: u16,
+    /// Per-property maximum value length (defaults to PROPERTY_VALUE_MAX).
+    pub max_len: u16,
 }
 
 /// A method entry in a service.
@@ -461,6 +463,7 @@ impl SsapInner {
             value,
             descriptors: KVec::new(),
             client_cfg: 0,
+            max_len: PROPERTY_VALUE_MAX as u16,
         };
         svc.properties.push(prop, GFP_KERNEL)?;
         svc.end_handle = handle;
@@ -678,6 +681,7 @@ impl SsapInner {
         if data.len() > PROPERTY_VALUE_MAX {
             return Err(EINVAL);
         }
+        // Per-property max_len is checked below after locating the entry.
 
         // Track what notification to generate
         let mut do_notify = false;
@@ -691,6 +695,9 @@ impl SsapInner {
                         && !p.ops.contains(OpIndicator::WRITE_NO_RSP)
                     {
                         return Err(EACCES);
+                    }
+                    if data.len() > p.max_len as usize {
+                        return Err(EINVAL);
                     }
                     p.value.clear();
                     p.value.extend_from_slice(data, GFP_KERNEL)?;

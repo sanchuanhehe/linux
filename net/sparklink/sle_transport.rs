@@ -125,12 +125,26 @@ impl SleProtoRegistry {
     }
 
     /// Unregister a transport protocol by id.
-    pub(crate) fn unregister(&mut self, id: SleProtoId) {
+    ///
+    /// Returns `EBUSY` if any device binding still references this protocol.
+    pub(crate) fn unregister(
+        &mut self,
+        id: SleProtoId,
+        bindings: &SleBindingTable,
+    ) -> Result {
         let idx = id as usize;
-        if idx < MAX_PROTOS && self.slots[idx].is_some() {
-            self.slots[idx] = None;
-            self.count = self.count.saturating_sub(1);
+        if idx >= MAX_PROTOS {
+            return Err(EINVAL);
         }
+        if self.slots[idx].is_none() {
+            return Err(ENOENT);
+        }
+        if bindings.has_bindings_for(id) {
+            return Err(EBUSY);
+        }
+        self.slots[idx] = None;
+        self.count = self.count.saturating_sub(1);
+        Ok(())
     }
 
     /// Look up a registered protocol.
@@ -289,6 +303,13 @@ impl SleBindingTable {
     /// Number of bound devices.
     pub(crate) fn count(&self) -> u8 {
         self.count
+    }
+
+    /// Check if any binding references the given protocol.
+    pub(crate) fn has_bindings_for(&self, proto_id: SleProtoId) -> bool {
+        self.slots
+            .iter()
+            .any(|s| matches!(s, Some(b) if b.proto_id == proto_id))
     }
 
     /// Iterate bound devices.

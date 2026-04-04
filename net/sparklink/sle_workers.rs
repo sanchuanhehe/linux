@@ -108,20 +108,22 @@ impl_has_delayed_work! {
 
 /// Send a credit grant PDU on the management channel (CMTC).
 ///
-/// Format: `[TCID_CMTC] [CREDIT_GRANT_PDU_TYPE] [target_tcid] [credits LE16]`
+/// Format per T/XS 20002-2025:
+/// `[TCID_CMTC] [CREDIT_GRANT_PDU_TYPE] [pdu_len] [target_tcid] [credits LE16]`
 pub(crate) fn send_credit_grant(
     ctrl: &sle_dli::ControllerBackend,
     handle: u16,
     target_tcid: u16,
     credits: u16,
 ) {
-    let mut buf = [0u8; 5];
+    let mut buf = [0u8; 6];
     buf[0] = sle_conn::tcid::MANAGEMENT as u8;
     buf[1] = sle_conn::CREDIT_GRANT_PDU_TYPE;
-    buf[2] = target_tcid as u8;
+    buf[2] = 0x03; // PDU length: target_tcid(1) + credits(2)
+    buf[3] = target_tcid as u8;
     let c = credits.to_le_bytes();
-    buf[3] = c[0];
-    buf[4] = c[1];
+    buf[4] = c[0];
+    buf[5] = c[1];
     let _ = ctrl.send_data(handle, &buf);
 }
 
@@ -226,13 +228,13 @@ pub(crate) fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dl
             if raw.is_empty() {
                 // Empty payload, nothing to route.
             } else if u16::from(raw[0]) == sle_conn::tcid::MANAGEMENT
-                && raw.len() >= 5
+                && raw.len() >= 6
                 && raw[1] == sle_conn::CREDIT_GRANT_PDU_TYPE
             {
                 // Credit grant PDU on management channel.
-                // Format: [TCID 0x02] [0xFC] [target_tcid u8] [credits LE16]
-                let target_tcid = u16::from(raw[2]);
-                let credits = u16::from_le_bytes([raw[3], raw[4]]);
+                // Format: [TCID 0x02] [0xFC] [pdu_len] [target_tcid u8] [credits LE16]
+                let target_tcid = u16::from(raw[3]);
+                let credits = u16::from_le_bytes([raw[4], raw[5]]);
                 let _ = shared.conn.receive_credits(*handle, target_tcid, credits);
             } else if u16::from(raw[0]) == sle_conn::tcid::SERVICE_MGMT && raw.len() > 1 {
                 // SSAP PDU on service management channel (TCID 0x0A).

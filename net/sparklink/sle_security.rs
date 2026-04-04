@@ -429,8 +429,13 @@ impl SecurityInner {
         lk.copy_from_slice(&lk_full[..16]);
         self.link_key = Some(lk);
 
-        // Derive session keys
-        self.derive_session_keys()?;
+        // Derive session keys; on failure reset to Idle to avoid
+        // leaving the state machine stuck in Pairing.
+        if let Err(e) = self.derive_session_keys() {
+            pr_err!("sparklink: session key derivation failed, resetting\n");
+            self.reset();
+            return Err(e);
+        }
         self.state = SecurityState::Paired;
 
         // Clear ephemeral ECDH material

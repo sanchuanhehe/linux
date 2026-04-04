@@ -1524,6 +1524,29 @@ impl SsapPdu {
 // SSAP session — binds SSAP to a transport channel on a connection
 // ---------------------------------------------------------------------------
 
+/// Pending outbound request awaiting a response (half-duplex mode).
+///
+/// SSAP uses ordered request-response semantics by default (T/XS
+/// 20001-2025 §7.4.2.2): the client must not send another request
+/// until the previous response has been received.
+#[derive(Clone, Debug)]
+pub enum PendingRequest {
+    /// Awaiting ExchangeInfoRsp.
+    ExchangeInfo,
+    /// Awaiting FindStructureRsp.
+    FindStructure,
+    /// Awaiting FindByUuidRsp.
+    FindByUuid { uuid: SsapUuid },
+    /// Awaiting ReadRsp for a specific handle.
+    Read { handle: u16 },
+    /// Awaiting ReadByUuidRsp.
+    ReadByUuid { uuid: SsapUuid },
+    /// Awaiting WriteRsp for a specific handle.
+    Write { handle: u16 },
+    /// Awaiting CallMethodRsp for a specific handle.
+    CallMethod { handle: u16 },
+}
+
 /// Per-connection SSAP session state.
 ///
 /// Tracks the service management channel binding for a specific
@@ -1540,6 +1563,8 @@ pub struct SsapSession {
     pub info_exchanged: bool,
     /// Remote service cache for this peer.
     pub remote_db: RemoteServiceDb,
+    /// Pending outbound request (half-duplex: at most one at a time).
+    pub pending: Option<PendingRequest>,
 }
 
 impl SsapSession {
@@ -1551,18 +1576,21 @@ impl SsapSession {
             mtu: 247,
             info_exchanged: false,
             remote_db: RemoteServiceDb::new(),
+            pending: None,
         }
     }
 
     /// Build an ExchangeInfoReq PDU to initiate MTU negotiation.
-    pub fn build_exchange_info_req(&self, local_mtu: u16, buf: &mut [u8]) -> Result<usize> {
+    pub fn build_exchange_info_req(&mut self, local_mtu: u16, buf: &mut [u8]) -> Result<usize> {
         let pdu = SsapPdu::ExchangeInfoReq { mtu: local_mtu };
-        pdu.encode(buf)
+        let len = pdu.encode(buf)?;
+        self.pending = Some(PendingRequest::ExchangeInfo);
+        Ok(len)
     }
 
     /// Build a FindStructureReq PDU for remote service discovery.
     pub fn build_find_structure_req(
-        &self,
+        &mut self,
         start_handle: u16,
         end_handle: u16,
         buf: &mut [u8],
@@ -1571,18 +1599,22 @@ impl SsapSession {
             start_handle,
             end_handle,
         };
-        pdu.encode(buf)
+        let len = pdu.encode(buf)?;
+        self.pending = Some(PendingRequest::FindStructure);
+        Ok(len)
     }
 
     /// Build a ReadReq PDU for remote property read.
-    pub fn build_read_req(&self, handle: u16, buf: &mut [u8]) -> Result<usize> {
+    pub fn build_read_req(&mut self, handle: u16, buf: &mut [u8]) -> Result<usize> {
         let pdu = SsapPdu::ReadReq { handle };
-        pdu.encode(buf)
+        let len = pdu.encode(buf)?;
+        self.pending = Some(PendingRequest::Read { handle });
+        Ok(len)
     }
 
     /// Build a WriteReq PDU for remote property write.
     pub fn build_write_req(
-        &self,
+        &mut self,
         handle: u16,
         data: &[u8],
         buf: &mut [u8],
@@ -1593,7 +1625,9 @@ impl SsapSession {
             handle,
             data: d,
         };
-        pdu.encode(buf)
+        let len = pdu.encode(buf)?;
+        self.pending = Some(PendingRequest::Write { handle });
+        Ok(len)
     }
 
     /// Build a WriteCmd PDU (no response expected).
@@ -1614,27 +1648,31 @@ impl SsapSession {
 
     /// Build a FindByUuidReq PDU for remote service discovery by UUID.
     pub fn build_find_by_uuid_req(
-        &self,
+        &mut self,
         uuid: &SsapUuid,
         buf: &mut [u8],
     ) -> Result<usize> {
         let pdu = SsapPdu::FindByUuidReq { uuid: *uuid };
-        pdu.encode(buf)
+        let len = pdu.encode(buf)?;
+        self.pending = Some(PendingRequest::FindByUuid { uuid: *uuid });
+        Ok(len)
     }
 
     /// Build a ReadByUuidReq PDU for reading a remote property by UUID.
     pub fn build_read_by_uuid_req(
-        &self,
+        &mut self,
         uuid: &SsapUuid,
         buf: &mut [u8],
     ) -> Result<usize> {
         let pdu = SsapPdu::ReadByUuidReq { uuid: *uuid };
-        pdu.encode(buf)
+        let len = pdu.encode(buf)?;
+        self.pending = Some(PendingRequest::ReadByUuid { uuid: *uuid });
+        Ok(len)
     }
 
     /// Build a CallMethodReq PDU for remote method invocation.
     pub fn build_call_method_req(
-        &self,
+        &mut self,
         handle: u16,
         input: &[u8],
         buf: &mut [u8],
@@ -1645,7 +1683,9 @@ impl SsapSession {
             handle,
             data: d,
         };
-        pdu.encode(buf)
+        let len = pdu.encode(buf)?;
+        self.pending = Some(PendingRequest::CallMethod { handle });
+        Ok(len)
     }
 
     /// Process a received ExchangeInfoRsp from the peer.
@@ -1716,26 +1756,38 @@ impl SsapSession {
                 // Acknowledge received; no action needed in this minimal impl.
                 Ok(0)
             }
-            // Client-side responses: store in remote cache
+            // Client-side responses: validate against pending request
             SsapPdu::ExchangeInfoRsp { mtu } => {
+                if !matches!(self.pending, Some(PendingRequest::ExchangeInfo)) {
+                    pr_warn!("sparklink: SSAP unexpected ExchangeInfoRsp (no pending)\n");
+                }
+                self.pending = None;
                 self.handle_exchange_info_rsp(mtu, self.mtu);
                 Ok(0)
             }
             SsapPdu::FindStructureRsp { entries } => {
+                if !matches!(self.pending, Some(PendingRequest::FindStructure)) {
+                    pr_warn!("sparklink: SSAP unexpected FindStructureRsp (no pending)\n");
+                }
+                self.pending = None;
                 for e in entries.iter() {
                     let _ = self.remote_db.add_entry(*e);
                 }
                 Ok(0)
             }
             SsapPdu::ReadRsp { data } => {
-                // In a full implementation, this would be routed to the
-                // pending request via transaction ID. For now, store as
-                // last-read value.
+                if !matches!(self.pending, Some(PendingRequest::Read { .. })) {
+                    pr_warn!("sparklink: SSAP unexpected ReadRsp (no pending read)\n");
+                }
+                self.pending = None;
                 self.remote_db.last_read_value = data;
                 Ok(0)
             }
             SsapPdu::WriteRsp { handle: _ } => {
-                // Write confirmed. No additional action.
+                if !matches!(self.pending, Some(PendingRequest::Write { .. })) {
+                    pr_warn!("sparklink: SSAP unexpected WriteRsp (no pending write)\n");
+                }
+                self.pending = None;
                 Ok(0)
             }
             SsapPdu::ValueNtf { handle, data } => {
@@ -1754,7 +1806,8 @@ impl SsapSession {
                 handle: _,
                 error,
             } => {
-                // Remote peer returned an error for our request
+                // Remote peer returned an error — clear pending request
+                self.pending = None;
                 self.remote_db.last_error = Some(error);
                 Ok(0)
             }
@@ -1784,7 +1837,10 @@ impl SsapSession {
                 }
             }
             SsapPdu::CallMethodRsp { handle, data } => {
-                // Response to our outbound method call — store result
+                if !matches!(self.pending, Some(PendingRequest::CallMethod { .. })) {
+                    pr_warn!("sparklink: SSAP unexpected CallMethodRsp (no pending)\n");
+                }
+                self.pending = None;
                 let _ = self.remote_db.push_remote_event(handle, false, &data);
                 Ok(0)
             }
@@ -1810,7 +1866,10 @@ impl SsapSession {
                 }
             }
             SsapPdu::FindByUuidRsp { handle, data } => {
-                // Response to our outbound FindByUuid — store
+                if !matches!(self.pending, Some(PendingRequest::FindByUuid { .. })) {
+                    pr_warn!("sparklink: SSAP unexpected FindByUuidRsp (no pending)\n");
+                }
+                self.pending = None;
                 let _ = self.remote_db.push_remote_event(handle, false, &data);
                 Ok(0)
             }
@@ -1832,7 +1891,10 @@ impl SsapSession {
                 }
             }
             SsapPdu::ReadByUuidRsp { handle, data } => {
-                // Response to our outbound ReadByUuid — store
+                if !matches!(self.pending, Some(PendingRequest::ReadByUuid { .. })) {
+                    pr_warn!("sparklink: SSAP unexpected ReadByUuidRsp (no pending)\n");
+                }
+                self.pending = None;
                 self.remote_db.last_read_value = data;
                 let _ = self.remote_db.push_remote_event(handle, false, &[]);
                 Ok(0)

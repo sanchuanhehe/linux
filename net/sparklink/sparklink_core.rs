@@ -83,10 +83,15 @@ use sle_ssap::SsapInner;
 ///
 /// `T` must be `repr(C)` with only primitive fields so that every bit
 /// pattern produced by FromBytes is valid.
-fn read_user_struct<T: FromBytes + Sized>(arg: usize) -> Result<T> {
+///
+/// All padding/reserved fields are checked for zero per kernel UAPI
+/// guidelines (Documentation/process/botching-up-ioctls.rst).
+fn read_user_struct<T: FromBytes + Sized + CheckReserved>(arg: usize) -> Result<T> {
     let slice = UserSlice::new(UserPtr::from_addr(arg), core::mem::size_of::<T>());
     let mut reader = slice.reader();
-    reader.read()
+    let val: T = reader.read()?;
+    val.check_reserved()?;
+    Ok(val)
 }
 
 /// Write a repr(C) struct to userspace.

@@ -1,3 +1,20 @@
+UAPI/ABI兼容性政策
+====================
+
+SparkLink内核模块的用户空间API（UAPI）严格遵循Linux内核UAPI/ABI最佳实践：
+
+- 所有通过ioctl传递的结构体均使用`repr(C)`，字段顺序与C头文件完全一致。
+- 明确添加保留/填充字段（`_reserved`/`_pad`），所有保留字段必须为零，内核会拒绝非零保留字段的用户输入。
+- 结构体不使用`__attribute__((packed))`，而是通过显式填充保证自然对齐，避免ABI破坏。
+- 新增字段仅在保留区扩展，保持向前/向后兼容。
+- 所有UAPI结构体均实现保留字段校验（CheckReserved trait），防止未来扩展时出现兼容性问题。
+- 详细结构体定义请参考`net/sparklink/sle_uapi.rs`和`include/uapi/linux/sparklink_ioctl.h`。
+
+如需扩展UAPI，建议：
+
+- 仅在保留字段区域添加新字段，避免更改现有字段顺序。
+- 保持所有保留字段为零，用户空间应始终初始化完整结构体。
+- 变更需同步更新Rust/C头文件及文档。
 .. SPDX-License-Identifier: GPL-2.0
 
 =========================
@@ -48,13 +65,13 @@ The subsystem is organized in a layered architecture:
     +-------------------------------------------------------+
     |                  sle_dli (DLI)                        |
     |  SleController trait - opcode/event model (10003)     |
-    +------+------------------+------------------+----------+
-           |                  |                  |
-    VirtualController    sle_uart (UART)    sle_spi (SPI)
-       (loopback)        H4 framing        register-based
-                              |                  |
-                         sle_usb (USB)     sle_serdev (serial)
-                        hardware discovery  serdev framework
+        +------+------------------+------------------+----------+
+          |                  |                  |
+        sle_uart (UART)      sle_spi (SPI)    sle_usb (USB)
+         H4 framing         register-based   hardware discovery
+          |                  |                  |
+        sle_serdev (serial)      ———           USB bulk/interrupt
+         serdev framework
 
 Module descriptions:
 
@@ -154,8 +171,6 @@ Module descriptions:
   automatic hardware discovery of devices matching interface class
   0xE0/0x01/0x05.
 
-**sparklink_virtual** (``drivers/sparklink/sparklink_virtual.rs``)
-  Virtual controller driver for testing without physical hardware.
 
 **sle_mgmt** (``net/sparklink/sle_mgmt.rs``)
   Management plane command pending queue with timeout.  Tracks in-flight
@@ -209,7 +224,7 @@ Source code layout
     drivers/sparklink/
     ├── Kconfig
     ├── Makefile
-    └── sparklink_virtual.rs     # Virtual controller
+    └── sparklink_virtual.rs     # Stub module (controller moved to core)
 
     tools/testing/selftests/sparklink/
     ├── Makefile
@@ -229,7 +244,6 @@ The following options must be enabled:
     CONFIG_SPARKLINK_GENL=y        # Generic Netlink control plane
     CONFIG_SPARKLINK_DEBUGFS=y     # debugfs information nodes (default y)
     CONFIG_SPARKLINK_DRIVERS=y     # SparkLink driver framework
-    CONFIG_SPARKLINK_VIRTUAL=y     # Virtual controller (testing)
     CONFIG_CONFIGFS_FS=y           # configfs filesystem (runtime config)
 
 The ``SPARKLINK`` menuconfig automatically selects required kernel
@@ -239,7 +253,7 @@ crypto API modules (``CRYPTO_SM3_GENERIC``, ``CRYPTO_SM4_GENERIC``,
 Find these options in ``make menuconfig`` at::
 
     Networking support -> SparkLink short-range wireless subsystem
-    Device Drivers -> SparkLink Controller drivers -> Virtual SparkLink Controller
+    Device Drivers -> SparkLink Controller drivers
 
 Building
 ========
@@ -1249,8 +1263,9 @@ Hardware drivers implement the ``SleController`` trait::
         fn reset(&self) -> Result;
     }
 
-The built-in ``VirtualController`` implements this trait for loopback
-testing without physical hardware.
+The core module contains a built-in loopback backend that simulates
+controller responses, used for self-test when no physical hardware is
+attached.
 
 Ioctl-to-DLI routing
 --------------------
@@ -1317,9 +1332,9 @@ DLI event polling
 The ``DLI_POLL_EVENT`` ioctl (0x82) dequeues the next pending event from
 the controller. Returns ``EAGAIN`` when no events are available.
 
-The ``VirtualController`` generates ``CommandComplete`` events for each
-``send_command()`` call, enabling full loopback testing of the event
-pipeline without hardware.
+The loopback backend generates ``CommandComplete`` events for each
+``send_command()`` call, enabling full event pipeline testing without
+hardware.
 
 .. code-block:: c
 
@@ -2076,6 +2091,27 @@ Planned work:
 - Physical SLE radio hardware bring-up and conformance testing
 - UART/SPI/serdev bus driver binding for embedded SLE radio modules
 - Pure Rust genetlink registration when upstream Rust bindings mature
+
+UAPI ABI policy
+================
+
+The SparkLink ioctl interface follows the kernel UAPI ABI conventions
+described in ``Documentation/process/botching-up-ioctls.rst``:
+
+- All struct fields use fixed-width integers (``__u8``, ``__u16``,
+  ``__u32``, ``__u64``). No ``int``, ``long``, or ``unsigned``.
+- Each field is naturally aligned (offset is a multiple of its size).
+- Padding is always explicit (``_pad``, ``_reserved`` fields), never
+  compiler-implicit. ``__attribute__((packed))`` is not used.
+- Structs containing ``__u64`` are padded to a total size that is a
+  multiple of 8 bytes.
+- The kernel-side ``CheckReserved`` trait rejects any ioctl call where
+  a padding or reserved field contains a non-zero value, returning
+  ``-EINVAL``. This ensures forward compatibility: when a reserved
+  field gains meaning in a future revision, old programs that leave
+  it as zero will continue to work correctly.
+- Rust structs use ``#[repr(C)]`` (natural alignment), producing byte
+  layouts identical to the C header without packed attributes.
 
 Architecture design review
 ==========================

@@ -6,10 +6,66 @@
 //! exchanged between the `/dev/sparklink` char device and userspace.
 
 use kernel::ioctl::{_IO, _IOR, _IOW, _IOWR};
+use kernel::prelude::*;
 use kernel::transmute::FromBytes;
 
 use super::sle_dli;
 use super::sle_phy;
+
+// ---------------------------------------------------------------------------
+// Padding / reserved field validation (per botching-up-ioctls.rst)
+// ---------------------------------------------------------------------------
+
+/// Helper trait: is a padding field all-zero?
+pub(crate) trait IsZeroPad {
+    fn is_zero(&self) -> bool;
+}
+
+impl IsZeroPad for u8 {
+    fn is_zero(&self) -> bool { *self == 0 }
+}
+impl IsZeroPad for u16 {
+    fn is_zero(&self) -> bool { *self == 0 }
+}
+impl IsZeroPad for u32 {
+    fn is_zero(&self) -> bool { *self == 0 }
+}
+impl<const N: usize> IsZeroPad for [u8; N] {
+    fn is_zero(&self) -> bool { self.iter().all(|&b| b == 0) }
+}
+
+/// Rejects non-zero padding/reserved fields from userspace, preventing
+/// forward-compatibility issues when these fields gain meaning later.
+pub(crate) trait CheckReserved {
+    fn check_reserved(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Generate `CheckReserved` impl that rejects non-zero padding fields.
+/// Use the no-argument form for structs without padding.
+macro_rules! impl_check_reserved {
+    ($ty:ty, [ $($field:ident),+ $(,)? ]) => {
+        impl CheckReserved for $ty {
+            fn check_reserved(&self) -> Result<()> {
+                $(
+                    if !IsZeroPad::is_zero(&self.$field) {
+                        return Err(EINVAL);
+                    }
+                )+
+                Ok(())
+            }
+        }
+    };
+    ($ty:ty) => {
+        impl CheckReserved for $ty {}
+    };
+}
+
+// Scalar types passed to read_user_struct — no padding to check.
+impl CheckReserved for u8 {}
+impl CheckReserved for u16 {}
+impl CheckReserved for i16 {}
 
 // ---------------------------------------------------------------------------
 // Buffer size constants (used by IOCTL handlers for bounds clamping)
@@ -2621,3 +2677,80 @@ pub(crate) enum SciBus {
     /// MMIO-attached controller.
     Mmio = 5,
 }
+
+// ---------------------------------------------------------------------------
+// CheckReserved implementations — reject non-zero padding from userspace
+// ---------------------------------------------------------------------------
+
+impl_check_reserved!(SciDevInfo, [_reserved]);
+impl_check_reserved!(SleAdvParams, [_reserved]);
+impl_check_reserved!(SleScanParams, [_reserved]);
+impl_check_reserved!(SleScanFilter, [_reserved]);
+impl_check_reserved!(SleExtAdvConfig, [_reserved]);
+impl_check_reserved!(SleExtAdvData, [_pad]);
+impl_check_reserved!(SleExtAdvInfo, [_pad]);
+impl_check_reserved!(SleExtAdvEnableParams, [_reserved]);
+impl_check_reserved!(SleInjectAdv, [_reserved]);
+impl_check_reserved!(SleInjectRawAdv, [_pad]);
+impl_check_reserved!(SleConnectParams, [_pad, _reserved]);
+impl_check_reserved!(SleConnData, [_reserved]);
+impl_check_reserved!(SleInjectConnResp, [_pad]);
+impl_check_reserved!(SleConnList, [_pad, _reserved]);
+impl_check_reserved!(SleConnMtuParams, [_pad]);
+impl_check_reserved!(SleAfhMapParams, [_pad, _pad2]);
+impl_check_reserved!(SleAfhClassifyParams, [_pad]);
+impl_check_reserved!(SleAfhHopInfo, [_pad]);
+impl_check_reserved!(SleSyncCigConfig, [_pad]);
+impl_check_reserved!(SleSyncBigConfig, [_pad]);
+impl_check_reserved!(SleSyncCreateCmd, [_pad]);
+impl_check_reserved!(SleSyncDatapathCmd, [_pad]);
+impl_check_reserved!(SleSyncLinkInfo, [_pad2]);
+impl_check_reserved!(SlePairParams, [_reserved]);
+impl_check_reserved!(SlePasswordParams, [_reserved]);
+impl_check_reserved!(SleRalAddParams, [_reserved]);
+impl_check_reserved!(SleRalRemoveParams, [_reserved]);
+impl_check_reserved!(SleRalQueryParams, [_reserved, _pad]);
+impl_check_reserved!(SleSecInfo, [_reserved]);
+impl_check_reserved!(SleHashTest, [_pad]);
+impl_check_reserved!(SleSm4BlockTest, [_pad]);
+impl_check_reserved!(SsapSummary, [_reserved]);
+impl_check_reserved!(SsapServiceEntry, [_pad]);
+impl_check_reserved!(SsapServiceList, [_pad]);
+impl_check_reserved!(SsapAddService, [_pad, _reserved]);
+impl_check_reserved!(SsapAddProperty, [_reserved]);
+impl_check_reserved!(SsapRemoteCmd, [_reserved]);
+impl_check_reserved!(SsapRemoteReadWrite, [_pad]);
+impl_check_reserved!(SlePmInfo, [_pad, _reserved]);
+impl_check_reserved!(SlePmStateCmd, [_reserved]);
+impl_check_reserved!(SleEventStats, [_pad]);
+impl_check_reserved!(SleDliInfo, [_pad, _reserved]);
+impl_check_reserved!(SleDliEvent, [_pad]);
+impl_check_reserved!(SleMgmtStats, [_pad]);
+impl_check_reserved!(SleSubsysStats, [_pad]);
+impl_check_reserved!(SlePhyInfo, [_pad, _reserved]);
+impl_check_reserved!(SlePhyMcsCmd, [_reserved]);
+impl_check_reserved!(SlePhyTxPowerCmd, [_reserved]);
+impl_check_reserved!(SlePhyHopInfo, [_pad, _reserved]);
+impl_check_reserved!(SlePhyBwCmd, [_reserved]);
+impl_check_reserved!(SleSinrThresholds, [_pad]);
+impl_check_reserved!(SleConnPeerCap, [_reserved]);
+impl_check_reserved!(SleConnParamUpdate, [_reserved]);
+impl_check_reserved!(SleMeasCap, [_reserved]);
+
+// Structs without padding fields — no-op validation.
+impl_check_reserved!(SlePskParams);
+impl_check_reserved!(SleHmacTest);
+impl_check_reserved!(SsapReadWrite);
+impl_check_reserved!(SsapNotification);
+impl_check_reserved!(SsapRemoteDiscover);
+impl_check_reserved!(SleOobData);
+impl_check_reserved!(SlePasskeyInput);
+impl_check_reserved!(SlePmInterval);
+impl_check_reserved!(SleDliCmd);
+impl_check_reserved!(SlePhyMcsSelect);
+impl_check_reserved!(SleMeasLinkParam);
+impl_check_reserved!(SleMeasAction);
+impl_check_reserved!(SleConnPhyUpdate);
+impl_check_reserved!(SleAfhRssiReport);
+impl_check_reserved!(SleAfhRetxReport);
+impl_check_reserved!(SleConnInfo);

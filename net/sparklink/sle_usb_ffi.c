@@ -539,6 +539,9 @@ int sle_usb_dev_send_cmd(int dev_id, u16 opcode, const u8 *params, int plen)
 	if (plen > 255)
 		plen = 255;
 
+	if (plen > 0 && !params)
+		return -EINVAL;
+
 	total = 5 + plen;
 	pkt = kmalloc(total, GFP_KERNEL);
 	if (!pkt)
@@ -589,6 +592,9 @@ int sle_usb_dev_send_data(int dev_id, u16 handle, const u8 *data, int len)
 
 	if (len > 511)
 		len = 511;
+
+	if (len > 0 && !data)
+		return -EINVAL;
 
 	total = 5 + len;
 	pkt = kmalloc(total, GFP_KERNEL);

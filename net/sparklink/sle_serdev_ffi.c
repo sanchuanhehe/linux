@@ -417,6 +417,9 @@ void sle_serdev_dev_feed_event(int dev_id, u16 event_code,
 	if (dev_id < 0 || dev_id >= SLE_SERDEV_MAX_DEVS)
 		return;
 
+	if (plen > 0 && !params)
+		return;
+
 	d = &serdev_dev_table[dev_id];
 	if (!d->active)
 		return;

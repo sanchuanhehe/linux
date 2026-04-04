@@ -143,8 +143,11 @@ impl SerdevParserState {
                     // Convert to SleEvent and push into event ring for
                     // EventPump to pick up via poll_event().
                     let mut p = kernel::alloc::KVec::new();
-                    for &b in params.as_slice() {
-                        let _ = p.push(b, kernel::alloc::flags::GFP_KERNEL);
+                    if p.extend_from_slice(params.as_slice(), kernel::alloc::flags::GFP_KERNEL)
+                        .is_err()
+                    {
+                        pr_warn!("sparklink-serdev: event alloc failed, dropping\n");
+                        continue;
                     }
                     let raw_evt = DliUsbEvent {
                         event_code: *event_code,

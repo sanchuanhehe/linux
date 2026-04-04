@@ -1878,6 +1878,8 @@ fn ioctl_dispatch_conn(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<i
             if let Some(session) = &entry.ssap_session {
                 info.ssap_mtu = session.mtu;
                 info.ssap_info_exchanged = if session.info_exchanged { 1 } else { 0 };
+                info.ssap_reliable_mode = if session.reliable_mode { 1 } else { 0 };
+                info.ssap_version_major = session.version.0;
             }
             info.smtc_tx_credits = entry.channels.svc_mgmt.tx_credits;
             info.smtc_rx_credits = entry.channels.svc_mgmt.rx_credits;

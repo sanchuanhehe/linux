@@ -7862,6 +7862,66 @@ static void test_ssap_air_interface(int fd)
 			       info.ssap_mtu);
 			fail_count++;
 		}
+		/* Old-format ExchangeInfoReq lacks MCC bit3 → no reliable mode */
+		if (info.ssap_reliable_mode == 0) {
+			printf("  OK:   ssap_reliable_mode=0 (old format)\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: ssap_reliable_mode=%u, expected 0\n",
+			       info.ssap_reliable_mode);
+			fail_count++;
+		}
+	}
+
+	/* Step 5b: Inject NEW-format ExchangeInfoReq with MCC bit3 (reliable)
+	 * Wire: [TCID=0x0A][opcode=0x02][MCC=0x0B][MTU=0xC8,0x00][VER=1,0]
+	 * MCC=0x0B: bit0=MTU, bit1=version, bit3=reliable mode
+	 */
+	memset(&inj, 0, sizeof(inj));
+	inj.handle = handle;
+	inj.data[0] = 0x0A;  /* TCID: SERVICE_MGMT */
+	inj.data[1] = 0x02;  /* opcode: ExchangeInfoReq */
+	inj.data[2] = 0x0B;  /* MCC: MTU + version + reliable */
+	inj.data[3] = 200;   /* MTU low byte */
+	inj.data[4] = 0;     /* MTU high byte */
+	inj.data[5] = 1;     /* version major */
+	inj.data[6] = 0;     /* version minor */
+	inj.length = 7;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
+	check("INJECT new-format ExchangeInfoReq (reliable)", ret);
+
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	check("CONN_INFO (post new-format ExchangeInfo)", ret);
+
+	if (ret == 0) {
+		if (info.ssap_mtu == 100) {
+			printf("  OK:   ssap_mtu=%u (min of 200 and 100)\n",
+			       info.ssap_mtu);
+			ok_count++;
+		} else {
+			printf("  FAIL: ssap_mtu=%u, expected 100\n",
+			       info.ssap_mtu);
+			fail_count++;
+		}
+		if (info.ssap_reliable_mode == 1) {
+			printf("  OK:   ssap_reliable_mode=1 (new format)\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: ssap_reliable_mode=%u, expected 1\n",
+			       info.ssap_reliable_mode);
+			fail_count++;
+		}
+		if (info.ssap_version_major == 1) {
+			printf("  OK:   ssap_version_major=%u\n",
+			       info.ssap_version_major);
+			ok_count++;
+		} else {
+			printf("  FAIL: ssap_version_major=%u, expected 1\n",
+			       info.ssap_version_major);
+			fail_count++;
+		}
 	}
 
 	/* Step 6: Register a dedicated test service with a writable property

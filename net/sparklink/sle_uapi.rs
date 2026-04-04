@@ -876,6 +876,10 @@ pub(crate) struct SleConnInfo {
     pub ssap_info_exchanged: u8,
     /// SSAP session negotiated MTU (0 if no session bound).
     pub ssap_mtu: u16,
+    /// SSAP reliable mode negotiated (1=yes, 0=no).
+    pub ssap_reliable_mode: u8,
+    /// SSAP negotiated protocol major version.
+    pub ssap_version_major: u8,
     /// SMTC TX credits remaining (Reliable channel).
     pub smtc_tx_credits: u16,
     /// SMTC RX credits remaining (Reliable channel).

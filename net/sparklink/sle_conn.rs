@@ -353,9 +353,8 @@ impl TransportChannel {
 
 /// Fixed set of transport channels per connection.
 ///
-/// Each connection has exactly three channels: management, service management,
-/// and default data. Additional dynamic channels are not supported in this
-/// minimal implementation.
+/// Each connection has three fixed channels (management, service management,
+/// default data) and an optional dynamic reliable channel for SSAP.
 #[derive(Copy, Clone, Debug)]
 pub struct ChannelSet {
     /// SLE-CMTC management channel (TCID 0x02): reliable, small MTU.
@@ -364,6 +363,8 @@ pub struct ChannelSet {
     pub svc_mgmt: TransportChannel,
     /// SLE-DUDTC default unicast data channel (TCID 0x1F): mode from caps.
     pub data: TransportChannel,
+    /// Dynamic reliable channel for SSAP (created after ExchangeInfo negotiation).
+    pub ssap_reliable: Option<TransportChannel>,
     /// Monotonic identifier for credit grant signaling (T/XS 20002-2025 §7.3.3).
     pub credit_grant_id: u8,
 }
@@ -374,6 +375,7 @@ impl Default for ChannelSet {
             mgmt: TransportChannel::new(tcid::MANAGEMENT, TransportMode::Reliable, 48),
             svc_mgmt: TransportChannel::new(tcid::SERVICE_MGMT, TransportMode::Reliable, 247),
             data: TransportChannel::new(tcid::DEFAULT_DATA, TransportMode::Unreliable, 247),
+            ssap_reliable: None,
             credit_grant_id: 0,
         }
     }
@@ -403,6 +405,7 @@ impl ChannelSet {
             ch.tx_credits = 0;
             ch.rx_credits = 0;
         }
+        self.ssap_reliable = None;
     }
 
     /// Get next credit grant identifier and advance counter (wraps at 255).
@@ -428,7 +431,10 @@ impl ChannelSet {
             self::tcid::MANAGEMENT => Some(&mut self.mgmt),
             self::tcid::SERVICE_MGMT => Some(&mut self.svc_mgmt),
             self::tcid::DEFAULT_DATA => Some(&mut self.data),
-            _ => None,
+            _ => self
+                .ssap_reliable
+                .as_mut()
+                .filter(|ch| ch.tcid == tcid),
         }
     }
 
@@ -438,7 +444,7 @@ impl ChannelSet {
             self::tcid::MANAGEMENT => Some(&self.mgmt),
             self::tcid::SERVICE_MGMT => Some(&self.svc_mgmt),
             self::tcid::DEFAULT_DATA => Some(&self.data),
-            _ => None,
+            _ => self.ssap_reliable.as_ref().filter(|ch| ch.tcid == tcid),
         }
     }
 }

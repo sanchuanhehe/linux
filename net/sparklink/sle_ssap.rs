@@ -313,8 +313,12 @@ pub struct SsapNegotiated {
     pub mtu: u16,
     /// Protocol version (major, minor).
     pub version: (u8, u8),
-    /// Whether reliable transport mode is used.
+    /// Whether reliable transport mode is agreed.
     pub reliable_mode: bool,
+    /// Whether SSAP fragmentation sequence is agreed.
+    pub frag_seq: bool,
+    /// Negotiated max SSAP message transaction ID count (0 = disabled).
+    pub max_tid: u8,
 }
 
 impl Default for SsapNegotiated {
@@ -323,6 +327,8 @@ impl Default for SsapNegotiated {
             mtu: 247,
             version: (1, 0),
             reliable_mode: false,
+            frag_seq: false,
+            max_tid: 0,
         }
     }
 }
@@ -966,10 +972,20 @@ pub enum SsapPdu {
         handle: u16,
         error: SsapError,
     },
-    /// Exchange info request: client MTU.
-    ExchangeInfoReq { mtu: u16 },
-    /// Exchange info response: server MTU.
-    ExchangeInfoRsp { mtu: u16 },
+    /// Exchange info request (T/XS 20001-2025 §7.4.4.3).
+    ExchangeInfoReq {
+        mcc: u8,
+        mtu: u16,
+        version: (u8, u8),
+        ext_mcc: [u8; 4],
+    },
+    /// Exchange info response (T/XS 20001-2025 §7.4.4.3).
+    ExchangeInfoRsp {
+        mcc: u8,
+        mtu: u16,
+        version: (u8, u8),
+        ext_mcc: [u8; 4],
+    },
     /// Find structure request: start/end handle range.
     FindStructureReq { start_handle: u16, end_handle: u16 },
     /// Find structure response: list of (handle, category, uuid) entries.
@@ -1025,21 +1041,43 @@ impl SsapPdu {
                 buf[4] = *error as u8;
                 Ok(5)
             }
-            SsapPdu::ExchangeInfoReq { mtu } => {
-                if buf.len() < 3 {
+            SsapPdu::ExchangeInfoReq {
+                mcc,
+                mtu,
+                version,
+                ext_mcc,
+            } => {
+                let needed = Self::exchange_info_encode_len(*mcc);
+                if buf.len() < needed {
                     return Err(ENOMEM);
                 }
                 buf[0] = SsapMsgCode::ExchangeInfoReq as u8;
-                buf[1..3].copy_from_slice(&mtu.to_le_bytes());
-                Ok(3)
+                Ok(Self::encode_exchange_info_fields(
+                    &mut buf[1..],
+                    *mcc,
+                    *mtu,
+                    *version,
+                    ext_mcc,
+                ) + 1)
             }
-            SsapPdu::ExchangeInfoRsp { mtu } => {
-                if buf.len() < 3 {
+            SsapPdu::ExchangeInfoRsp {
+                mcc,
+                mtu,
+                version,
+                ext_mcc,
+            } => {
+                let needed = Self::exchange_info_encode_len(*mcc);
+                if buf.len() < needed {
                     return Err(ENOMEM);
                 }
                 buf[0] = SsapMsgCode::ExchangeInfoRsp as u8;
-                buf[1..3].copy_from_slice(&mtu.to_le_bytes());
-                Ok(3)
+                Ok(Self::encode_exchange_info_fields(
+                    &mut buf[1..],
+                    *mcc,
+                    *mtu,
+                    *version,
+                    ext_mcc,
+                ) + 1)
             }
             SsapPdu::FindStructureReq {
                 start_handle,
@@ -1257,6 +1295,90 @@ impl SsapPdu {
         }
     }
 
+    /// Compute encoded size for ExchangeInfo fields (excluding opcode).
+    fn exchange_info_encode_len(mcc: u8) -> usize {
+        let mut n = 2; // opcode + mcc
+        if mcc & 0x01 != 0 {
+            n += 2;
+        } // MTU
+        if mcc & 0x02 != 0 {
+            n += 2;
+        } // version
+        if mcc & 0x04 != 0 {
+            n += 4;
+        } // ext_mcc
+        n
+    }
+
+    /// Encode ExchangeInfo conditional fields after the opcode byte.
+    /// Returns the number of bytes written into `buf`.
+    fn encode_exchange_info_fields(
+        buf: &mut [u8],
+        mcc: u8,
+        mtu: u16,
+        version: (u8, u8),
+        ext_mcc: &[u8; 4],
+    ) -> usize {
+        let mut pos = 0;
+        buf[pos] = mcc;
+        pos += 1;
+        if mcc & 0x01 != 0 {
+            buf[pos..pos + 2].copy_from_slice(&mtu.to_le_bytes());
+            pos += 2;
+        }
+        if mcc & 0x02 != 0 {
+            buf[pos] = version.0;
+            buf[pos + 1] = version.1;
+            pos += 2;
+        }
+        if mcc & 0x04 != 0 {
+            buf[pos..pos + 4].copy_from_slice(ext_mcc);
+            pos += 4;
+        }
+        pos
+    }
+
+    /// Decode ExchangeInfo conditional fields from payload.
+    /// Returns (mcc, mtu, version, ext_mcc).
+    fn decode_exchange_info_fields(
+        payload: &[u8],
+    ) -> (u8, u16, (u8, u8), [u8; 4]) {
+        // Backward compatibility: if payload is exactly 2 bytes, it is the
+        // old format (MTU only, no MCC byte).
+        if payload.len() == 2 {
+            return (
+                0x01,
+                u16::from_le_bytes([payload[0], payload[1]]),
+                (1, 0),
+                [0; 4],
+            );
+        }
+        if payload.is_empty() {
+            return (0, 247, (1, 0), [0; 4]);
+        }
+        let mcc = payload[0];
+        let mut off = 1;
+        let mtu = if mcc & 0x01 != 0 && off + 2 <= payload.len() {
+            let v = u16::from_le_bytes([payload[off], payload[off + 1]]);
+            off += 2;
+            v
+        } else {
+            247
+        };
+        let version = if mcc & 0x02 != 0 && off + 2 <= payload.len() {
+            let v = (payload[off], payload[off + 1]);
+            off += 2;
+            v
+        } else {
+            (1, 0)
+        };
+        let mut ext_mcc = [0u8; 4];
+        if mcc & 0x04 != 0 && off + 4 <= payload.len() {
+            ext_mcc.copy_from_slice(&payload[off..off + 4]);
+        }
+        (mcc, mtu, version, ext_mcc)
+    }
+
     /// Decode a raw byte buffer into an SSAP PDU.
     /// Returns the parsed PDU or EINVAL if malformed.
     pub fn decode(buf: &[u8]) -> Result<Self> {
@@ -1278,19 +1400,29 @@ impl SsapPdu {
                 })
             }
             0x02 => {
-                if payload.len() < 2 {
+                if payload.is_empty() {
                     return Err(EINVAL);
                 }
+                let (mcc, mtu, version, ext_mcc) =
+                    Self::decode_exchange_info_fields(payload);
                 Ok(SsapPdu::ExchangeInfoReq {
-                    mtu: u16::from_le_bytes([payload[0], payload[1]]),
+                    mcc,
+                    mtu,
+                    version,
+                    ext_mcc,
                 })
             }
             0x03 => {
-                if payload.len() < 2 {
+                if payload.is_empty() {
                     return Err(EINVAL);
                 }
+                let (mcc, mtu, version, ext_mcc) =
+                    Self::decode_exchange_info_fields(payload);
                 Ok(SsapPdu::ExchangeInfoRsp {
-                    mtu: u16::from_le_bytes([payload[0], payload[1]]),
+                    mcc,
+                    mtu,
+                    version,
+                    ext_mcc,
                 })
             }
             0x04 => {
@@ -1601,6 +1733,16 @@ pub struct SsapSession {
     pub mtu: u16,
     /// Whether ExchangeInfo has completed.
     pub info_exchanged: bool,
+    /// Peer supports SSAP reliable mode transport.
+    pub reliable_mode: bool,
+    /// Peer supports SSAP fragmentation sequence.
+    pub frag_seq: bool,
+    /// Negotiated max SSAP message transaction ID count (0 = disabled).
+    pub max_tid: u8,
+    /// Negotiated protocol version.
+    pub version: (u8, u8),
+    /// TCID for the reliable transport channel (None = not established).
+    pub reliable_tcid: Option<u16>,
     /// Remote service cache for this peer.
     pub remote_db: RemoteServiceDb,
     /// Pending outbound request (half-duplex: at most one at a time).
@@ -1619,6 +1761,11 @@ impl SsapSession {
             tcid: crate::sle_conn::tcid::SERVICE_MGMT,
             mtu: 247,
             info_exchanged: false,
+            reliable_mode: false,
+            frag_seq: false,
+            max_tid: 0,
+            version: (1, 0),
+            reliable_tcid: None,
             remote_db: RemoteServiceDb::new(),
             pending: None,
             tx_frag: None,
@@ -1626,9 +1773,27 @@ impl SsapSession {
         }
     }
 
-    /// Build an ExchangeInfoReq PDU to initiate MTU negotiation.
+    /// Local MCC bitmap for our ExchangeInfo capabilities.
+    fn local_mcc() -> u8 {
+        // bit0=MTU, bit1=version, bit3=reliable mode
+        // bit2=ext_mcc omitted: no frag_seq or TID support yet
+        0x0B
+    }
+
+    /// Local extended message control code.
+    fn local_ext_mcc() -> [u8; 4] {
+        [0; 4]
+    }
+
+    /// Build an ExchangeInfoReq PDU to initiate capability negotiation.
     pub fn build_exchange_info_req(&mut self, local_mtu: u16, buf: &mut [u8]) -> Result<usize> {
-        let pdu = SsapPdu::ExchangeInfoReq { mtu: local_mtu };
+        let mcc = Self::local_mcc();
+        let pdu = SsapPdu::ExchangeInfoReq {
+            mcc,
+            mtu: local_mtu,
+            version: (1, 0),
+            ext_mcc: Self::local_ext_mcc(),
+        };
         let len = pdu.encode(buf)?;
         self.pending = Some(PendingRequest::ExchangeInfo);
         Ok(len)
@@ -1767,11 +1932,71 @@ impl SsapSession {
         Ok(len)
     }
 
-    /// Process a received ExchangeInfoRsp from the peer.
-    /// Updates the session MTU to the minimum of local and remote.
-    pub fn handle_exchange_info_rsp(&mut self, remote_mtu: u16, local_mtu: u16) {
+    /// Apply negotiation result from remote ExchangeInfo fields.
+    fn apply_negotiation(
+        &mut self,
+        remote_mcc: u8,
+        remote_mtu: u16,
+        local_mtu: u16,
+        remote_version: (u8, u8),
+        remote_ext_mcc: &[u8; 4],
+    ) {
+        let local_mcc = Self::local_mcc();
+        let local_ext = Self::local_ext_mcc();
+
         self.mtu = remote_mtu.min(local_mtu);
         self.info_exchanged = true;
+
+        // Reliable mode: agreed only when both sides advertise bit3.
+        self.reliable_mode = (remote_mcc & 0x08 != 0) && (local_mcc & 0x08 != 0);
+
+        // Version: take the lower of (major, minor) tuples.
+        let local_ver: (u8, u8) = (1, 0);
+        self.version = if remote_version.0 < local_ver.0
+            || (remote_version.0 == local_ver.0 && remote_version.1 < local_ver.1)
+        {
+            remote_version
+        } else {
+            local_ver
+        };
+
+        // Extended features: frag_seq and TID — agreed when both support.
+        let both_ext = (remote_mcc & 0x04 != 0) && (local_mcc & 0x04 != 0);
+        if both_ext {
+            self.frag_seq = (remote_ext_mcc[0] & 0x04 != 0) && (local_ext[0] & 0x04 != 0);
+            let remote_tid = remote_ext_mcc[0] & 0x08 != 0;
+            let local_tid = local_ext[0] & 0x08 != 0;
+            if remote_tid && local_tid {
+                self.max_tid = remote_ext_mcc[1].min(local_ext[1]);
+            }
+        }
+
+        if self.reliable_mode {
+            pr_info!(
+                "sparklink: SSAP reliable mode negotiated (mtu={} ver={}.{})\n",
+                self.mtu,
+                self.version.0,
+                self.version.1
+            );
+        }
+    }
+
+    /// Process a received ExchangeInfoRsp from the peer (client-side).
+    pub fn handle_exchange_info_rsp(
+        &mut self,
+        remote_mcc: u8,
+        remote_mtu: u16,
+        local_mtu: u16,
+        remote_version: (u8, u8),
+        remote_ext_mcc: &[u8; 4],
+    ) {
+        self.apply_negotiation(
+            remote_mcc,
+            remote_mtu,
+            local_mtu,
+            remote_version,
+            remote_ext_mcc,
+        );
     }
 
     /// Process a received SSAP PDU and generate a response if needed.
@@ -1785,10 +2010,32 @@ impl SsapSession {
     ) -> Result<usize> {
         let pdu = SsapPdu::decode(pdu_data)?;
         match pdu {
-            SsapPdu::ExchangeInfoReq { mtu: remote_mtu } => {
-                self.mtu = remote_mtu.min(self.mtu);
-                self.info_exchanged = true;
-                let rsp = SsapPdu::ExchangeInfoRsp { mtu: self.mtu };
+            SsapPdu::ExchangeInfoReq {
+                mcc: remote_mcc,
+                mtu: remote_mtu,
+                version: remote_version,
+                ext_mcc: remote_ext_mcc,
+            } => {
+                let local_mtu = self.mtu;
+                self.apply_negotiation(
+                    remote_mcc,
+                    remote_mtu,
+                    local_mtu,
+                    remote_version,
+                    &remote_ext_mcc,
+                );
+                // Copy negotiation result into global SsapInner for ioctl readback.
+                ssap.negotiated.mtu = self.mtu;
+                ssap.negotiated.reliable_mode = self.reliable_mode;
+                ssap.negotiated.version = self.version;
+
+                let rsp_mcc = Self::local_mcc();
+                let rsp = SsapPdu::ExchangeInfoRsp {
+                    mcc: rsp_mcc,
+                    mtu: self.mtu,
+                    version: self.version,
+                    ext_mcc: Self::local_ext_mcc(),
+                };
                 rsp.encode(resp_buf)
             }
             SsapPdu::FindStructureReq {
@@ -1917,12 +2164,18 @@ impl SsapSession {
                 Ok(0)
             }
             // Client-side responses: validate against pending request
-            SsapPdu::ExchangeInfoRsp { mtu } => {
+            SsapPdu::ExchangeInfoRsp {
+                mcc,
+                mtu,
+                version,
+                ext_mcc,
+            } => {
                 if !matches!(self.pending, Some(PendingRequest::ExchangeInfo)) {
                     pr_warn!("sparklink: SSAP unexpected ExchangeInfoRsp (no pending)\n");
                 }
                 self.pending = None;
-                self.handle_exchange_info_rsp(mtu, self.mtu);
+                let local_mtu = self.mtu;
+                self.handle_exchange_info_rsp(mcc, mtu, local_mtu, version, &ext_mcc);
                 Ok(0)
             }
             SsapPdu::FindStructureRsp { entries } => {

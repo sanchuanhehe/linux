@@ -148,6 +148,8 @@ struct sle_conn_info {
 	__u8  data_mode;
 	__u8  ssap_info_exchanged;
 	__u16 ssap_mtu;
+	__u8  ssap_reliable_mode;
+	__u8  ssap_version_major;
 	__u16 smtc_tx_credits;
 	__u16 smtc_rx_credits;
 	__u16 dudtc_tx_credits;

@@ -2107,11 +2107,13 @@ fn ioctl_inject_conn_data(me: Pin<&SparkLinkCtl>, arg: usize) -> Result<isize> {
         let handle = s.conn.resolve_handle(cd.handle)?;
         if !raw.is_empty()
             && u16::from(raw[0]) == sle_conn::tcid::MANAGEMENT
-            && raw.len() >= 6
+            && raw.len() >= sle_conn::CREDIT_GRANT_PDU_SIZE
             && raw[1] == sle_conn::CREDIT_GRANT_PDU_TYPE
         {
-            let target_tcid = u16::from(raw[3]);
-            let credits = u16::from_le_bytes([raw[4], raw[5]]);
+            // Credit grant signaling (T/XS 20002-2025 §7.3.3):
+            // [TCID 0x02] [code 0xFC] [identifier] [length LE16] [target_tcid] [credits LE16]
+            let target_tcid = u16::from(raw[5]);
+            let credits = u16::from_le_bytes([raw[6], raw[7]]);
             let _ = s.conn.receive_credits(handle, target_tcid, credits);
         } else if !raw.is_empty()
             && u16::from(raw[0]) == sle_conn::tcid::SERVICE_MGMT
@@ -2168,8 +2170,8 @@ fn ioctl_inject_conn_data(me: Pin<&SparkLinkCtl>, arg: usize) -> Result<isize> {
                 }
             }
             if needs_grant {
-                if let Ok(granted) = s.conn.grant_credits(handle, sle_conn::tcid::SERVICE_MGMT) {
-                    send_credit_grant(&s.controller, handle, sle_conn::tcid::SERVICE_MGMT, granted);
+                if let Ok((granted, id)) = s.conn.grant_credits(handle, sle_conn::tcid::SERVICE_MGMT) {
+                    send_credit_grant(&s.controller, handle, sle_conn::tcid::SERVICE_MGMT, granted, id);
                 }
             }
         } else {

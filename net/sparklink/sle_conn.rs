@@ -102,7 +102,12 @@ const CREDIT_LOW_WATERMARK: u16 = 4;
 /// Number of credits to grant at a time.
 const CREDIT_GRANT_SIZE: u16 = 16;
 /// PDU type for credit grant on the management channel.
+/// Uses RFU code space (0x47~0xFF) per T/XS 20002-2025 Table 59.
 pub const CREDIT_GRANT_PDU_TYPE: u8 = 0xFC;
+/// Credit grant signaling PDU header+data length (per T/XS 20002-2025 §7.3.3):
+/// code(1) + identifier(1) + length(2) + data(3) = 7 bytes after TCID;
+/// total wire size = 8 bytes (TCID prefix + signaling).
+pub const CREDIT_GRANT_PDU_SIZE: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Sliding window sequence tracker (TXS-20002-2025 section 3.4)
@@ -359,6 +364,8 @@ pub struct ChannelSet {
     pub svc_mgmt: TransportChannel,
     /// SLE-DUDTC default unicast data channel (TCID 0x1F): mode from caps.
     pub data: TransportChannel,
+    /// Monotonic identifier for credit grant signaling (T/XS 20002-2025 §7.3.3).
+    pub credit_grant_id: u8,
 }
 
 impl Default for ChannelSet {
@@ -367,6 +374,7 @@ impl Default for ChannelSet {
             mgmt: TransportChannel::new(tcid::MANAGEMENT, TransportMode::Reliable, 48),
             svc_mgmt: TransportChannel::new(tcid::SERVICE_MGMT, TransportMode::Reliable, 247),
             data: TransportChannel::new(tcid::DEFAULT_DATA, TransportMode::Unreliable, 247),
+            credit_grant_id: 0,
         }
     }
 }
@@ -395,6 +403,13 @@ impl ChannelSet {
             ch.tx_credits = 0;
             ch.rx_credits = 0;
         }
+    }
+
+    /// Get next credit grant identifier and advance counter (wraps at 255).
+    pub fn next_credit_grant_id(&mut self) -> u8 {
+        let id = self.credit_grant_id;
+        self.credit_grant_id = self.credit_grant_id.wrapping_add(1);
+        id
     }
 
     /// Update data channel MTU/MPS based on negotiated connection parameters.
@@ -1627,10 +1642,11 @@ impl ConnManager {
     }
 
     /// Grant more credits for a channel, returning the number granted.
-    pub fn grant_credits(&mut self, handle: u16, tcid: u16) -> Result<u16> {
+    pub fn grant_credits(&mut self, handle: u16, tcid: u16) -> Result<(u16, u8)> {
         let entry = self.find_mut(handle)?;
+        let id = entry.channels.next_credit_grant_id();
         let ch = entry.channels.by_tcid_mut(tcid).ok_or(EINVAL)?;
-        Ok(ch.grant_rx_credits())
+        Ok((ch.grant_rx_credits(), id))
     }
 
     /// Apply credits received from the peer for a specific channel.

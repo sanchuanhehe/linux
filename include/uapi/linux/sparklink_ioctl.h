@@ -765,12 +765,23 @@ struct ssap_remote_read_write {
 	__u8  data[248];
 };
 
+struct ssap_uuid_op {
+	__u16 conn_handle;
+	__u16 uuid16;		/* 0 when using uuid128 */
+	__u8  uuid128[16];	/* ignored when uuid16 != 0 */
+	__u16 handle;		/* output: matched handle */
+	__u16 length;		/* output: data length */
+	__u8  data[232];	/* output: read data (READ_BY_UUID only) */
+};
+
 #define SL_IOCTL_SSAP_EXCHANGE_INFO	_IOW(SL_MAGIC, 0x5A, struct ssap_remote_cmd)
 #define SL_IOCTL_SSAP_REMOTE_DISCOVER	_IOWR(SL_MAGIC, 0x5B, struct ssap_remote_discover)
 #define SL_IOCTL_SSAP_REMOTE_READ	_IOWR(SL_MAGIC, 0x5C, struct ssap_remote_read_write)
 #define SL_IOCTL_SSAP_REMOTE_WRITE	_IOW(SL_MAGIC, 0x5D, struct ssap_remote_read_write)
 #define SL_IOCTL_SSAP_REMOTE_EVENT	_IOR(SL_MAGIC, 0x5E, struct ssap_notification)
 #define SL_IOCTL_SSAP_CALL_METHOD	_IOWR(SL_MAGIC, 0x5F, struct ssap_remote_read_write)
+#define SL_IOCTL_SSAP_FIND_BY_UUID	_IOWR(SL_MAGIC, 0x6F, struct ssap_uuid_op)
+#define SL_IOCTL_SSAP_READ_BY_UUID	_IOWR(SL_MAGIC, 0x72, struct ssap_uuid_op)
 
 /* --- Power management --------------------------------------------------- */
 

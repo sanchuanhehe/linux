@@ -2573,7 +2573,9 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
         | SL_IOCTL_SSAP_REMOTE_READ
         | SL_IOCTL_SSAP_REMOTE_WRITE
         | SL_IOCTL_SSAP_REMOTE_EVENT
-        | SL_IOCTL_SSAP_CALL_METHOD => ioctl_ssap_remote(cmd, arg),
+        | SL_IOCTL_SSAP_CALL_METHOD
+        | SL_IOCTL_SSAP_FIND_BY_UUID
+        | SL_IOCTL_SSAP_READ_BY_UUID => ioctl_ssap_remote(cmd, arg),
         _ => Err(EINVAL),
     }
 }
@@ -2706,6 +2708,52 @@ fn ioctl_ssap_remote(cmd: u32, arg: usize) -> Result<isize> {
                 &params.data[..data_len],
                 &mut buf,
             )?;
+            if pdu_len > 0 {
+                s.conn
+                    .consume_tx_credit(handle, sle_conn::tcid::SERVICE_MGMT)?;
+                let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                tx_buf[1..1 + pdu_len].copy_from_slice(&buf[..pdu_len]);
+                s.controller.send_data(handle, &tx_buf[..1 + pdu_len])?;
+            }
+            Ok(0)
+        }
+        SL_IOCTL_SSAP_FIND_BY_UUID => {
+            let params: SsapUuidOp = read_user_struct(arg)?;
+            let uuid = if params.uuid16 != 0 {
+                sle_ssap::SsapUuid::Uuid16(params.uuid16)
+            } else {
+                sle_ssap::SsapUuid::Uuid128(params.uuid128)
+            };
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let handle = s.conn.resolve_handle(params.conn_handle)?;
+            let mut buf = [0u8; sle_ssap::SSAP_PDU_MAX];
+            let session = s.conn.get_ssap_session(handle).ok_or(ENOENT)?;
+            let pdu_len = session.build_find_by_uuid_req(&uuid, &mut buf)?;
+            if pdu_len > 0 {
+                s.conn
+                    .consume_tx_credit(handle, sle_conn::tcid::SERVICE_MGMT)?;
+                let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                tx_buf[0] = sle_conn::tcid::SERVICE_MGMT as u8;
+                tx_buf[1..1 + pdu_len].copy_from_slice(&buf[..pdu_len]);
+                s.controller.send_data(handle, &tx_buf[..1 + pdu_len])?;
+            }
+            Ok(0)
+        }
+        SL_IOCTL_SSAP_READ_BY_UUID => {
+            let params: SsapUuidOp = read_user_struct(arg)?;
+            let uuid = if params.uuid16 != 0 {
+                sle_ssap::SsapUuid::Uuid16(params.uuid16)
+            } else {
+                sle_ssap::SsapUuid::Uuid128(params.uuid128)
+            };
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let handle = s.conn.resolve_handle(params.conn_handle)?;
+            let mut buf = [0u8; sle_ssap::SSAP_PDU_MAX];
+            let session = s.conn.get_ssap_session(handle).ok_or(ENOENT)?;
+            let pdu_len = session.build_read_by_uuid_req(&uuid, &mut buf)?;
             if pdu_len > 0 {
                 s.conn
                     .consume_tx_credit(handle, sle_conn::tcid::SERVICE_MGMT)?;

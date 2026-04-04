@@ -341,6 +341,12 @@ pub(crate) const SL_IOCTL_SSAP_REMOTE_EVENT: u32 = _IOR::<SsapNotification>(SL_M
 /// Invoke a method on a remote peer's SSAP service.
 pub(crate) const SL_IOCTL_SSAP_CALL_METHOD: u32 = _IOWR::<SsapRemoteReadWrite>(SL_MAGIC, 0x5F);
 
+/// Find service/property by UUID on a remote peer.
+pub(crate) const SL_IOCTL_SSAP_FIND_BY_UUID: u32 = _IOWR::<SsapUuidOp>(SL_MAGIC, 0x6F);
+
+/// Read a property by UUID on a remote peer.
+pub(crate) const SL_IOCTL_SSAP_READ_BY_UUID: u32 = _IOWR::<SsapUuidOp>(SL_MAGIC, 0x72);
+
 // --- Power management ioctls ---
 
 /// Get power management status.
@@ -1555,6 +1561,27 @@ pub(crate) struct SsapRemoteReadWrite {
 // SAFETY: SsapRemoteReadWrite is repr(C) with only primitive fields.
 unsafe impl FromBytes for SsapRemoteReadWrite {}
 
+/// UUID-based SSAP operation (find-by-uuid, read-by-uuid).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct SsapUuidOp {
+    /// Connection handle of the remote peer.
+    pub conn_handle: u16,
+    /// 16-bit UUID (0 when using uuid128).
+    pub uuid16: u16,
+    /// 128-bit UUID (ignored when uuid16 != 0).
+    pub uuid128: [u8; 16],
+    /// Output: matched handle.
+    pub handle: u16,
+    /// Output: data length.
+    pub length: u16,
+    /// Output: read data (READ_BY_UUID only).
+    pub data: [u8; 232],
+}
+
+// SAFETY: SsapUuidOp is repr(C) with only primitive fields.
+unsafe impl FromBytes for SsapUuidOp {}
+
 // ---------------------------------------------------------------------------
 // Power management userspace data structures
 // ---------------------------------------------------------------------------
@@ -2751,6 +2778,7 @@ impl_check_reserved!(SlePasskeyInput);
 impl_check_reserved!(SlePmInterval);
 impl_check_reserved!(SleDliCmd);
 impl_check_reserved!(SlePhyMcsSelect);
+impl_check_reserved!(SsapUuidOp);
 impl_check_reserved!(SleMeasLinkParam);
 impl_check_reserved!(SleMeasAction);
 impl_check_reserved!(SleConnPhyUpdate);

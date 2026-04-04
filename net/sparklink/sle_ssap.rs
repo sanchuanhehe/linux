@@ -974,10 +974,18 @@ pub enum SsapPdu {
     FindStructureReq { start_handle: u16, end_handle: u16 },
     /// Find structure response: list of (handle, category, uuid) entries.
     FindStructureRsp { entries: KVec<EntryInfo> },
+    /// Find by UUID request: UUID to search for.
+    FindByUuidReq { uuid: SsapUuid },
+    /// Find by UUID response: matched handle + entry info.
+    FindByUuidRsp { handle: u16, data: KVec<u8> },
     /// Read request: attribute handle.
     ReadReq { handle: u16 },
     /// Read response: attribute value.
     ReadRsp { data: KVec<u8> },
+    /// Read by UUID request.
+    ReadByUuidReq { uuid: SsapUuid },
+    /// Read by UUID response: handle + value.
+    ReadByUuidRsp { handle: u16, data: KVec<u8> },
     /// Write command (no response): handle + value.
     WriteCmd { handle: u16, data: KVec<u8> },
     /// Write request (with response): handle + value.
@@ -1081,6 +1089,38 @@ impl SsapPdu {
                 }
                 Ok(off)
             }
+            SsapPdu::FindByUuidReq { uuid } => {
+                match uuid {
+                    SsapUuid::Uuid16(v) => {
+                        if buf.len() < 4 {
+                            return Err(ENOMEM);
+                        }
+                        buf[0] = SsapMsgCode::FindByUuidReq as u8;
+                        buf[1] = 2; // uuid length
+                        buf[2..4].copy_from_slice(&v.to_le_bytes());
+                        Ok(4)
+                    }
+                    SsapUuid::Uuid128(v) => {
+                        if buf.len() < 18 {
+                            return Err(ENOMEM);
+                        }
+                        buf[0] = SsapMsgCode::FindByUuidReq as u8;
+                        buf[1] = 16;
+                        buf[2..18].copy_from_slice(v);
+                        Ok(18)
+                    }
+                }
+            }
+            SsapPdu::FindByUuidRsp { handle, data } => {
+                let need = 3 + data.len();
+                if buf.len() < need {
+                    return Err(ENOMEM);
+                }
+                buf[0] = SsapMsgCode::FindByUuidRsp as u8;
+                buf[1..3].copy_from_slice(&handle.to_le_bytes());
+                buf[3..3 + data.len()].copy_from_slice(data);
+                Ok(need)
+            }
             SsapPdu::ReadReq { handle } => {
                 if buf.len() < 3 {
                     return Err(ENOMEM);
@@ -1096,6 +1136,38 @@ impl SsapPdu {
                 buf[0] = SsapMsgCode::ReadRsp as u8;
                 buf[1..1 + data.len()].copy_from_slice(data);
                 Ok(1 + data.len())
+            }
+            SsapPdu::ReadByUuidReq { uuid } => {
+                match uuid {
+                    SsapUuid::Uuid16(v) => {
+                        if buf.len() < 4 {
+                            return Err(ENOMEM);
+                        }
+                        buf[0] = SsapMsgCode::ReadByUuidReq as u8;
+                        buf[1] = 2;
+                        buf[2..4].copy_from_slice(&v.to_le_bytes());
+                        Ok(4)
+                    }
+                    SsapUuid::Uuid128(v) => {
+                        if buf.len() < 18 {
+                            return Err(ENOMEM);
+                        }
+                        buf[0] = SsapMsgCode::ReadByUuidReq as u8;
+                        buf[1] = 16;
+                        buf[2..18].copy_from_slice(v);
+                        Ok(18)
+                    }
+                }
+            }
+            SsapPdu::ReadByUuidRsp { handle, data } => {
+                let need = 3 + data.len();
+                if buf.len() < need {
+                    return Err(ENOMEM);
+                }
+                buf[0] = SsapMsgCode::ReadByUuidRsp as u8;
+                buf[1..3].copy_from_slice(&handle.to_le_bytes());
+                buf[3..3 + data.len()].copy_from_slice(data);
+                Ok(need)
             }
             SsapPdu::WriteCmd { handle, data } => {
                 if buf.len() < 3 + data.len() {
@@ -1278,6 +1350,38 @@ impl SsapPdu {
                 }
                 Ok(SsapPdu::FindStructureRsp { entries })
             }
+            0x06 => {
+                // FindByUuidReq: uuid_len(1) + uuid(2 or 16)
+                if payload.is_empty() {
+                    return Err(EINVAL);
+                }
+                let uuid_len = payload[0] as usize;
+                if payload.len() < 1 + uuid_len {
+                    return Err(EINVAL);
+                }
+                let uuid = if uuid_len == 2 {
+                    SsapUuid::Uuid16(u16::from_le_bytes([payload[1], payload[2]]))
+                } else if uuid_len == 16 {
+                    let mut v = [0u8; 16];
+                    v.copy_from_slice(&payload[1..17]);
+                    SsapUuid::Uuid128(v)
+                } else {
+                    return Err(EINVAL);
+                };
+                Ok(SsapPdu::FindByUuidReq { uuid })
+            }
+            0x07 => {
+                // FindByUuidRsp: handle(2) + data
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
+                let handle = u16::from_le_bytes([payload[0], payload[1]]);
+                let mut data = KVec::new();
+                for &b in &payload[2..] {
+                    data.push(b, GFP_KERNEL)?;
+                }
+                Ok(SsapPdu::FindByUuidRsp { handle, data })
+            }
             0x08 => {
                 if payload.len() < 2 {
                     return Err(EINVAL);
@@ -1292,6 +1396,38 @@ impl SsapPdu {
                     data.push(b, GFP_KERNEL)?;
                 }
                 Ok(SsapPdu::ReadRsp { data })
+            }
+            0x0A => {
+                // ReadByUuidReq: uuid_len(1) + uuid(2 or 16)
+                if payload.is_empty() {
+                    return Err(EINVAL);
+                }
+                let uuid_len = payload[0] as usize;
+                if payload.len() < 1 + uuid_len {
+                    return Err(EINVAL);
+                }
+                let uuid = if uuid_len == 2 {
+                    SsapUuid::Uuid16(u16::from_le_bytes([payload[1], payload[2]]))
+                } else if uuid_len == 16 {
+                    let mut v = [0u8; 16];
+                    v.copy_from_slice(&payload[1..17]);
+                    SsapUuid::Uuid128(v)
+                } else {
+                    return Err(EINVAL);
+                };
+                Ok(SsapPdu::ReadByUuidReq { uuid })
+            }
+            0x0B => {
+                // ReadByUuidRsp: handle(2) + data
+                if payload.len() < 2 {
+                    return Err(EINVAL);
+                }
+                let handle = u16::from_le_bytes([payload[0], payload[1]]);
+                let mut data = KVec::new();
+                for &b in &payload[2..] {
+                    data.push(b, GFP_KERNEL)?;
+                }
+                Ok(SsapPdu::ReadByUuidRsp { handle, data })
             }
             0x0C => {
                 if payload.len() < 2 {
@@ -1476,6 +1612,26 @@ impl SsapSession {
         pdu.encode(buf)
     }
 
+    /// Build a FindByUuidReq PDU for remote service discovery by UUID.
+    pub fn build_find_by_uuid_req(
+        &self,
+        uuid: &SsapUuid,
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        let pdu = SsapPdu::FindByUuidReq { uuid: *uuid };
+        pdu.encode(buf)
+    }
+
+    /// Build a ReadByUuidReq PDU for reading a remote property by UUID.
+    pub fn build_read_by_uuid_req(
+        &self,
+        uuid: &SsapUuid,
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        let pdu = SsapPdu::ReadByUuidReq { uuid: *uuid };
+        pdu.encode(buf)
+    }
+
     /// Build a CallMethodReq PDU for remote method invocation.
     pub fn build_call_method_req(
         &self,
@@ -1630,6 +1786,55 @@ impl SsapSession {
             SsapPdu::CallMethodRsp { handle, data } => {
                 // Response to our outbound method call — store result
                 let _ = self.remote_db.push_remote_event(handle, false, &data);
+                Ok(0)
+            }
+            SsapPdu::FindByUuidReq { uuid } => {
+                // Remote peer wants to find a service by UUID
+                match ssap.find_service_by_uuid(&uuid) {
+                    Some(svc) => {
+                        let handle = svc.start_handle;
+                        // Return service start handle as 2-byte data
+                        let mut data = KVec::new();
+                        data.extend_from_slice(&svc.end_handle.to_le_bytes(), GFP_KERNEL)?;
+                        let rsp = SsapPdu::FindByUuidRsp { handle, data };
+                        rsp.encode(resp_buf)
+                    }
+                    None => {
+                        let rsp = SsapPdu::ErrorRsp {
+                            req_opcode: SsapMsgCode::FindByUuidReq as u8,
+                            handle: 0,
+                            error: SsapError::PropertyNotFound,
+                        };
+                        rsp.encode(resp_buf)
+                    }
+                }
+            }
+            SsapPdu::FindByUuidRsp { handle, data } => {
+                // Response to our outbound FindByUuid — store
+                let _ = self.remote_db.push_remote_event(handle, false, &data);
+                Ok(0)
+            }
+            SsapPdu::ReadByUuidReq { uuid } => {
+                // Remote peer wants to read a property by UUID
+                match ssap.read_by_uuid(&uuid) {
+                    Ok((handle, data)) => {
+                        let rsp = SsapPdu::ReadByUuidRsp { handle, data };
+                        rsp.encode(resp_buf)
+                    }
+                    Err(_) => {
+                        let rsp = SsapPdu::ErrorRsp {
+                            req_opcode: SsapMsgCode::ReadByUuidReq as u8,
+                            handle: 0,
+                            error: SsapError::PropertyNotFound,
+                        };
+                        rsp.encode(resp_buf)
+                    }
+                }
+            }
+            SsapPdu::ReadByUuidRsp { handle, data } => {
+                // Response to our outbound ReadByUuid — store
+                self.remote_db.last_read_value = data;
+                let _ = self.remote_db.push_remote_event(handle, false, &[]);
                 Ok(0)
             }
         }

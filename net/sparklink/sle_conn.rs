@@ -251,7 +251,7 @@ impl SeqState {
     ///
     /// **RX rules**:
     /// - `TxSeq == ExpectedTxSeq`: in-order, accept, advance ExpectedTxSeq.
-    /// - `ExpectedTxSeq < TxSeq < BufferSeq + TxWindow`: out-of-order, buffer.
+    /// - `0 < distance(TxSeq, ExpectedTxSeq) < TxWindow`: within window, buffer.
     /// - Otherwise: duplicate or outside window, drop.
     pub fn classify_rx(&mut self, tx_seq: u16) -> RxAction {
         let seq = tx_seq & SEQ_MASK;
@@ -264,18 +264,16 @@ impl SeqState {
         } else {
             let dist_from_expected = seq_distance(seq, self.expected_rx_seq);
             if dist_from_expected > 0 && dist_from_expected < self.tx_window {
-                // Within the window but not the expected one — gap detected.
-                let dist_from_buffer = seq_distance(seq, self.buffer_seq);
-                if dist_from_buffer < self.tx_window {
-                    if seq_distance(seq + 1, self.buffer_seq) < self.tx_window {
-                        self.buffer_seq = (seq + 1) & SEQ_MASK;
-                    }
-                    self.rx_count += 1;
-                    RxAction::Buffer
-                } else {
-                    self.rx_drop_count += 1;
-                    RxAction::Drop
+                // Within the window — buffer it (handles both new gaps and
+                // gap-filling PDUs that arrive after higher-numbered ones).
+                let new_end = (seq + 1) & SEQ_MASK;
+                let new_dist = seq_distance(new_end, self.expected_rx_seq);
+                let cur_dist = seq_distance(self.buffer_seq, self.expected_rx_seq);
+                if new_dist > cur_dist && new_dist < self.tx_window {
+                    self.buffer_seq = new_end;
                 }
+                self.rx_count += 1;
+                RxAction::Buffer
             } else {
                 // Duplicate or outside window.
                 self.rx_drop_count += 1;
@@ -1218,6 +1216,7 @@ impl ConnManager {
         let mut entry = ConnEntry::try_new(handle)?;
         entry.peer_addr = *addr;
         entry.state = ConnState::Connected;
+        entry.last_activity = jiffies_now();
         self.connections.push(entry, GFP_KERNEL)?;
         self.total_created += 1;
         pr_info!(

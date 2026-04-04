@@ -2107,11 +2107,11 @@ fn ioctl_inject_conn_data(me: Pin<&SparkLinkCtl>, arg: usize) -> Result<isize> {
         let handle = s.conn.resolve_handle(cd.handle)?;
         if !raw.is_empty()
             && u16::from(raw[0]) == sle_conn::tcid::MANAGEMENT
-            && raw.len() >= 5
+            && raw.len() >= 6
             && raw[1] == sle_conn::CREDIT_GRANT_PDU_TYPE
         {
-            let target_tcid = u16::from(raw[2]);
-            let credits = u16::from_le_bytes([raw[3], raw[4]]);
+            let target_tcid = u16::from(raw[3]);
+            let credits = u16::from_le_bytes([raw[4], raw[5]]);
             let _ = s.conn.receive_credits(handle, target_tcid, credits);
         } else if !raw.is_empty()
             && u16::from(raw[0]) == sle_conn::tcid::SERVICE_MGMT

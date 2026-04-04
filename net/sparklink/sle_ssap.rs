@@ -978,18 +978,18 @@ pub enum SsapPdu {
     FindByUuidReq { uuid: SsapUuid },
     /// Find by UUID response: matched handle + entry info.
     FindByUuidRsp { handle: u16, data: KVec<u8> },
-    /// Read request: attribute handle.
-    ReadReq { handle: u16 },
+    /// Read request: attribute handle + offset for long reads.
+    ReadReq { handle: u16, offset: u16 },
     /// Read response: attribute value.
     ReadRsp { data: KVec<u8> },
     /// Read by UUID request.
     ReadByUuidReq { uuid: SsapUuid },
     /// Read by UUID response: handle + value.
     ReadByUuidRsp { handle: u16, data: KVec<u8> },
-    /// Write command (no response): handle + value.
-    WriteCmd { handle: u16, data: KVec<u8> },
-    /// Write request (with response): handle + value.
-    WriteReq { handle: u16, data: KVec<u8> },
+    /// Write command (no response): handle + offset + value.
+    WriteCmd { handle: u16, offset: u16, data: KVec<u8> },
+    /// Write request (with response): handle + offset + value.
+    WriteReq { handle: u16, offset: u16, data: KVec<u8> },
     /// Write response: handle.
     WriteRsp { handle: u16 },
     /// Value notification: handle + value.
@@ -1121,13 +1121,14 @@ impl SsapPdu {
                 buf[3..3 + data.len()].copy_from_slice(data);
                 Ok(need)
             }
-            SsapPdu::ReadReq { handle } => {
-                if buf.len() < 3 {
+            SsapPdu::ReadReq { handle, offset } => {
+                if buf.len() < 5 {
                     return Err(ENOMEM);
                 }
                 buf[0] = SsapMsgCode::ReadReq as u8;
                 buf[1..3].copy_from_slice(&handle.to_le_bytes());
-                Ok(3)
+                buf[3..5].copy_from_slice(&offset.to_le_bytes());
+                Ok(5)
             }
             SsapPdu::ReadRsp { data } => {
                 if buf.len() < 1 + data.len() {
@@ -1169,23 +1170,25 @@ impl SsapPdu {
                 buf[3..3 + data.len()].copy_from_slice(data);
                 Ok(need)
             }
-            SsapPdu::WriteCmd { handle, data } => {
-                if buf.len() < 3 + data.len() {
+            SsapPdu::WriteCmd { handle, offset, data } => {
+                if buf.len() < 5 + data.len() {
                     return Err(ENOMEM);
                 }
                 buf[0] = SsapMsgCode::WriteCmd as u8;
                 buf[1..3].copy_from_slice(&handle.to_le_bytes());
-                buf[3..3 + data.len()].copy_from_slice(data);
-                Ok(3 + data.len())
+                buf[3..5].copy_from_slice(&offset.to_le_bytes());
+                buf[5..5 + data.len()].copy_from_slice(data);
+                Ok(5 + data.len())
             }
-            SsapPdu::WriteReq { handle, data } => {
-                if buf.len() < 3 + data.len() {
+            SsapPdu::WriteReq { handle, offset, data } => {
+                if buf.len() < 5 + data.len() {
                     return Err(ENOMEM);
                 }
                 buf[0] = SsapMsgCode::WriteReq as u8;
                 buf[1..3].copy_from_slice(&handle.to_le_bytes());
-                buf[3..3 + data.len()].copy_from_slice(data);
-                Ok(3 + data.len())
+                buf[3..5].copy_from_slice(&offset.to_le_bytes());
+                buf[5..5 + data.len()].copy_from_slice(data);
+                Ok(5 + data.len())
             }
             SsapPdu::WriteRsp { handle } => {
                 if buf.len() < 3 {
@@ -1386,9 +1389,13 @@ impl SsapPdu {
                 if payload.len() < 2 {
                     return Err(EINVAL);
                 }
-                Ok(SsapPdu::ReadReq {
-                    handle: u16::from_le_bytes([payload[0], payload[1]]),
-                })
+                let handle = u16::from_le_bytes([payload[0], payload[1]]);
+                let offset = if payload.len() >= 4 {
+                    u16::from_le_bytes([payload[2], payload[3]])
+                } else {
+                    0
+                };
+                Ok(SsapPdu::ReadReq { handle, offset })
             }
             0x09 => {
                 let mut data = KVec::new();
@@ -1434,22 +1441,32 @@ impl SsapPdu {
                     return Err(EINVAL);
                 }
                 let handle = u16::from_le_bytes([payload[0], payload[1]]);
+                let (offset, data_start) = if payload.len() >= 4 {
+                    (u16::from_le_bytes([payload[2], payload[3]]), 4)
+                } else {
+                    (0u16, 2)
+                };
                 let mut data = KVec::new();
-                for &b in &payload[2..] {
+                for &b in &payload[data_start..] {
                     data.push(b, GFP_KERNEL)?;
                 }
-                Ok(SsapPdu::WriteCmd { handle, data })
+                Ok(SsapPdu::WriteCmd { handle, offset, data })
             }
             0x0D => {
                 if payload.len() < 2 {
                     return Err(EINVAL);
                 }
                 let handle = u16::from_le_bytes([payload[0], payload[1]]);
+                let (offset, data_start) = if payload.len() >= 4 {
+                    (u16::from_le_bytes([payload[2], payload[3]]), 4)
+                } else {
+                    (0u16, 2)
+                };
                 let mut data = KVec::new();
-                for &b in &payload[2..] {
+                for &b in &payload[data_start..] {
                     data.push(b, GFP_KERNEL)?;
                 }
-                Ok(SsapPdu::WriteReq { handle, data })
+                Ok(SsapPdu::WriteReq { handle, offset, data })
             }
             0x0E => {
                 if payload.len() < 2 {
@@ -1529,7 +1546,7 @@ impl SsapPdu {
 /// SSAP uses ordered request-response semantics by default (T/XS
 /// 20001-2025 §7.4.2.2): the client must not send another request
 /// until the previous response has been received.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum PendingRequest {
     /// Awaiting ExchangeInfoRsp.
     ExchangeInfo,
@@ -1537,14 +1554,37 @@ pub enum PendingRequest {
     FindStructure,
     /// Awaiting FindByUuidRsp.
     FindByUuid { uuid: SsapUuid },
-    /// Awaiting ReadRsp for a specific handle.
-    Read { handle: u16 },
+    /// Awaiting ReadRsp for a specific handle (with long-read state).
+    Read {
+        handle: u16,
+        next_offset: u16,
+        accumulated: KVec<u8>,
+    },
     /// Awaiting ReadByUuidRsp.
     ReadByUuid { uuid: SsapUuid },
     /// Awaiting WriteRsp for a specific handle.
     Write { handle: u16 },
     /// Awaiting CallMethodRsp for a specific handle.
     CallMethod { handle: u16 },
+}
+
+/// Outbound write fragmentation state.
+///
+/// Holds the remaining data to send across multiple WriteReq PDUs.
+pub struct TxFragState {
+    pub handle: u16,
+    pub data: KVec<u8>,
+    pub offset: u16,
+}
+
+/// Inbound write reassembly buffer.
+///
+/// Accumulates fragments from multiple WriteReq PDUs with increasing
+/// offsets until the final (short) fragment arrives.
+pub struct RxFragState {
+    pub handle: u16,
+    pub buffer: KVec<u8>,
+    pub expected_offset: u16,
 }
 
 /// Per-connection SSAP session state.
@@ -1565,6 +1605,10 @@ pub struct SsapSession {
     pub remote_db: RemoteServiceDb,
     /// Pending outbound request (half-duplex: at most one at a time).
     pub pending: Option<PendingRequest>,
+    /// Outbound write fragmentation state (remaining data to send).
+    pub tx_frag: Option<TxFragState>,
+    /// Inbound write reassembly buffer (server-side).
+    pub rx_frag: Option<RxFragState>,
 }
 
 impl SsapSession {
@@ -1577,6 +1621,8 @@ impl SsapSession {
             info_exchanged: false,
             remote_db: RemoteServiceDb::new(),
             pending: None,
+            tx_frag: None,
+            rx_frag: None,
         }
     }
 
@@ -1605,29 +1651,61 @@ impl SsapSession {
     }
 
     /// Build a ReadReq PDU for remote property read.
+    ///
+    /// For the first read, `offset` should be 0. If the peer responds
+    /// with a full-MTU ReadRsp, the client-side handler will auto-send
+    /// continuation ReadReq PDUs with increasing offsets.
     pub fn build_read_req(&mut self, handle: u16, buf: &mut [u8]) -> Result<usize> {
-        let pdu = SsapPdu::ReadReq { handle };
+        let pdu = SsapPdu::ReadReq { handle, offset: 0 };
         let len = pdu.encode(buf)?;
-        self.pending = Some(PendingRequest::Read { handle });
+        self.pending = Some(PendingRequest::Read {
+            handle,
+            next_offset: 0,
+            accumulated: KVec::new(),
+        });
         Ok(len)
     }
 
+    /// Maximum data payload per WriteReq PDU.
+    fn max_write_chunk(&self) -> usize {
+        // Wire: [opcode:1][handle:2][offset:2][data...] → header = 5
+        (self.mtu as usize).saturating_sub(5)
+    }
+
     /// Build a WriteReq PDU for remote property write.
+    ///
+    /// If the data exceeds a single PDU, the first fragment is encoded
+    /// into `buf` and the remainder is stored in `tx_frag`. The
+    /// client-side WriteRsp handler will auto-send subsequent fragments.
     pub fn build_write_req(
         &mut self,
         handle: u16,
         data: &[u8],
         buf: &mut [u8],
     ) -> Result<usize> {
+        let chunk_max = self.max_write_chunk();
+        let first_len = data.len().min(chunk_max);
         let mut d = KVec::new();
-        d.extend_from_slice(data, GFP_KERNEL)?;
+        d.extend_from_slice(&data[..first_len], GFP_KERNEL)?;
         let pdu = SsapPdu::WriteReq {
             handle,
+            offset: 0,
             data: d,
         };
-        let len = pdu.encode(buf)?;
+        let pdu_len = pdu.encode(buf)?;
+        if data.len() > chunk_max {
+            let mut remaining = KVec::new();
+            remaining.extend_from_slice(&data[first_len..], GFP_KERNEL)?;
+            self.tx_frag = Some(TxFragState {
+                handle,
+                data: remaining,
+                offset: first_len as u16,
+            });
+        } else {
+            self.tx_frag = None;
+        }
         self.pending = Some(PendingRequest::Write { handle });
-        Ok(len)
+        Ok(pdu_len)
     }
 
     /// Build a WriteCmd PDU (no response expected).
@@ -1641,6 +1719,7 @@ impl SsapSession {
         d.extend_from_slice(data, GFP_KERNEL)?;
         let pdu = SsapPdu::WriteCmd {
             handle,
+            offset: 0,
             data: d,
         };
         pdu.encode(buf)
@@ -1720,12 +1799,25 @@ impl SsapSession {
                 let rsp = SsapPdu::FindStructureRsp { entries };
                 rsp.encode(resp_buf)
             }
-            SsapPdu::ReadReq { handle } => match ssap.read_property(handle) {
+            SsapPdu::ReadReq { handle, offset } => match ssap.read_property(handle) {
                 Ok(data) => {
-                    let rsp = SsapPdu::ReadRsp { data };
+                    let start = (offset as usize).min(data.len());
+                    let chunk_max = (self.mtu as usize).saturating_sub(1); // ReadRsp header = 1
+                    let end = (start + chunk_max).min(data.len());
+                    let mut chunk = KVec::new();
+                    chunk.extend_from_slice(&data[start..end], GFP_KERNEL)?;
+                    let rsp = SsapPdu::ReadRsp { data: chunk };
                     rsp.encode(resp_buf)
                 }
                 Err(_) => {
+                    if offset > 0 {
+                        let rsp = SsapPdu::ErrorRsp {
+                            req_opcode: SsapMsgCode::ReadReq as u8,
+                            handle,
+                            error: SsapError::InvalidOffset,
+                        };
+                        return rsp.encode(resp_buf);
+                    }
                     let rsp = SsapPdu::ErrorRsp {
                         req_opcode: SsapMsgCode::ReadReq as u8,
                         handle,
@@ -1734,20 +1826,88 @@ impl SsapSession {
                     rsp.encode(resp_buf)
                 }
             },
-            SsapPdu::WriteCmd { handle, data } => {
-                let _ = ssap.write_property(handle, &data);
+            SsapPdu::WriteCmd { handle, offset, data } => {
+                if offset == 0 {
+                    let _ = ssap.write_property(handle, &data);
+                } else if let Some(ref mut frag) = self.rx_frag {
+                    if frag.handle == handle && frag.expected_offset == offset {
+                        let _ = frag.buffer.extend_from_slice(&data, GFP_KERNEL);
+                        let _ = ssap.write_property(handle, &frag.buffer);
+                        self.rx_frag = None;
+                    }
+                }
                 Ok(0) // No response for WriteCmd
             }
-            SsapPdu::WriteReq { handle, data } => match ssap.write_property(handle, &data) {
-                Ok(()) => {
+            SsapPdu::WriteReq { handle, offset, data } => {
+                let chunk_max = self.max_write_chunk();
+                if offset == 0 && data.len() < chunk_max {
+                    // Single-PDU write (common case)
+                    match ssap.write_property(handle, &data) {
+                        Ok(()) => {
+                            let rsp = SsapPdu::WriteRsp { handle };
+                            rsp.encode(resp_buf)
+                        }
+                        Err(_) => {
+                            let rsp = SsapPdu::ErrorRsp {
+                                req_opcode: SsapMsgCode::WriteReq as u8,
+                                handle,
+                                error: SsapError::WriteNotPermitted,
+                            };
+                            rsp.encode(resp_buf)
+                        }
+                    }
+                } else if offset == 0 {
+                    // First fragment of a long write
+                    let mut buf_data = KVec::new();
+                    buf_data.extend_from_slice(&data, GFP_KERNEL)?;
+                    self.rx_frag = Some(RxFragState {
+                        handle,
+                        buffer: buf_data,
+                        expected_offset: data.len() as u16,
+                    });
                     let rsp = SsapPdu::WriteRsp { handle };
                     rsp.encode(resp_buf)
-                }
-                Err(_) => {
+                } else if let Some(ref mut frag) = self.rx_frag {
+                    if frag.handle != handle || frag.expected_offset != offset {
+                        self.rx_frag = None;
+                        let rsp = SsapPdu::ErrorRsp {
+                            req_opcode: SsapMsgCode::WriteReq as u8,
+                            handle,
+                            error: SsapError::InvalidOffset,
+                        };
+                        return rsp.encode(resp_buf);
+                    }
+                    frag.buffer.extend_from_slice(&data, GFP_KERNEL)?;
+                    frag.expected_offset += data.len() as u16;
+                    if data.len() < chunk_max {
+                        // Last fragment — commit
+                        let result = ssap.write_property(handle, &frag.buffer);
+                        self.rx_frag = None;
+                        match result {
+                            Ok(()) => {
+                                let rsp = SsapPdu::WriteRsp { handle };
+                                rsp.encode(resp_buf)
+                            }
+                            Err(_) => {
+                                let rsp = SsapPdu::ErrorRsp {
+                                    req_opcode: SsapMsgCode::WriteReq as u8,
+                                    handle,
+                                    error: SsapError::WriteNotPermitted,
+                                };
+                                rsp.encode(resp_buf)
+                            }
+                        }
+                    } else {
+                        // More fragments expected
+                        let rsp = SsapPdu::WriteRsp { handle };
+                        rsp.encode(resp_buf)
+                    }
+                } else {
+                    // offset > 0 but no reassembly in progress
                     let rsp = SsapPdu::ErrorRsp {
                         req_opcode: SsapMsgCode::WriteReq as u8,
                         handle,
-                        error: SsapError::WriteNotPermitted,
+                        error: SsapError::InvalidOffset,
                     };
                     rsp.encode(resp_buf)
                 }
@@ -1776,16 +1936,64 @@ impl SsapSession {
                 Ok(0)
             }
             SsapPdu::ReadRsp { data } => {
-                if !matches!(self.pending, Some(PendingRequest::Read { .. })) {
-                    pr_warn!("sparklink: SSAP unexpected ReadRsp (no pending read)\n");
+                let chunk_max = (self.mtu as usize).saturating_sub(1);
+                match self.pending.take() {
+                    Some(PendingRequest::Read {
+                        handle,
+                        next_offset: _,
+                        mut accumulated,
+                    }) => {
+                        accumulated.extend_from_slice(&data, GFP_KERNEL)?;
+                        if data.len() >= chunk_max && chunk_max > 0 {
+                            // Full payload — more data expected; send continuation ReadReq
+                            let new_offset = accumulated.len() as u16;
+                            self.pending = Some(PendingRequest::Read {
+                                handle,
+                                next_offset: new_offset,
+                                accumulated,
+                            });
+                            let cont = SsapPdu::ReadReq {
+                                handle,
+                                offset: new_offset,
+                            };
+                            return cont.encode(resp_buf);
+                        }
+                        // Short payload — last chunk, read complete
+                        self.remote_db.last_read_value = accumulated;
+                    }
+                    other => {
+                        pr_warn!("sparklink: SSAP unexpected ReadRsp (no pending read)\n");
+                        self.pending = other;
+                    }
                 }
-                self.pending = None;
-                self.remote_db.last_read_value = data;
                 Ok(0)
             }
             SsapPdu::WriteRsp { handle: _ } => {
                 if !matches!(self.pending, Some(PendingRequest::Write { .. })) {
                     pr_warn!("sparklink: SSAP unexpected WriteRsp (no pending write)\n");
+                }
+                // Check if there are more fragments to send
+                if let Some(mut frag) = self.tx_frag.take() {
+                    let chunk_max = self.max_write_chunk();
+                    let send_len = frag.data.len().min(chunk_max);
+                    let mut chunk = KVec::new();
+                    chunk.extend_from_slice(&frag.data[..send_len], GFP_KERNEL)?;
+                    let pdu = SsapPdu::WriteReq {
+                        handle: frag.handle,
+                        offset: frag.offset,
+                        data: chunk,
+                    };
+                    let pdu_len = pdu.encode(resp_buf)?;
+                    if send_len < frag.data.len() {
+                        // Still more remaining
+                        let mut remaining = KVec::new();
+                        remaining.extend_from_slice(&frag.data[send_len..], GFP_KERNEL)?;
+                        frag.offset += send_len as u16;
+                        frag.data = remaining;
+                        self.tx_frag = Some(frag);
+                    }
+                    // pending stays as Write
+                    return Ok(pdu_len);
                 }
                 self.pending = None;
                 Ok(0)

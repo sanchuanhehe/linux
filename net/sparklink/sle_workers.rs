@@ -458,6 +458,38 @@ pub(crate) fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dl
         sle_dli::SleEvent::PairFailure { handle, reason } => {
             shared.security.on_pair_failure(*handle, *reason);
         }
+        // -----------------------------------------------------------------
+        // Sync link setup events — update ConnManager state machine.
+        // -----------------------------------------------------------------
+        sle_dli::SleEvent::SyncUcastSetupRequest {
+            async_handle,
+            sync_handle,
+            event_group_set_id,
+            event_group_id,
+        } => {
+            let _ = shared.conn.handle_sync_ucast_setup_request(
+                *async_handle, *sync_handle, *event_group_set_id, *event_group_id);
+        }
+        sle_dli::SleEvent::SyncUcastSetupComplete {
+            sync_handle,
+            status,
+            ..
+        } => {
+            let _ = shared.conn.handle_sync_ucast_setup_complete(*sync_handle, *status);
+        }
+        sle_dli::SleEvent::SyncMcastSetupRequest {
+            async_handle,
+            sync_handle,
+        } => {
+            let _ = shared.conn.handle_sync_mcast_setup_request(*async_handle, *sync_handle);
+        }
+        sle_dli::SleEvent::SyncMcastSetupComplete {
+            sync_handle,
+            status,
+            ..
+        } => {
+            let _ = shared.conn.handle_sync_mcast_setup_complete(*sync_handle, *status);
+        }
         _ => {}
     }
 

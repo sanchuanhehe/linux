@@ -396,6 +396,21 @@ pub(crate) const SL_IOCTL_SYNC_DATAPATH_REMOVE: u32 = _IOW::<u16>(SL_MAGIC, 0x6D
 /// Get sync link information.
 pub(crate) const SL_IOCTL_SYNC_INFO: u32 = _IOWR::<SleSyncLinkInfo>(SL_MAGIC, 0x6E);
 
+/// Accept a sync unicast setup request (§8.10.5).
+pub(crate) const SL_IOCTL_SYNC_UCAST_ACCEPT: u32 = _IOW::<u16>(SL_MAGIC, 0x73);
+
+/// Reject a sync unicast setup request (§8.10.6).
+pub(crate) const SL_IOCTL_SYNC_UCAST_REJECT: u32 = _IOW::<SleSyncRejectCmd>(SL_MAGIC, 0x74);
+
+/// Accept a sync multicast setup request (§8.10.11).
+pub(crate) const SL_IOCTL_SYNC_MCAST_ACCEPT: u32 = _IOW::<u16>(SL_MAGIC, 0x75);
+
+/// Reject a sync multicast setup request (§8.10.12).
+pub(crate) const SL_IOCTL_SYNC_MCAST_REJECT: u32 = _IOW::<SleSyncRejectCmd>(SL_MAGIC, 0x76);
+
+/// Send isochronous data on a sync link (§7.5).
+pub(crate) const SL_IOCTL_SYNC_DATA_SEND: u32 = _IOW::<SleSyncDataCmd>(SL_MAGIC, 0x77);
+
 /// Get number of pending events in the event queue.
 pub(crate) const SL_IOCTL_EVENT_COUNT: u32 = _IO(SL_MAGIC, 0x70);
 
@@ -1211,6 +1226,48 @@ pub(crate) struct SleSyncLinkInfo {
 
 // SAFETY: repr(C) with only primitive fields.
 unsafe impl FromBytes for SleSyncLinkInfo {}
+
+/// Sync link reject command (§8.10.6, §8.10.12).
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub(crate) struct SleSyncRejectCmd {
+    /// Sync link handle.
+    pub sync_handle: u16,
+    /// Rejection reason code.
+    pub reason: u8,
+    pub(crate) _pad: u8,
+}
+
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleSyncRejectCmd {}
+
+/// Sync data send command (§7.5).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct SleSyncDataCmd {
+    /// Sync link handle.
+    pub sync_handle: u16,
+    /// Segmentation: 0=complete, 1=first, 2=middle, 3=last.
+    pub segment: u8,
+    /// Priority: 0=low, 1=high.
+    pub priority: u8,
+    /// Payload length.
+    pub len: u16,
+    pub(crate) _pad: [u8; 2],
+    /// SDU payload data.
+    pub data: [u8; 247],
+    pub(crate) _pad2: u8,
+}
+
+// SAFETY: repr(C) with only primitive fields.
+unsafe impl FromBytes for SleSyncDataCmd {}
+
+impl Default for SleSyncDataCmd {
+    fn default() -> Self {
+        // SAFETY: all-zeros is a valid representation for this repr(C) struct.
+        unsafe { core::mem::zeroed() }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Security management userspace data structures
@@ -2767,6 +2824,8 @@ impl_check_reserved!(SleSyncBigConfig, [_pad]);
 impl_check_reserved!(SleSyncCreateCmd, [_pad]);
 impl_check_reserved!(SleSyncDatapathCmd, [_pad]);
 impl_check_reserved!(SleSyncLinkInfo, [_pad2]);
+impl_check_reserved!(SleSyncRejectCmd, [_pad]);
+impl_check_reserved!(SleSyncDataCmd, [_pad, _pad2]);
 impl_check_reserved!(SlePairParams, [_reserved]);
 impl_check_reserved!(SlePasswordParams, [_reserved]);
 impl_check_reserved!(SleRalAddParams, [_reserved]);

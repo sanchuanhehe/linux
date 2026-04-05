@@ -916,7 +916,7 @@ pub enum SyncLinkState {
 }
 
 /// Per-sync-link entry managed by ConnManager.
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct SyncLinkEntry {
     /// Sync link connection handle.
     pub handle: u16,
@@ -2438,6 +2438,364 @@ impl ConnManager {
         }
         Err(ENOENT)
     }
+
+    // -----------------------------------------------------------------------
+    // Sync link accept / reject (T/XS 10003-2025 §8.10.5/6, §8.10.11/12)
+    // -----------------------------------------------------------------------
+
+    /// Accept a sync unicast setup request. Transitions the link to Active.
+    pub fn sync_ucast_accept(&mut self, sync_handle: u16) -> Result {
+        let link = self.find_sync_mut(sync_handle)?;
+        if link.link_type != SyncLinkType::Unicast {
+            return Err(EINVAL);
+        }
+        if link.state != SyncLinkState::Creating {
+            return Err(EINVAL);
+        }
+        link.state = SyncLinkState::Active;
+        Ok(())
+    }
+
+    /// Reject a sync unicast setup request. Removes the link entry.
+    pub fn sync_ucast_reject(&mut self, sync_handle: u16, _reason: u8) -> Result {
+        let found = self.sync_links.iter().any(|l| {
+            l.handle == sync_handle
+                && l.link_type == SyncLinkType::Unicast
+                && l.state == SyncLinkState::Creating
+        });
+        if !found {
+            return Err(ENOENT);
+        }
+        self.sync_links.retain(|l| l.handle != sync_handle);
+        Ok(())
+    }
+
+    /// Accept a sync multicast setup request. Transitions the link to Active.
+    pub fn sync_mcast_accept(&mut self, sync_handle: u16) -> Result {
+        let link = self.find_sync_mut(sync_handle)?;
+        if link.link_type != SyncLinkType::Multicast {
+            return Err(EINVAL);
+        }
+        if link.state != SyncLinkState::Creating {
+            return Err(EINVAL);
+        }
+        link.state = SyncLinkState::Active;
+        Ok(())
+    }
+
+    /// Reject a sync multicast setup request. Removes the link entry.
+    pub fn sync_mcast_reject(&mut self, sync_handle: u16, _reason: u8) -> Result {
+        let found = self.sync_links.iter().any(|l| {
+            l.handle == sync_handle
+                && l.link_type == SyncLinkType::Multicast
+                && l.state == SyncLinkState::Creating
+        });
+        if !found {
+            return Err(ENOENT);
+        }
+        self.sync_links.retain(|l| l.handle != sync_handle);
+        Ok(())
+    }
+
+    /// Handle an incoming SyncUcastSetupRequest event from the controller.
+    /// Creates a link entry in Creating state for the host to accept/reject.
+    pub fn handle_sync_ucast_setup_request(
+        &mut self,
+        async_handle: u16,
+        sync_handle: u16,
+        group_set_id: u8,
+        group_id: u8,
+    ) -> Result {
+        let link = SyncLinkEntry {
+            handle: sync_handle,
+            link_type: SyncLinkType::Unicast,
+            state: SyncLinkState::Creating,
+            acl_handle: async_handle,
+            cig_id: group_set_id,
+            cis_id: group_id,
+            sdu_interval_g2t: 0,
+            sdu_interval_t2g: 0,
+            max_sdu_g2t: 0,
+            max_sdu_t2g: 0,
+            retransmit_g2t: 0,
+            retransmit_t2g: 0,
+            max_latency_g2t: 0,
+            max_latency_t2g: 0,
+            adapt_mode: 0,
+            datapath_direction: 0,
+            datapath_id: 0,
+            codec_id: 0,
+            datapath_configured: false,
+        };
+        self.sync_links.push(link, GFP_KERNEL)?;
+        Ok(())
+    }
+
+    /// Handle SyncUcastSetupComplete — transition to Active or remove on error.
+    pub fn handle_sync_ucast_setup_complete(
+        &mut self,
+        sync_handle: u16,
+        status: u8,
+    ) -> Result {
+        if status == 0 {
+            let link = self.find_sync_mut(sync_handle)?;
+            link.state = SyncLinkState::Active;
+        } else {
+            self.sync_links.retain(|l| l.handle != sync_handle);
+        }
+        Ok(())
+    }
+
+    /// Handle an incoming SyncMcastSetupRequest event from the controller.
+    pub fn handle_sync_mcast_setup_request(
+        &mut self,
+        async_handle: u16,
+        sync_handle: u16,
+    ) -> Result {
+        let link = SyncLinkEntry {
+            handle: sync_handle,
+            link_type: SyncLinkType::Multicast,
+            state: SyncLinkState::Creating,
+            acl_handle: async_handle,
+            cig_id: 0,
+            cis_id: 0,
+            sdu_interval_g2t: 0,
+            sdu_interval_t2g: 0,
+            max_sdu_g2t: 0,
+            max_sdu_t2g: 0,
+            retransmit_g2t: 0,
+            retransmit_t2g: 0,
+            max_latency_g2t: 0,
+            max_latency_t2g: 0,
+            adapt_mode: 0,
+            datapath_direction: 0,
+            datapath_id: 0,
+            codec_id: 0,
+            datapath_configured: false,
+        };
+        self.sync_links.push(link, GFP_KERNEL)?;
+        Ok(())
+    }
+
+    /// Handle SyncMcastSetupComplete — transition to Active or remove on error.
+    pub fn handle_sync_mcast_setup_complete(
+        &mut self,
+        sync_handle: u16,
+        status: u8,
+    ) -> Result {
+        if status == 0 {
+            let link = self.find_sync_mut(sync_handle)?;
+            link.state = SyncLinkState::Active;
+        } else {
+            self.sync_links.retain(|l| l.handle != sync_handle);
+        }
+        Ok(())
+    }
+
+    /// Look up the async ACL handle associated with a sync link.
+    pub fn sync_acl_handle(&self, sync_handle: u16) -> Result<u16> {
+        let link = self.find_sync(sync_handle)?;
+        Ok(link.acl_handle)
+    }
+
+    /// Collect sync links belonging to a given CIG/BIG group.
+    /// Returns a temporary array and count for DLI command encoding.
+    pub fn sync_links_for_group(
+        &self,
+        group_id: u8,
+        link_type: SyncLinkType,
+    ) -> ([SyncLinkEntry; MAX_SYNC_LINKS_PER_CIG], u8) {
+        let empty = SyncLinkEntry {
+            handle: 0, link_type: SyncLinkType::Unicast,
+            state: SyncLinkState::Configured, acl_handle: 0,
+            cig_id: 0, cis_id: 0,
+            sdu_interval_g2t: 0, sdu_interval_t2g: 0,
+            max_sdu_g2t: 0, max_sdu_t2g: 0,
+            retransmit_g2t: 0, retransmit_t2g: 0,
+            max_latency_g2t: 0, max_latency_t2g: 0,
+            adapt_mode: 0, datapath_direction: 0,
+            datapath_id: 0, codec_id: 0, datapath_configured: false,
+        };
+        let mut arr = [empty; MAX_SYNC_LINKS_PER_CIG];
+        let mut count = 0u8;
+        for link in self.sync_links.iter() {
+            if link.cig_id == group_id && link.link_type == link_type {
+                if (count as usize) < MAX_SYNC_LINKS_PER_CIG {
+                    arr[count as usize] = link.clone();
+                    count += 1;
+                }
+            }
+        }
+        (arr, count)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DLI parameter encoding helpers for sync commands (T/XS 10003-2025 §8.10)
+// ---------------------------------------------------------------------------
+
+/// Encode SyncUcastParam (0x2801) / SyncMcastParam (0x2807) DLI command params.
+///
+/// Wire format (§8.10.1 / §8.10.7):
+///   [group_id:1][sdu_interval_g2t:3][sdu_interval_t2g:3][sca:1][rsvd:1]
+///   [adapt_mode:1][max_latency_g2t:2][max_latency_t2g:2][link_count:1]
+///   followed by per-link: [stream_id:1][max_sdu_g2t:2][max_sdu_t2g:2]
+///                         [retransmit_g2t:1][retransmit_t2g:1]
+pub fn encode_sync_param_cmd(
+    group_id: u8,
+    sdu_interval_g2t: u32,
+    sdu_interval_t2g: u32,
+    adapt_mode: u8,
+    max_latency_g2t: u16,
+    max_latency_t2g: u16,
+    link_count: u8,
+    links: &[SyncLinkEntry],
+) -> ([u8; 64], usize) {
+    let mut buf = [0u8; 64];
+    let mut off = 0usize;
+
+    buf[off] = group_id;
+    off += 1;
+    // SDU intervals are 3 bytes LE
+    let g2t = sdu_interval_g2t.to_le_bytes();
+    buf[off..off + 3].copy_from_slice(&g2t[..3]);
+    off += 3;
+    let t2g = sdu_interval_t2g.to_le_bytes();
+    buf[off..off + 3].copy_from_slice(&t2g[..3]);
+    off += 3;
+    buf[off] = 0x07; // SCA: best accuracy (0-20ppm)
+    off += 1;
+    buf[off] = 0; // reserved
+    off += 1;
+    buf[off] = adapt_mode;
+    off += 1;
+    buf[off..off + 2].copy_from_slice(&max_latency_g2t.to_le_bytes());
+    off += 2;
+    buf[off..off + 2].copy_from_slice(&max_latency_t2g.to_le_bytes());
+    off += 2;
+    buf[off] = link_count;
+    off += 1;
+
+    for link in links.iter().take(link_count as usize) {
+        buf[off] = link.cis_id;
+        off += 1;
+        buf[off..off + 2].copy_from_slice(&link.max_sdu_g2t.to_le_bytes());
+        off += 2;
+        buf[off..off + 2].copy_from_slice(&link.max_sdu_t2g.to_le_bytes());
+        off += 2;
+        buf[off] = link.retransmit_g2t;
+        off += 1;
+        buf[off] = link.retransmit_t2g;
+        off += 1;
+    }
+
+    (buf, off)
+}
+
+/// Encode SyncUcastCreate (0x2803) / SyncMcastCreate (0x2809) command params.
+///
+/// Wire format (§8.10.3 / §8.10.9):
+///   [group_id:1][link_count:1]
+///   per-link: [sync_handle:2][acl_handle:2]
+pub fn encode_sync_create_cmd(
+    group_id: u8,
+    links: &[SyncLinkEntry],
+) -> ([u8; 40], usize) {
+    let mut buf = [0u8; 40];
+    buf[0] = group_id;
+    buf[1] = links.len() as u8;
+    let mut off = 2usize;
+    for link in links.iter() {
+        buf[off..off + 2].copy_from_slice(&link.handle.to_le_bytes());
+        off += 2;
+        buf[off..off + 2].copy_from_slice(&link.acl_handle.to_le_bytes());
+        off += 2;
+    }
+    (buf, off)
+}
+
+/// Encode SyncDataPathConfig (0x280D) command params.
+///
+/// Wire format (§8.10.13):
+///   [sync_handle:2][direction:1][path_id:1][codec_id:1]
+///   [controller_delay:3][codec_cfg_len:1][codec_cfg:var]
+pub fn encode_sync_datapath_cmd(
+    sync_handle: u16,
+    direction: u8,
+    path_id: u8,
+    codec_id: u8,
+) -> ([u8; 8], usize) {
+    let mut buf = [0u8; 8];
+    buf[0..2].copy_from_slice(&sync_handle.to_le_bytes());
+    buf[2] = direction;
+    buf[3] = path_id;
+    buf[4] = codec_id;
+    buf[5] = 0; buf[6] = 0; buf[7] = 0; // controller_delay = 0
+    (buf, 8)
+}
+
+// ---------------------------------------------------------------------------
+// Sync link isochronous data encapsulation (T/XS 10003-2025 §7.5)
+// ---------------------------------------------------------------------------
+
+/// Segmentation indicator for sync link SDU fragments.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SyncSegment {
+    Complete = 0,
+    First = 1,
+    Middle = 2,
+    Last = 3,
+}
+
+/// Encode a sync link data header (§7.5) for TX.
+///
+/// Header layout (4 bytes):
+///   bits [0..11]:   link handle (12 bits)
+///   bits [12..13]:  segmentation indicator (2 bits)
+///   bit  [14]:      timestamp present (1 bit)
+///   bit  [15]:      priority (1 bit)
+///   bits [16..24]:  DLI data length (lower 8 bits)
+///   bits [24..25]:  DLI data length (upper 1 bit, 9 bits total)
+///   bits [25..31]:  reserved
+///
+/// Returns the 4-byte header.
+pub fn encode_sync_data_header(
+    handle: u16,
+    segment: SyncSegment,
+    has_timestamp: bool,
+    priority: bool,
+    payload_len: u16,
+) -> [u8; 4] {
+    let mut hdr = [0u8; 4];
+    // byte 0: handle bits [0..7]
+    hdr[0] = (handle & 0xFF) as u8;
+    // byte 1: handle bits [8..11] | segment [12..13] | ts [14] | prio [15]
+    hdr[1] = ((handle >> 8) & 0x0F) as u8
+        | ((segment as u8) << 4)
+        | (if has_timestamp { 1 << 6 } else { 0 })
+        | (if priority { 1 << 7 } else { 0 });
+    // byte 2-3: DLI data length (9 bits LE + reserved)
+    hdr[2] = (payload_len & 0xFF) as u8;
+    hdr[3] = ((payload_len >> 8) & 0x01) as u8;
+    hdr
+}
+
+/// Decode a sync link data header (§7.5).
+///
+/// Returns (handle, segment, has_timestamp, priority, payload_len).
+pub fn decode_sync_data_header(hdr: &[u8; 4]) -> (u16, SyncSegment, bool, bool, u16) {
+    let handle = (hdr[0] as u16) | (((hdr[1] & 0x0F) as u16) << 8);
+    let seg = match (hdr[1] >> 4) & 0x03 {
+        0 => SyncSegment::Complete,
+        1 => SyncSegment::First,
+        2 => SyncSegment::Middle,
+        _ => SyncSegment::Last,
+    };
+    let ts = (hdr[1] & 0x40) != 0;
+    let prio = (hdr[1] & 0x80) != 0;
+    let len = (hdr[2] as u16) | (((hdr[3] & 0x01) as u16) << 8);
+    (handle, seg, ts, prio, len)
 }
 
 // ---------------------------------------------------------------------------

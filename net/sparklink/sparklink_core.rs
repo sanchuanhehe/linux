@@ -2877,6 +2877,282 @@ fn ioctl_ral_read_rpa(arg: usize, is_local: bool) -> Result {
     write_user_struct(arg, &params)
 }
 
+/// Sync link ioctl sub-dispatcher (separate stack frame for large structs).
+#[inline(never)]
+fn ioctl_sync_link(cmd: u32, arg: usize) -> Result<isize> {
+    match cmd {
+        SL_IOCTL_SYNC_UCAST_PARAM => {
+            let mut cfg = read_user_struct::<SleSyncCigConfig>(arg)?;
+            let params = sle_conn::SyncCigParams {
+                cig_id: cfg.cig_id,
+                sdu_interval_g2t: cfg.sdu_interval_g2t,
+                sdu_interval_t2g: cfg.sdu_interval_t2g,
+                max_sdu_g2t: cfg.max_sdu_g2t,
+                max_sdu_t2g: cfg.max_sdu_t2g,
+                retransmit_g2t: cfg.retransmit_g2t,
+                retransmit_t2g: cfg.retransmit_t2g,
+                max_latency_g2t: cfg.max_latency_g2t,
+                max_latency_t2g: cfg.max_latency_t2g,
+                adapt_mode: cfg.adapt_mode,
+                link_count: cfg.link_count,
+            };
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let result = s.conn.sync_ucast_configure(&params)?;
+            cfg.cig_id = result.cig_id;
+            cfg.link_count = result.link_count;
+            cfg.handles_out = result.handles;
+            let (links, cnt) = s.conn.sync_links_for_group(
+                result.cig_id, sle_conn::SyncLinkType::Unicast);
+            let (buf, len) = sle_conn::encode_sync_param_cmd(
+                result.cig_id,
+                params.sdu_interval_g2t, params.sdu_interval_t2g,
+                params.adapt_mode,
+                params.max_latency_g2t, params.max_latency_t2g,
+                cnt, &links[..cnt as usize],
+            );
+            let _ = s.controller.send_command(
+                sle_dli::SleOpcode::SyncUcastParam, &buf[..len]);
+            drop(ss);
+            write_user_struct(arg, &cfg)?;
+            Ok(0)
+        }
+        SL_IOCTL_SYNC_UCAST_CREATE => {
+            let cmd_data = read_user_struct::<SleSyncCreateCmd>(arg)?;
+            let count = cmd_data.link_count.min(8) as usize;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let created = s
+                .conn
+                .sync_ucast_create(cmd_data.group_id, &cmd_data.acl_handles[..count])?;
+            let (links, cnt) = s.conn.sync_links_for_group(
+                cmd_data.group_id, sle_conn::SyncLinkType::Unicast);
+            let (buf, len) = sle_conn::encode_sync_create_cmd(
+                cmd_data.group_id, &links[..cnt as usize]);
+            let _ = s.controller.send_command(
+                sle_dli::SleOpcode::SyncUcastCreate, &buf[..len]);
+            Ok(created as isize)
+        }
+        SL_IOCTL_SYNC_UCAST_REMOVE => {
+            let cig_id = read_user_struct::<u8>(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            s.conn.sync_ucast_remove(cig_id)?;
+            let _ = s.controller.send_command(
+                sle_dli::SleOpcode::SyncUcastRemove, &[cig_id]);
+            Ok(0)
+        }
+        SL_IOCTL_SYNC_MCAST_PARAM => {
+            let mut cfg = read_user_struct::<SleSyncBigConfig>(arg)?;
+            let params = sle_conn::SyncBigParams {
+                big_id: cfg.big_id,
+                sdu_interval_g2t: cfg.sdu_interval_g2t,
+                sdu_interval_t2g: cfg.sdu_interval_t2g,
+                max_sdu_g2t: cfg.max_sdu_g2t,
+                max_sdu_t2g: cfg.max_sdu_t2g,
+                retransmit_g2t: cfg.retransmit_g2t,
+                retransmit_t2g: cfg.retransmit_t2g,
+                max_latency_g2t: cfg.max_latency_g2t,
+                max_latency_t2g: cfg.max_latency_t2g,
+                adapt_mode: cfg.adapt_mode,
+                link_count: cfg.link_count,
+            };
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let result = s.conn.sync_mcast_configure(&params)?;
+            cfg.big_id = result.big_id;
+            cfg.link_count = result.link_count;
+            cfg.handles_out = result.handles;
+            let (links, cnt) = s.conn.sync_links_for_group(
+                result.big_id, sle_conn::SyncLinkType::Multicast);
+            let (buf, len) = sle_conn::encode_sync_param_cmd(
+                result.big_id,
+                params.sdu_interval_g2t, params.sdu_interval_t2g,
+                params.adapt_mode,
+                params.max_latency_g2t, params.max_latency_t2g,
+                cnt, &links[..cnt as usize],
+            );
+            let _ = s.controller.send_command(
+                sle_dli::SleOpcode::SyncMcastParam, &buf[..len]);
+            drop(ss);
+            write_user_struct(arg, &cfg)?;
+            Ok(0)
+        }
+        SL_IOCTL_SYNC_MCAST_CREATE => {
+            let cmd_data = read_user_struct::<SleSyncCreateCmd>(arg)?;
+            let count = cmd_data.link_count.min(8) as usize;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            let created = s
+                .conn
+                .sync_mcast_create(cmd_data.group_id, &cmd_data.acl_handles[..count])?;
+            let (links, cnt) = s.conn.sync_links_for_group(
+                cmd_data.group_id, sle_conn::SyncLinkType::Multicast);
+            let (buf, len) = sle_conn::encode_sync_create_cmd(
+                cmd_data.group_id, &links[..cnt as usize]);
+            let _ = s.controller.send_command(
+                sle_dli::SleOpcode::SyncMcastCreate, &buf[..len]);
+            Ok(created as isize)
+        }
+        SL_IOCTL_SYNC_MCAST_REMOVE => {
+            let big_id = read_user_struct::<u8>(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            s.conn.sync_mcast_remove(big_id)?;
+            let _ = s.controller.send_command(
+                sle_dli::SleOpcode::SyncMcastRemove, &[big_id]);
+            Ok(0)
+        }
+        SL_IOCTL_SYNC_DATAPATH_CFG => {
+            let cmd_data = read_user_struct::<SleSyncDatapathCmd>(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            s.conn.sync_datapath_config(
+                cmd_data.sync_handle,
+                cmd_data.direction,
+                cmd_data.path_id,
+                cmd_data.codec_id,
+            )?;
+            let (buf, len) = sle_conn::encode_sync_datapath_cmd(
+                cmd_data.sync_handle, cmd_data.direction,
+                cmd_data.path_id, cmd_data.codec_id);
+            let _ = s.controller.send_command(
+                sle_dli::SleOpcode::SyncDataPathConfig, &buf[..len]);
+            Ok(0)
+        }
+        SL_IOCTL_SYNC_DATAPATH_REMOVE => {
+            let sync_handle = read_user_struct::<u16>(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            s.conn.sync_datapath_remove(sync_handle)?;
+            let mut buf = [0u8; 3];
+            buf[0..2].copy_from_slice(&sync_handle.to_le_bytes());
+            buf[2] = 0xFF;
+            let _ = s.controller.send_command(
+                sle_dli::SleOpcode::SyncDataPathRemove, &buf);
+            Ok(0)
+        }
+        SL_IOCTL_SYNC_INFO => {
+            let mut info = read_user_struct::<SleSyncLinkInfo>(arg)?;
+            let ss = SUBSYSTEM.lock();
+            let s = ss.as_ref().ok_or(ENODEV)?;
+            let link = s.conn.sync_link_info(info.sync_handle)?;
+            info.acl_handle = link.acl_handle;
+            info.group_id = link.cig_id;
+            info.stream_id = link.cis_id;
+            info.link_type = link.link_type as u8;
+            info.state = link.state as u8;
+            info.sdu_interval_g2t = link.sdu_interval_g2t;
+            info.sdu_interval_t2g = link.sdu_interval_t2g;
+            info.max_sdu_g2t = link.max_sdu_g2t;
+            info.max_sdu_t2g = link.max_sdu_t2g;
+            info.datapath_configured = if link.datapath_configured { 1 } else { 0 };
+            drop(ss);
+            write_user_struct(arg, &info)?;
+            Ok(0)
+        }
+        SL_IOCTL_SYNC_UCAST_ACCEPT => {
+            let sync_handle = read_user_struct::<u16>(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            s.conn.sync_ucast_accept(sync_handle)?;
+            let _ = s.controller.send_command(
+                sle_dli::SleOpcode::SyncUcastAccept,
+                &sync_handle.to_le_bytes());
+            Ok(0)
+        }
+        SL_IOCTL_SYNC_UCAST_REJECT => {
+            let cmd = read_user_struct::<SleSyncRejectCmd>(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            s.conn.sync_ucast_reject(cmd.sync_handle, cmd.reason)?;
+            let mut buf = [0u8; 3];
+            buf[0..2].copy_from_slice(&cmd.sync_handle.to_le_bytes());
+            buf[2] = cmd.reason;
+            let _ = s.controller.send_command(
+                sle_dli::SleOpcode::SyncUcastReject, &buf);
+            Ok(0)
+        }
+        SL_IOCTL_SYNC_MCAST_ACCEPT => {
+            let sync_handle = read_user_struct::<u16>(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            s.conn.sync_mcast_accept(sync_handle)?;
+            let _ = s.controller.send_command(
+                sle_dli::SleOpcode::SyncMcastAccept,
+                &sync_handle.to_le_bytes());
+            Ok(0)
+        }
+        SL_IOCTL_SYNC_MCAST_REJECT => {
+            let cmd = read_user_struct::<SleSyncRejectCmd>(arg)?;
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            s.conn.sync_mcast_reject(cmd.sync_handle, cmd.reason)?;
+            let mut buf = [0u8; 3];
+            buf[0..2].copy_from_slice(&cmd.sync_handle.to_le_bytes());
+            buf[2] = cmd.reason;
+            let _ = s.controller.send_command(
+                sle_dli::SleOpcode::SyncMcastReject, &buf);
+            Ok(0)
+        }
+        _ => Err(EINVAL),
+    }
+}
+
+/// Sync data send ioctl — isolated for stack safety (256+251 byte locals).
+#[inline(never)]
+fn ioctl_sync_data_send(arg: usize) -> Result<isize> {
+    let cmd = read_user_struct::<SleSyncDataCmd>(arg)?;
+    let len = (cmd.len as usize).min(247);
+    let ss = SUBSYSTEM.lock();
+    let s = ss.as_ref().ok_or(ENODEV)?;
+    let link = s.conn.sync_link_info(cmd.sync_handle)?;
+    if link.state != sle_conn::SyncLinkState::Active {
+        return Err(EPIPE);
+    }
+    if !link.datapath_configured {
+        return Err(EINVAL);
+    }
+    let seg = match cmd.segment {
+        0 => sle_conn::SyncSegment::Complete,
+        1 => sle_conn::SyncSegment::First,
+        2 => sle_conn::SyncSegment::Middle,
+        _ => sle_conn::SyncSegment::Last,
+    };
+    let hdr = sle_conn::encode_sync_data_header(
+        cmd.sync_handle, seg, false, cmd.priority != 0,
+        len as u16);
+    let mut tx_buf = [0u8; 4 + 247];
+    tx_buf[..4].copy_from_slice(&hdr);
+    tx_buf[4..4 + len].copy_from_slice(&cmd.data[..len]);
+    s.controller.send_data(cmd.sync_handle, &tx_buf[..4 + len])?;
+    Ok(len as isize)
+}
+
+/// DLI command ioctl — isolated for stack safety (SleDliCmd = 248 bytes).
+#[inline(never)]
+fn ioctl_dli_send_cmd(arg: usize) -> Result<isize> {
+    let mut cmd_data: SleDliCmd = read_user_struct(arg)?;
+    let param_len = (cmd_data.param_len as usize).min(DLI_PARAM_MAX);
+    if sle_dli::sle_opcode_from_u16(cmd_data.opcode).is_none() {
+        return Err(EINVAL);
+    }
+    let worker;
+    {
+        let mut ss = SUBSYSTEM.lock();
+        let s = ss.as_mut().ok_or(ENODEV)?;
+        s.cmd_queue
+            .push(cmd_data.opcode, &cmd_data.params[..param_len])?;
+        cmd_data.seq = s.cmd_pending.submit(cmd_data.opcode)?;
+        worker = s._cmd_worker.clone();
+    }
+    if let Some(ref w) = worker {
+        w.kick();
+    }
+    write_user_struct(arg, &cmd_data)?;
+    Ok(0)
+}
+
 /// Infrastructure ioctl sub-dispatcher: PM, sync, DLI, events, PHY, role, RAL/RPA.
 #[inline(never)]
 fn ioctl_dispatch_infra(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<isize> {
@@ -2956,128 +3232,20 @@ fn ioctl_dispatch_infra(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<
             s.power.on_activity();
             Ok(0)
         }
-        SL_IOCTL_SYNC_UCAST_PARAM => {
-            let mut cfg = read_user_struct::<SleSyncCigConfig>(arg)?;
-            let params = sle_conn::SyncCigParams {
-                cig_id: cfg.cig_id,
-                sdu_interval_g2t: cfg.sdu_interval_g2t,
-                sdu_interval_t2g: cfg.sdu_interval_t2g,
-                max_sdu_g2t: cfg.max_sdu_g2t,
-                max_sdu_t2g: cfg.max_sdu_t2g,
-                retransmit_g2t: cfg.retransmit_g2t,
-                retransmit_t2g: cfg.retransmit_t2g,
-                max_latency_g2t: cfg.max_latency_g2t,
-                max_latency_t2g: cfg.max_latency_t2g,
-                adapt_mode: cfg.adapt_mode,
-                link_count: cfg.link_count,
-            };
-            let mut ss = SUBSYSTEM.lock();
-            let s = ss.as_mut().ok_or(ENODEV)?;
-            let result = s.conn.sync_ucast_configure(&params)?;
-            cfg.cig_id = result.cig_id;
-            cfg.link_count = result.link_count;
-            cfg.handles_out = result.handles;
-            drop(ss);
-            write_user_struct(arg, &cfg)?;
-            Ok(0)
-        }
-        SL_IOCTL_SYNC_UCAST_CREATE => {
-            let cmd_data = read_user_struct::<SleSyncCreateCmd>(arg)?;
-            let count = cmd_data.link_count.min(8) as usize;
-            let mut ss = SUBSYSTEM.lock();
-            let s = ss.as_mut().ok_or(ENODEV)?;
-            let created = s
-                .conn
-                .sync_ucast_create(cmd_data.group_id, &cmd_data.acl_handles[..count])?;
-            Ok(created as isize)
-        }
-        SL_IOCTL_SYNC_UCAST_REMOVE => {
-            let cig_id = read_user_struct::<u8>(arg)?;
-            let mut ss = SUBSYSTEM.lock();
-            let s = ss.as_mut().ok_or(ENODEV)?;
-            s.conn.sync_ucast_remove(cig_id)?;
-            Ok(0)
-        }
-        SL_IOCTL_SYNC_MCAST_PARAM => {
-            let mut cfg = read_user_struct::<SleSyncBigConfig>(arg)?;
-            let params = sle_conn::SyncBigParams {
-                big_id: cfg.big_id,
-                sdu_interval_g2t: cfg.sdu_interval_g2t,
-                sdu_interval_t2g: cfg.sdu_interval_t2g,
-                max_sdu_g2t: cfg.max_sdu_g2t,
-                max_sdu_t2g: cfg.max_sdu_t2g,
-                retransmit_g2t: cfg.retransmit_g2t,
-                retransmit_t2g: cfg.retransmit_t2g,
-                max_latency_g2t: cfg.max_latency_g2t,
-                max_latency_t2g: cfg.max_latency_t2g,
-                adapt_mode: cfg.adapt_mode,
-                link_count: cfg.link_count,
-            };
-            let mut ss = SUBSYSTEM.lock();
-            let s = ss.as_mut().ok_or(ENODEV)?;
-            let result = s.conn.sync_mcast_configure(&params)?;
-            cfg.big_id = result.big_id;
-            cfg.link_count = result.link_count;
-            cfg.handles_out = result.handles;
-            drop(ss);
-            write_user_struct(arg, &cfg)?;
-            Ok(0)
-        }
-        SL_IOCTL_SYNC_MCAST_CREATE => {
-            let cmd_data = read_user_struct::<SleSyncCreateCmd>(arg)?;
-            let count = cmd_data.link_count.min(8) as usize;
-            let mut ss = SUBSYSTEM.lock();
-            let s = ss.as_mut().ok_or(ENODEV)?;
-            let created = s
-                .conn
-                .sync_mcast_create(cmd_data.group_id, &cmd_data.acl_handles[..count])?;
-            Ok(created as isize)
-        }
-        SL_IOCTL_SYNC_MCAST_REMOVE => {
-            let big_id = read_user_struct::<u8>(arg)?;
-            let mut ss = SUBSYSTEM.lock();
-            let s = ss.as_mut().ok_or(ENODEV)?;
-            s.conn.sync_mcast_remove(big_id)?;
-            Ok(0)
-        }
-        SL_IOCTL_SYNC_DATAPATH_CFG => {
-            let cmd_data = read_user_struct::<SleSyncDatapathCmd>(arg)?;
-            let mut ss = SUBSYSTEM.lock();
-            let s = ss.as_mut().ok_or(ENODEV)?;
-            s.conn.sync_datapath_config(
-                cmd_data.sync_handle,
-                cmd_data.direction,
-                cmd_data.path_id,
-                cmd_data.codec_id,
-            )?;
-            Ok(0)
-        }
-        SL_IOCTL_SYNC_DATAPATH_REMOVE => {
-            let sync_handle = read_user_struct::<u16>(arg)?;
-            let mut ss = SUBSYSTEM.lock();
-            let s = ss.as_mut().ok_or(ENODEV)?;
-            s.conn.sync_datapath_remove(sync_handle)?;
-            Ok(0)
-        }
-        SL_IOCTL_SYNC_INFO => {
-            let mut info = read_user_struct::<SleSyncLinkInfo>(arg)?;
-            let ss = SUBSYSTEM.lock();
-            let s = ss.as_ref().ok_or(ENODEV)?;
-            let link = s.conn.sync_link_info(info.sync_handle)?;
-            info.acl_handle = link.acl_handle;
-            info.group_id = link.cig_id;
-            info.stream_id = link.cis_id;
-            info.link_type = link.link_type as u8;
-            info.state = link.state as u8;
-            info.sdu_interval_g2t = link.sdu_interval_g2t;
-            info.sdu_interval_t2g = link.sdu_interval_t2g;
-            info.max_sdu_g2t = link.max_sdu_g2t;
-            info.max_sdu_t2g = link.max_sdu_t2g;
-            info.datapath_configured = if link.datapath_configured { 1 } else { 0 };
-            drop(ss);
-            write_user_struct(arg, &info)?;
-            Ok(0)
-        }
+        SL_IOCTL_SYNC_UCAST_PARAM
+        | SL_IOCTL_SYNC_UCAST_CREATE
+        | SL_IOCTL_SYNC_UCAST_REMOVE
+        | SL_IOCTL_SYNC_MCAST_PARAM
+        | SL_IOCTL_SYNC_MCAST_CREATE
+        | SL_IOCTL_SYNC_MCAST_REMOVE
+        | SL_IOCTL_SYNC_DATAPATH_CFG
+        | SL_IOCTL_SYNC_DATAPATH_REMOVE
+        | SL_IOCTL_SYNC_INFO
+        | SL_IOCTL_SYNC_UCAST_ACCEPT
+        | SL_IOCTL_SYNC_UCAST_REJECT
+        | SL_IOCTL_SYNC_MCAST_ACCEPT
+        | SL_IOCTL_SYNC_MCAST_REJECT => ioctl_sync_link(cmd, arg),
+        SL_IOCTL_SYNC_DATA_SEND => ioctl_sync_data_send(arg),
         SL_IOCTL_EVENT_COUNT => {
             let count = me.events.lock().pending();
             Ok(count as isize)
@@ -3146,27 +3314,7 @@ fn ioctl_dispatch_infra(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<
             s.controller.reset()?;
             Ok(0)
         }
-        SL_IOCTL_DLI_SEND_CMD => {
-            let mut cmd_data: SleDliCmd = read_user_struct(arg)?;
-            let param_len = (cmd_data.param_len as usize).min(DLI_PARAM_MAX);
-            if sle_dli::sle_opcode_from_u16(cmd_data.opcode).is_none() {
-                return Err(EINVAL);
-            }
-            let worker;
-            {
-                let mut ss = SUBSYSTEM.lock();
-                let s = ss.as_mut().ok_or(ENODEV)?;
-                s.cmd_queue
-                    .push(cmd_data.opcode, &cmd_data.params[..param_len])?;
-                cmd_data.seq = s.cmd_pending.submit(cmd_data.opcode)?;
-                worker = s._cmd_worker.clone();
-            }
-            if let Some(ref w) = worker {
-                w.kick();
-            }
-            write_user_struct(arg, &cmd_data)?;
-            Ok(0)
-        }
+        SL_IOCTL_DLI_SEND_CMD => ioctl_dli_send_cmd(arg),
         SL_IOCTL_MGMT_STATS => {
             let ss = SUBSYSTEM.lock();
             let s = ss.as_ref().ok_or(ENODEV)?;
@@ -3607,6 +3755,11 @@ impl MiscDevice for SparkLinkCtl {
             | SL_IOCTL_SYNC_DATAPATH_CFG
             | SL_IOCTL_SYNC_DATAPATH_REMOVE
             | SL_IOCTL_SYNC_INFO
+            | SL_IOCTL_SYNC_UCAST_ACCEPT
+            | SL_IOCTL_SYNC_UCAST_REJECT
+            | SL_IOCTL_SYNC_MCAST_ACCEPT
+            | SL_IOCTL_SYNC_MCAST_REJECT
+            | SL_IOCTL_SYNC_DATA_SEND
             | SL_IOCTL_EVENT_COUNT
             | SL_IOCTL_EVENT_STATS
             | SL_IOCTL_DLI_INFO

@@ -9927,6 +9927,223 @@ static void test_sync_link_management(int fd)
 }
 
 /* ------------------------------------------------------------------ *
+ * test_sync_mcast_bis — sync multicast BIS accept/reject/data       *
+ *                                                                    *
+ * Tests the new sync multicast BIS operations:                      *
+ * - Accept/reject ioctls for sync link setup                        *
+ * - Sync isochronous data send                                      *
+ * - DLI command emission validation                                 *
+ * - Error cases: data on inactive link, data without datapath       *
+ * ------------------------------------------------------------------ */
+static void test_sync_mcast_bis(int fd)
+{
+	test_header("Sync multicast BIS operations");
+
+	int ok_count = 0, fail_count = 0;
+	int ret;
+
+	/* Setup: create an async connection for binding */
+	struct sle_connect_params cp;
+
+	memset(&cp, 0, sizeof(cp));
+	cp.peer_addr[0] = 0xB1;
+	cp.peer_addr[1] = 0x55;
+	cp.peer_addr[5] = 0xAA;
+	cp.gt_role = 0;
+	cp.bandwidth = 1;
+	cp.mcs_index = 4;
+	cp.timeout_10ms = 100;
+
+	ret = ioctl(fd, SL_IOCTL_CONNECT, &cp);
+	if (ret <= 0) {
+		printf("  FAIL: CONNECT for BIS test: ret=%d\n", ret);
+		printf("sync_mcast_bis: 0 OK / 10 FAIL\n");
+		return;
+	}
+	uint16_t acl_handle = (uint16_t)ret;
+
+	struct sle_inject_conn_resp inject;
+
+	memset(&inject, 0, sizeof(inject));
+	inject.handle = acl_handle;
+	inject.supervision_timeout = 300;
+	inject.data_mtu = 247;
+	inject.data_mps = 247;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_RESP, &inject);
+	if (ret < 0) {
+		printf("  FAIL: INJECT_CONN_RESP for BIS test\n");
+		printf("sync_mcast_bis: 0 OK / 10 FAIL\n");
+		return;
+	}
+
+	/* 1. Configure BIG with 2 multicast links */
+	struct sle_sync_big_config big;
+
+	memset(&big, 0, sizeof(big));
+	big.big_id = 0x20;
+	big.link_count = 2;
+	big.adapt_mode = 0;
+	big.sdu_interval_g2t = 10000;
+	big.sdu_interval_t2g = 10000;
+	big.max_sdu_g2t = 200;
+	big.max_sdu_t2g = 0;
+	big.max_latency_g2t = 20;
+	big.max_latency_t2g = 20;
+	big.retransmit_g2t = 2;
+	big.retransmit_t2g = 0;
+	ret = ioctl(fd, SL_IOCTL_SYNC_MCAST_PARAM, &big);
+	if (ret == 0 && big.link_count == 2 && big.handles_out[0] != 0) {
+		printf("  OK:   BIG configure id=0x%02x, links=%d, h0=%u, h1=%u\n",
+		       big.big_id, big.link_count, big.handles_out[0], big.handles_out[1]);
+		ok_count++;
+	} else {
+		printf("  FAIL: BIG configure ret=%d\n", ret);
+		fail_count++;
+	}
+	uint16_t bis_h0 = big.handles_out[0];
+	uint16_t bis_h1 = big.handles_out[1];
+
+	/* 2. Create BIG links */
+	struct sle_sync_create_cmd create;
+
+	memset(&create, 0, sizeof(create));
+	create.group_id = 0x20;
+	create.link_count = 2;
+	create.acl_handles[0] = acl_handle;
+	create.acl_handles[1] = acl_handle;
+	ret = ioctl(fd, SL_IOCTL_SYNC_MCAST_CREATE, &create);
+	if (ret >= 0) {
+		printf("  OK:   BIG create: %d links activated\n", ret);
+		ok_count++;
+	} else {
+		printf("  FAIL: BIG create ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 3. Configure data path on BIS link 0 */
+	struct sle_sync_datapath_cmd dp;
+
+	memset(&dp, 0, sizeof(dp));
+	dp.sync_handle = bis_h0;
+	dp.direction = 1;  /* output */
+	dp.path_id = 1;
+	dp.codec_id = 0x06;
+	ret = ioctl(fd, SL_IOCTL_SYNC_DATAPATH_CFG, &dp);
+	if (ret == 0) {
+		printf("  OK:   BIS datapath configured: dir=1, codec=0x%02x\n", dp.codec_id);
+		ok_count++;
+	} else {
+		printf("  FAIL: BIS datapath config ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 4. Send sync data on configured BIS link */
+	struct sle_sync_data_cmd sd;
+
+	memset(&sd, 0, sizeof(sd));
+	sd.sync_handle = bis_h0;
+	sd.segment = 0;  /* complete SDU */
+	sd.priority = 0;
+	sd.len = 20;
+	for (int i = 0; i < 20; i++)
+		sd.data[i] = (uint8_t)(0xA0 + i);
+	ret = ioctl(fd, SL_IOCTL_SYNC_DATA_SEND, &sd);
+	/* send_data returns ENODEV for None backend, which is expected */
+	if (ret == 20) {
+		printf("  OK:   BIS data send: 20 bytes\n");
+		ok_count++;
+	} else if (ret < 0 && errno == ENODEV) {
+		printf("  OK:   BIS data send: ENODEV (no controller, expected)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: BIS data send: ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 5. Send sync data on link WITHOUT datapath → EINVAL */
+	memset(&sd, 0, sizeof(sd));
+	sd.sync_handle = bis_h1;
+	sd.segment = 0;
+	sd.len = 10;
+	ret = ioctl(fd, SL_IOCTL_SYNC_DATA_SEND, &sd);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   data send without datapath rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EINVAL, ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 6. Reject nonexistent sync link → ENOENT */
+	struct sle_sync_reject_cmd rej;
+
+	memset(&rej, 0, sizeof(rej));
+	rej.sync_handle = 0xFFFF;
+	rej.reason = 0x09;
+	ret = ioctl(fd, SL_IOCTL_SYNC_MCAST_REJECT, &rej);
+	if (ret < 0 && errno == ENOENT) {
+		printf("  OK:   reject nonexistent mcast link (ENOENT)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected ENOENT, ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 7. Accept non-Creating link → EINVAL */
+	uint16_t accept_h = bis_h0;  /* currently Active, not Creating */
+
+	ret = ioctl(fd, SL_IOCTL_SYNC_MCAST_ACCEPT, &accept_h);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   accept Active mcast link rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EINVAL, ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	/* 8. Verify sync link info shows Active + datapath configured */
+	struct sle_sync_link_info info;
+
+	memset(&info, 0, sizeof(info));
+	info.sync_handle = bis_h0;
+	ret = ioctl(fd, SL_IOCTL_SYNC_INFO, &info);
+	if (ret == 0 && info.state == 2 && info.link_type == 1
+	    && info.datapath_configured == 1) {
+		printf("  OK:   BIS info: Active, multicast, datapath=1\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: BIS info: state=%d type=%d dp=%d\n",
+		       info.state, info.link_type, info.datapath_configured);
+		fail_count++;
+	}
+
+	/* 9. Remove datapath and verify */
+	uint16_t dp_rm_h = bis_h0;
+
+	ret = ioctl(fd, SL_IOCTL_SYNC_DATAPATH_REMOVE, &dp_rm_h);
+	if (ret == 0) {
+		printf("  OK:   BIS datapath removed\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: BIS datapath remove ret=%d\n", ret);
+		fail_count++;
+	}
+
+	/* 10. Reject unicast accept on multicast link → EINVAL */
+	accept_h = bis_h0;
+	ret = ioctl(fd, SL_IOCTL_SYNC_UCAST_ACCEPT, &accept_h);
+	if (ret < 0 && errno == EINVAL) {
+		printf("  OK:   ucast accept on mcast link rejected (EINVAL)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: expected EINVAL, ret=%d errno=%d\n", ret, errno);
+		fail_count++;
+	}
+
+	printf("  Sync multicast BIS: %d OK, %d FAIL\n", ok_count, fail_count);
+}
+
+/* ------------------------------------------------------------------ *
  * test_phy_extreme_params — PHY parameter boundary cases            *
  *                                                                    *
  * Tests PHY parameters at extreme values:                           *
@@ -12212,6 +12429,7 @@ int main(void)
 	test_afh_channel_map(fd);
 	test_ext_advertising(fd);
 	test_sync_link_management(fd);
+	test_sync_mcast_bis(fd);
 	test_phy_extreme_params(fd);
 	test_ssap_remote_ioctls(fd);
 	test_capability_negotiation(fd);

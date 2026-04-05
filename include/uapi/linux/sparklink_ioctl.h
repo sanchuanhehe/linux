@@ -487,6 +487,22 @@ struct sle_sync_link_info {
 	__u8  _pad2[3];
 };
 
+struct sle_sync_reject_cmd {
+	__u16 sync_handle;
+	__u8  reason;
+	__u8  _pad;
+};
+
+struct sle_sync_data_cmd {
+	__u16 sync_handle;
+	__u8  segment;
+	__u8  priority;
+	__u16 len;
+	__u8  _pad[2];
+	__u8  data[247];
+	__u8  _pad2;
+};
+
 /* --- DLI controller ----------------------------------------------------- */
 
 struct sle_dli_info {
@@ -805,6 +821,11 @@ struct ssap_uuid_op {
 #define SL_IOCTL_SYNC_DATAPATH_CFG	_IOW(SL_MAGIC, 0x6C, struct sle_sync_datapath_cmd)
 #define SL_IOCTL_SYNC_DATAPATH_REMOVE	_IOW(SL_MAGIC, 0x6D, __u16)
 #define SL_IOCTL_SYNC_INFO		_IOWR(SL_MAGIC, 0x6E, struct sle_sync_link_info)
+#define SL_IOCTL_SYNC_UCAST_ACCEPT	_IOW(SL_MAGIC, 0x73, __u16)
+#define SL_IOCTL_SYNC_UCAST_REJECT	_IOW(SL_MAGIC, 0x74, struct sle_sync_reject_cmd)
+#define SL_IOCTL_SYNC_MCAST_ACCEPT	_IOW(SL_MAGIC, 0x75, __u16)
+#define SL_IOCTL_SYNC_MCAST_REJECT	_IOW(SL_MAGIC, 0x76, struct sle_sync_reject_cmd)
+#define SL_IOCTL_SYNC_DATA_SEND	_IOW(SL_MAGIC, 0x77, struct sle_sync_data_cmd)
 
 /* --- Event notification ------------------------------------------------- */
 

@@ -781,6 +781,12 @@ pub struct RpaManager {
     enabled: bool,
     /// RPA timeout in seconds (0 = no auto-refresh).
     timeout_secs: u16,
+    /// Monotonic counter for RPA refresh entropy.
+    refresh_counter: u32,
+    /// Elapsed seconds since last RPA refresh.
+    elapsed_secs: u16,
+    /// Cached local RPA (regenerated on timeout).
+    local_rpa: [u8; 6],
 }
 
 impl RpaManager {
@@ -791,6 +797,9 @@ impl RpaManager {
             count: 0,
             enabled: false,
             timeout_secs: 0,
+            refresh_counter: 0,
+            elapsed_secs: 0,
+            local_rpa: [0u8; 6],
         }
     }
 
@@ -863,9 +872,14 @@ impl RpaManager {
     ///
     /// RPA format: hash[0..3] || prand[0..3]
     /// prand[0] top 2 bits forced to 0b01 (resolvable marker).
-    fn generate_rpa(irk: &[u8; 16]) -> [u8; 6] {
-        // Derive a deterministic prand from IRK for reproducibility
-        let pk = Sm3::hash(irk);
+    /// The `counter` parameter provides entropy so that successive
+    /// calls with the same IRK produce different addresses.
+    fn generate_rpa_with_counter(irk: &[u8; 16], counter: u32) -> [u8; 6] {
+        let cb = counter.to_le_bytes();
+        let mut seed = [0u8; 20];
+        seed[..16].copy_from_slice(irk);
+        seed[16..20].copy_from_slice(&cb);
+        let pk = Sm3::hash(&seed);
         let mut prand = [pk[0], pk[1], pk[2]];
         // Force top 2 bits to 01 (resolvable private address)
         prand[0] = (prand[0] & 0x3F) | 0x40;
@@ -873,6 +887,11 @@ impl RpaManager {
         // hash = HMAC-SM3(IRK, prand) truncated to 3 bytes
         let h = sle_crypto::hmac_sm3(irk, &prand);
         [h[0], h[1], h[2], prand[0], prand[1], prand[2]]
+    }
+
+    /// Compatibility wrapper using counter=0 for deterministic tests.
+    fn generate_rpa(irk: &[u8; 16]) -> [u8; 6] {
+        Self::generate_rpa_with_counter(irk, 0)
     }
 
     /// Look up a peer and return its RPA (generated from peer IRK).
@@ -927,5 +946,32 @@ impl RpaManager {
     /// Get the current RPA timeout.
     pub fn timeout(&self) -> u16 {
         self.timeout_secs
+    }
+
+    /// Get the cached local RPA (valid only when enabled and RAL non-empty).
+    pub fn cached_local_rpa(&self) -> [u8; 6] {
+        self.local_rpa
+    }
+
+    /// Advance the RPA timer by `delta_secs` seconds.
+    ///
+    /// When the elapsed time exceeds `timeout_secs`, the local RPA is
+    /// regenerated from the first RAL entry's local IRK with a fresh
+    /// counter value.  Returns `true` if the RPA was refreshed.
+    pub fn rpa_tick(&mut self, delta_secs: u16) -> bool {
+        if !self.enabled || self.timeout_secs == 0 || self.count == 0 {
+            return false;
+        }
+        self.elapsed_secs = self.elapsed_secs.saturating_add(delta_secs);
+        if self.elapsed_secs < self.timeout_secs {
+            return false;
+        }
+        // Refresh
+        self.elapsed_secs = 0;
+        self.refresh_counter = self.refresh_counter.wrapping_add(1);
+        self.local_rpa =
+            Self::generate_rpa_with_counter(&self.entries[0].local_irk, self.refresh_counter);
+        pr_info!("sparklink: RPA refreshed (counter={})\n", self.refresh_counter);
+        true
     }
 }

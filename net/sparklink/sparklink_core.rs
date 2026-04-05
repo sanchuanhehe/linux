@@ -492,6 +492,8 @@ pub(crate) struct SubsystemShared {
     pub(crate) adv_scan: AdvScanInner,
     pub(crate) security: SecurityInner,
     pub(crate) rpa: RpaManager,
+    /// Accumulator for RPA tick: counts 10ms ticks up to 100 (= 1 second).
+    pub(crate) rpa_tick_accum: u16,
     pub(crate) ssap: SsapInner,
     pub(crate) power: PowerInner,
     pub(crate) phy: sle_phy::PhyConfig,
@@ -1371,6 +1373,7 @@ fn init_subsystem() -> Result<SubsystemGuard> {
             adv_scan: AdvScanInner::new(addr, b"sparklink-ctl"),
             security: SecurityInner::new(),
             rpa: RpaManager::new(),
+            rpa_tick_accum: 0,
             ssap: SsapInner::new(),
             power: PowerInner::new(),
             phy: sle_phy::PhyConfig::default_config(),
@@ -1437,6 +1440,7 @@ fn ioctl_dispatch_adv(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<is
         | SL_IOCTL_CLEAR_SCAN_FILTER => ioctl_dispatch_adv_basic(me, cmd, arg),
         SL_IOCTL_EXT_ADV_CONFIGURE
         | SL_IOCTL_EXT_ADV_SET_DATA
+        | SL_IOCTL_EXT_ADV_SET_SCAN_RSP
         | SL_IOCTL_EXT_ADV_ENABLE
         | SL_IOCTL_EXT_ADV_DISABLE
         | SL_IOCTL_EXT_ADV_REMOVE
@@ -1647,6 +1651,14 @@ fn ioctl_dispatch_ext_adv(cmd: u32, arg: usize) -> Result<isize> {
             s.adv_scan.ext_adv_set_data(d.handle, &d.data[..len])?;
             Ok(0)
         }
+        SL_IOCTL_EXT_ADV_SET_SCAN_RSP => {
+            let d: SleExtAdvData = read_user_struct(arg)?;
+            let len = (d.data_len as usize).min(ADV_DATA_MAX);
+            let mut ss = SUBSYSTEM.lock();
+            let s = ss.as_mut().ok_or(ENODEV)?;
+            s.adv_scan.ext_adv_set_scan_rsp(d.handle, &d.data[..len])?;
+            Ok(0)
+        }
         SL_IOCTL_EXT_ADV_ENABLE => {
             let handle: u8 = read_user_struct(arg)?;
             let mut ss = SUBSYSTEM.lock();
@@ -1706,6 +1718,14 @@ fn ioctl_dispatch_ext_adv(cmd: u32, arg: usize) -> Result<isize> {
             let mut ss = SUBSYSTEM.lock();
             let s = ss.as_mut().ok_or(ENODEV)?;
             let disabled = s.adv_scan.ext_adv_tick();
+            // Drive RPA refresh: each tick is 10ms, accumulate into
+            // full seconds for the RPA manager.
+            s.rpa_tick_accum += 1;
+            if s.rpa_tick_accum >= 100 {
+                // 100 * 10ms = 1 second
+                s.rpa_tick_accum = 0;
+                s.rpa.rpa_tick(1);
+            }
             Ok(disabled as c_long)
         }
         _ => Err(EINVAL),
@@ -3734,6 +3754,7 @@ impl MiscDevice for SparkLinkCtl {
             | SL_IOCTL_DEV_LIST
             | SL_IOCTL_EXT_ADV_CONFIGURE
             | SL_IOCTL_EXT_ADV_SET_DATA
+            | SL_IOCTL_EXT_ADV_SET_SCAN_RSP
             | SL_IOCTL_EXT_ADV_ENABLE
             | SL_IOCTL_EXT_ADV_DISABLE
             | SL_IOCTL_EXT_ADV_REMOVE

@@ -281,6 +281,10 @@ pub struct ExtAdvSet {
     pub data: [u8; EXT_ADV_DATA_MAX],
     /// Length of valid data.
     pub data_len: usize,
+    /// Scan response data (T/XS 10003-2025 §8.2 SetBroadcastScanRsp).
+    pub scan_rsp_data: [u8; EXT_ADV_DATA_MAX],
+    /// Length of valid scan response data.
+    pub scan_rsp_len: usize,
     /// Number of PDUs sent since enabled.
     pub tx_count: u64,
     /// Advertising duration in 10ms units (0 = infinite).
@@ -301,6 +305,8 @@ impl ExtAdvSet {
             params: ExtAdvParams::default(),
             data: [0u8; EXT_ADV_DATA_MAX],
             data_len: 0,
+            scan_rsp_data: [0u8; EXT_ADV_DATA_MAX],
+            scan_rsp_len: 0,
             tx_count: 0,
             duration_10ms: 0,
             max_events: 0,
@@ -703,6 +709,26 @@ impl AdvScanInner {
         let len = data.len().min(EXT_ADV_DATA_MAX);
         set.data[..len].copy_from_slice(&data[..len]);
         set.data_len = len;
+        Ok(())
+    }
+
+    /// Set scan response data for an extended advertising set.
+    ///
+    /// Per T/XS 10003-2025 §8.2 (SetBroadcastScanRsp / 0x0C04), scan
+    /// response data is separate from advertising data and returned
+    /// when a scanner sends an active scan request.
+    pub fn ext_adv_set_scan_rsp(&mut self, handle: u8, data: &[u8]) -> Result {
+        let idx = handle as usize;
+        if idx >= EXT_ADV_MAX_SETS {
+            return Err(EINVAL);
+        }
+        let set = self.ext_adv_sets[idx].as_mut().ok_or(ENOENT)?;
+        if set.state == ExtAdvState::Idle {
+            return Err(EINVAL);
+        }
+        let len = data.len().min(EXT_ADV_DATA_MAX);
+        set.scan_rsp_data[..len].copy_from_slice(&data[..len]);
+        set.scan_rsp_len = len;
         Ok(())
     }
 

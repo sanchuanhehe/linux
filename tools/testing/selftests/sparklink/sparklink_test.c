@@ -9248,7 +9248,23 @@ static void test_ext_advertising(int fd)
 		fail_count++;
 	}
 
-	/* 4. Verify data length in info */
+	/* 4. Set scan response data */
+	struct sle_ext_adv_data scan_rsp;
+
+	memset(&scan_rsp, 0, sizeof(scan_rsp));
+	scan_rsp.handle = 0;
+	scan_rsp.data_len = 8;
+	memset(scan_rsp.data, 0xBB, 8);
+	ret = ioctl(fd, SL_IOCTL_EXT_ADV_SET_SCAN_RSP, &scan_rsp);
+	if (ret == 0) {
+		printf("  OK:   set scan response data (8 bytes)\n");
+		ok_count++;
+	} else {
+		printf("  FAIL: set scan response data: %s\n", strerror(errno));
+		fail_count++;
+	}
+
+	/* 5. Verify data length in info */
 	memset(&info, 0, sizeof(info));
 	info.handle = 0;
 	ret = ioctl(fd, SL_IOCTL_EXT_ADV_INFO, &info);
@@ -11973,6 +11989,7 @@ static void test_ioctl_fuzz(int fd)
 		SL_IOCTL_START_ADV,     SL_IOCTL_STOP_ADV,
 		SL_IOCTL_START_SCAN,    SL_IOCTL_STOP_SCAN,
 		SL_IOCTL_EXT_ADV_CONFIGURE, SL_IOCTL_EXT_ADV_SET_DATA,
+		SL_IOCTL_EXT_ADV_SET_SCAN_RSP,
 		SL_IOCTL_EXT_ADV_ENABLE, SL_IOCTL_EXT_ADV_DISABLE,
 		SL_IOCTL_EXT_ADV_REMOVE, SL_IOCTL_EXT_ADV_INFO,
 		SL_IOCTL_EXT_ADV_ENABLE_EX, SL_IOCTL_EXT_ADV_TICK,
@@ -12107,7 +12124,8 @@ static void test_ioctl_fuzz(int fd)
 	/* Phase 5: boundary lengths for data-carrying ioctls */
 	static const unsigned long data_cmds[] = {
 		SL_IOCTL_CONN_SEND, SL_IOCTL_INJECT_CONN_DATA,
-		SL_IOCTL_EXT_ADV_SET_DATA, SL_IOCTL_SEC_SM3_TEST,
+		SL_IOCTL_EXT_ADV_SET_DATA, SL_IOCTL_EXT_ADV_SET_SCAN_RSP,
+		SL_IOCTL_SEC_SM3_TEST,
 		SL_IOCTL_SEC_HMAC_TEST, SL_IOCTL_SSAP_READ,
 		SL_IOCTL_SSAP_WRITE,
 	};

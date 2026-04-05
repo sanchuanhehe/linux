@@ -695,6 +695,7 @@ struct sle_event_stats {
 #define SL_IOCTL_EXT_ADV_INFO		_IOWR(SL_MAGIC, 0x19, struct sle_ext_adv_info)
 #define SL_IOCTL_EXT_ADV_ENABLE_EX	_IOW(SL_MAGIC, 0x1A, struct sle_ext_adv_enable_params)
 #define SL_IOCTL_EXT_ADV_TICK		_IO(SL_MAGIC, 0x1B)
+#define SL_IOCTL_EXT_ADV_SET_SCAN_RSP	_IOW(SL_MAGIC, 0x1C, struct sle_ext_adv_data)
 
 /* --- Advertising injection / scan results ------------------------------- */
 

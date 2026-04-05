@@ -166,6 +166,8 @@ pub(crate) const SL_IOCTL_EXT_ADV_ENABLE_EX: u32 = _IOW::<SleExtAdvEnableParams>
 /// Simulate one 10ms advertising tick for active sets.
 /// Returns the number of sets auto-disabled this tick.
 pub(crate) const SL_IOCTL_EXT_ADV_TICK: u32 = _IO(SL_MAGIC, 0x1B);
+/// Set scan response data for an extended advertising set.
+pub(crate) const SL_IOCTL_EXT_ADV_SET_SCAN_RSP: u32 = _IOW::<SleExtAdvData>(SL_MAGIC, 0x1C);
 
 /// Inject a simulated advertising PDU for loopback testing.
 /// Userspace provides a SleInjectAdv struct; if in scanning state,

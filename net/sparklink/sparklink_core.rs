@@ -1776,8 +1776,38 @@ fn ioctl_inject_raw_adv(arg: usize) -> Result<isize> {
     Ok(0)
 }
 
-/// Connection ioctl sub-dispatcher — isolated into its own stack frame.
+/// Connection data send — isolated for stack safety (SleConnData = 260B + tx_buf = 256B).
 #[inline(never)]
+fn ioctl_conn_send(arg: usize) -> Result<isize> {
+    let cd: SleConnData = read_user_struct(arg)?;
+    let len = (cd.length as usize).min(CONN_DATA_MAX);
+    let mut ss = SUBSYSTEM.lock();
+    let s = ss.as_mut().ok_or(ENODEV)?;
+    let handle = s.conn.resolve_handle(cd.handle)?;
+    let sent = s.conn.send(handle, &cd.data[..len])?;
+    let mut tx_buf = [0u8; 1 + CONN_DATA_MAX];
+    tx_buf[0] = sle_conn::tcid::DEFAULT_DATA as u8;
+    tx_buf[1..1 + len].copy_from_slice(&cd.data[..len]);
+    s.controller.send_data(cd.handle, &tx_buf[..1 + len])?;
+    Ok(sent as isize)
+}
+
+/// Connection data receive — isolated for stack safety (2x SleConnData = 520B).
+#[inline(never)]
+fn ioctl_conn_recv(arg: usize) -> Result<isize> {
+    let cd: SleConnData = read_user_struct(arg)?;
+    let mut ss = SUBSYSTEM.lock();
+    let s = ss.as_mut().ok_or(ENODEV)?;
+    let handle = s.conn.resolve_handle(cd.handle)?;
+    let mut out: SleConnData = unsafe { core::mem::zeroed() };
+    out.handle = handle;
+    let recv_len = s.conn.recv(handle, &mut out.data)?;
+    out.length = recv_len.min(CONN_DATA_MAX) as u16;
+    drop(ss);
+    write_user_struct(arg, &out)?;
+    Ok(0)
+}
+
 fn ioctl_dispatch_conn(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<isize> {
     match cmd {
         SL_IOCTL_CONNECT => {
@@ -1889,35 +1919,8 @@ fn ioctl_dispatch_conn(me: Pin<&SparkLinkCtl>, cmd: u32, arg: usize) -> Result<i
             write_user_struct(arg, &info)?;
             Ok(0)
         }
-        SL_IOCTL_CONN_SEND => {
-            let cd: SleConnData = read_user_struct(arg)?;
-            let len = (cd.length as usize).min(CONN_DATA_MAX);
-            let sent = {
-                let mut ss = SUBSYSTEM.lock();
-                let s = ss.as_mut().ok_or(ENODEV)?;
-                let handle = s.conn.resolve_handle(cd.handle)?;
-                let sent = s.conn.send(handle, &cd.data[..len])?;
-                let mut tx_buf = [0u8; 1 + CONN_DATA_MAX];
-                tx_buf[0] = sle_conn::tcid::DEFAULT_DATA as u8;
-                tx_buf[1..1 + len].copy_from_slice(&cd.data[..len]);
-                s.controller.send_data(cd.handle, &tx_buf[..1 + len])?;
-                sent
-            };
-            Ok(sent as isize)
-        }
-        SL_IOCTL_CONN_RECV => {
-            let cd: SleConnData = read_user_struct(arg)?;
-            let mut ss = SUBSYSTEM.lock();
-            let s = ss.as_mut().ok_or(ENODEV)?;
-            let handle = s.conn.resolve_handle(cd.handle)?;
-            let mut out: SleConnData = unsafe { core::mem::zeroed() };
-            out.handle = handle;
-            let recv_len = s.conn.recv(handle, &mut out.data)?;
-            out.length = recv_len.min(CONN_DATA_MAX) as u16;
-            drop(ss);
-            write_user_struct(arg, &out)?;
-            Ok(0)
-        }
+        SL_IOCTL_CONN_SEND => ioctl_conn_send(arg),
+        SL_IOCTL_CONN_RECV => ioctl_conn_recv(arg),
         SL_IOCTL_INJECT_CONN_RESP => {
             let resp: SleInjectConnResp = read_user_struct(arg)?;
             let resp_type = AccessResponseType::from_raw(resp.response_type).ok_or(EINVAL)?;
@@ -2269,9 +2272,9 @@ fn ioctl_inject_conn_data(me: Pin<&SparkLinkCtl>, arg: usize) -> Result<isize> {
     Ok(0)
 }
 
-/// AFH, security, SSAP ioctl sub-dispatcher.
+/// AFH ioctl sub-dispatcher (channel map, RSSI, hopping).
 #[inline(never)]
-fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
+fn ioctl_afh(cmd: u32, arg: usize) -> Result<isize> {
     match cmd {
         SL_IOCTL_AFH_SET_MAP => {
             let params: SleAfhMapParams = read_user_struct(arg)?;
@@ -2364,6 +2367,14 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
                 .report_retx(handle, rpt.channel, rpt.retransmitted != 0)?;
             Ok(0)
         }
+        _ => Err(EINVAL),
+    }
+}
+
+/// Security ioctl sub-dispatcher (pairing, encryption, crypto tests).
+#[inline(never)]
+fn ioctl_security(cmd: u32, arg: usize) -> Result<isize> {
+    match cmd {
         SL_IOCTL_SEC_SET_PSK => {
             let params: SlePskParams = read_user_struct(arg)?;
             let mut ss = SUBSYSTEM.lock();
@@ -2375,7 +2386,6 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
             let params: SlePairParams = read_user_struct(arg)?;
             let mut ss = SUBSYSTEM.lock();
             let s = ss.as_mut().ok_or(ENODEV)?;
-            // Set security state machine to Pairing
             match params.method {
                 1 => s.security.pair_just_works()?,
                 2 => s.security.pair_psk()?,
@@ -2385,12 +2395,9 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
                 6 => s.security.pair_password()?,
                 _ => return Err(EINVAL),
             }
-            // Find first active connection handle for the DLI command
             let handle = s.conn.first_active_handle().unwrap_or(0);
-            // Send DLI RequestPair command to controller
             let auth_req: u8 = if params.method == 3 { 0x04 } else { 0x00 };
             s.controller.request_pair(handle, auth_req, params.method)?;
-            // Process controller events to drive the pairing sequence
             drain_controller_events(s);
             Ok(0)
         }
@@ -2509,6 +2516,14 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
             s.security.set_password(&params.data, params.len)?;
             Ok(0)
         }
+        _ => Err(EINVAL),
+    }
+}
+
+/// Local SSAP ioctl sub-dispatcher (service DB, property R/W).
+#[inline(never)]
+fn ioctl_ssap_local(cmd: u32, arg: usize) -> Result<isize> {
+    match cmd {
         SL_IOCTL_SSAP_REGISTER_SVC => {
             let mut ss = SUBSYSTEM.lock();
             let s = ss.as_mut().ok_or(ENODEV)?;
@@ -2631,6 +2646,49 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
             s.ssap.remove_service(start_handle)?;
             Ok(0)
         }
+        _ => Err(EINVAL),
+    }
+}
+
+/// AFH, security, SSAP ioctl router — delegates to domain-specific handlers.
+#[inline(never)]
+fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
+    match cmd {
+        SL_IOCTL_AFH_SET_MAP
+        | SL_IOCTL_AFH_GET_MAP
+        | SL_IOCTL_AFH_REPORT_RSSI
+        | SL_IOCTL_AFH_CLASSIFY
+        | SL_IOCTL_AFH_HOP_NEXT
+        | SL_IOCTL_AFH_REPORT_RETX => ioctl_afh(cmd, arg),
+
+        SL_IOCTL_SEC_SET_PSK
+        | SL_IOCTL_SEC_PAIR
+        | SL_IOCTL_SEC_INFO
+        | SL_IOCTL_SEC_ENCRYPT_ON
+        | SL_IOCTL_SEC_SM3_TEST
+        | SL_IOCTL_SEC_SM4_ENC_TEST
+        | SL_IOCTL_SEC_SM4_DEC_TEST
+        | SL_IOCTL_SEC_SM4_BLOCK_TEST
+        | SL_IOCTL_SEC_HMAC_TEST
+        | SL_IOCTL_SEC_RESET
+        | SL_IOCTL_SEC_GET_PASSKEY
+        | SL_IOCTL_SEC_CONFIRM_PASSKEY
+        | SL_IOCTL_SEC_REJECT_PASSKEY
+        | SL_IOCTL_SEC_SET_OOB
+        | SL_IOCTL_SEC_INPUT_PASSKEY
+        | SL_IOCTL_SEC_SET_PASSWORD => ioctl_security(cmd, arg),
+
+        SL_IOCTL_SSAP_REGISTER_SVC
+        | SL_IOCTL_SSAP_INFO
+        | SL_IOCTL_SSAP_READ
+        | SL_IOCTL_SSAP_WRITE
+        | SL_IOCTL_SSAP_FIND_SVC
+        | SL_IOCTL_SSAP_NOTIFY
+        | SL_IOCTL_SSAP_DEQUEUE_NTF
+        | SL_IOCTL_SSAP_ADD_SVC
+        | SL_IOCTL_SSAP_ADD_PROP
+        | SL_IOCTL_SSAP_REMOVE_SVC => ioctl_ssap_local(cmd, arg),
+
         SL_IOCTL_SSAP_EXCHANGE_INFO
         | SL_IOCTL_SSAP_REMOTE_DISCOVER
         | SL_IOCTL_SSAP_REMOTE_READ
@@ -2639,6 +2697,7 @@ fn ioctl_dispatch_sec_ssap(cmd: u32, arg: usize) -> Result<isize> {
         | SL_IOCTL_SSAP_CALL_METHOD
         | SL_IOCTL_SSAP_FIND_BY_UUID
         | SL_IOCTL_SSAP_READ_BY_UUID => ioctl_ssap_remote(cmd, arg),
+
         _ => Err(EINVAL),
     }
 }

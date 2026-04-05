@@ -367,6 +367,10 @@ pub struct ChannelSet {
     pub ssap_reliable: Option<TransportChannel>,
     /// Monotonic identifier for credit grant signaling (T/XS 20002-2025 §7.3.3).
     pub credit_grant_id: u8,
+    /// Monotonic identifier for transport control signaling (§7.3.3).
+    pub sig_identifier: u8,
+    /// Next dynamic TCID to allocate (0x80..=0xBF range).
+    pub next_dynamic_tcid: u8,
 }
 
 impl Default for ChannelSet {
@@ -377,6 +381,8 @@ impl Default for ChannelSet {
             data: TransportChannel::new(tcid::DEFAULT_DATA, TransportMode::Unreliable, 247),
             ssap_reliable: None,
             credit_grant_id: 0,
+            sig_identifier: 0,
+            next_dynamic_tcid: 0x80,
         }
     }
 }
@@ -413,6 +419,35 @@ impl ChannelSet {
         let id = self.credit_grant_id;
         self.credit_grant_id = self.credit_grant_id.wrapping_add(1);
         id
+    }
+
+    /// Get next signaling identifier and advance counter (wraps at 255).
+    pub fn next_sig_id(&mut self) -> u8 {
+        let id = self.sig_identifier;
+        self.sig_identifier = self.sig_identifier.wrapping_add(1);
+        id
+    }
+
+    /// Allocate a dynamic TCID from the unicast range (0x80..=0xBF).
+    /// Returns None if the range is exhausted.
+    pub fn alloc_dynamic_tcid(&mut self) -> Option<u8> {
+        if self.next_dynamic_tcid > 0xBF {
+            return None;
+        }
+        let tcid = self.next_dynamic_tcid;
+        self.next_dynamic_tcid = self.next_dynamic_tcid.wrapping_add(1);
+        Some(tcid)
+    }
+
+    /// Create and open the SSAP reliable transport channel with negotiated params.
+    pub fn create_ssap_reliable(&mut self, tcid: u16, cfg: &ReliableModeConfig) {
+        let mut ch = TransportChannel::new(tcid, TransportMode::Reliable, cfg.mtu);
+        ch.mps = cfg.mps;
+        ch.seq.tx_window = cfg.tx_window as u16;
+        ch.state = ChannelState::Open;
+        ch.tx_credits = INITIAL_CREDITS;
+        ch.rx_credits = INITIAL_CREDITS;
+        self.ssap_reliable = Some(ch);
     }
 
     /// Update data channel MTU/MPS based on negotiated connection parameters.
@@ -1591,6 +1626,185 @@ impl ConnManager {
         session.process_incoming(ssap, pdu_data, resp_buf)
     }
 
+    /// Build a TCID_Connect_Req PDU for reliable-mode channel creation.
+    ///
+    /// Allocates a local dynamic TCID, encodes the signaling PDU with a
+    /// TCID 0x02 prefix for sending on the management channel, and records
+    /// the allocated TCID in the SSAP session's `reliable_tcid`.
+    ///
+    /// Returns the total wire length written to `buf` (including TCID prefix).
+    pub fn build_tcid_connect_req(
+        &mut self,
+        handle: u16,
+        cfg: &ReliableModeConfig,
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        let entry = self.find_mut(handle)?;
+        let local_tcid = entry
+            .channels
+            .alloc_dynamic_tcid()
+            .ok_or(ENOMEM)?;
+        let sig_id = entry.channels.next_sig_id();
+        // Wire: [TCID_prefix=0x02][signaling PDU...]
+        if buf.is_empty() {
+            return Err(ENOMEM);
+        }
+        buf[0] = tcid::MANAGEMENT as u8;
+        let sig_len = TransportSignaling::encode_connect_req(
+            sig_id,
+            local_tcid,
+            cfg,
+            &mut buf[1..],
+        )?;
+        // Record the local TCID so we can match the ConnectRsp.
+        if let Some(session) = &mut entry.ssap_session {
+            session.reliable_tcid = Some(local_tcid as u16);
+        }
+        Ok(1 + sig_len)
+    }
+
+    /// Handle an incoming transport control signaling PDU (on TCID 0x02).
+    ///
+    /// Decodes the signaling, and for ConnectReq allocates a local TCID,
+    /// creates the reliable channel, and writes a ConnectRsp to `resp_buf`.
+    /// Returns the response length (including TCID prefix), or 0 if no
+    /// response is needed (e.g. for ConnectRsp which is terminal).
+    pub fn handle_transport_signaling(
+        &mut self,
+        handle: u16,
+        raw: &[u8],
+        resp_buf: &mut [u8],
+    ) -> Result<usize> {
+        let sig = TransportSignaling::decode(raw)?;
+        match sig {
+            TransportSignaling::ConnectReq {
+                identifier,
+                src_tcid,
+                config,
+            } => {
+                let entry = self.find_mut(handle)?;
+                // Allocate a local TCID for this channel.
+                let local_tcid = match entry.channels.alloc_dynamic_tcid() {
+                    Some(t) => t,
+                    None => {
+                        // No resources — send failure response.
+                        if resp_buf.len() < 9 {
+                            return Err(ENOMEM);
+                        }
+                        resp_buf[0] = tcid::MANAGEMENT as u8;
+                        let rsp_len = TransportSignaling::encode_connect_rsp(
+                            identifier,
+                            src_tcid,
+                            0,
+                            TcidConnectResult::NoResources,
+                            &mut resp_buf[1..],
+                        )?;
+                        return Ok(1 + rsp_len);
+                    }
+                };
+                // Create the reliable channel with negotiated params.
+                entry
+                    .channels
+                    .create_ssap_reliable(local_tcid as u16, &config);
+                // Record the peer's TCID so SSAP can route through it.
+                if let Some(session) = &mut entry.ssap_session {
+                    session.reliable_tcid = Some(local_tcid as u16);
+                    session.reliable_mode = true;
+                }
+                pr_info!(
+                    "sparklink: TCID_Connect_Req accepted: local={:#04x} peer={:#04x} mtu={}\n",
+                    local_tcid,
+                    src_tcid,
+                    config.mtu
+                );
+                // Send success response.
+                if resp_buf.len() < 9 {
+                    return Err(ENOMEM);
+                }
+                resp_buf[0] = tcid::MANAGEMENT as u8;
+                let rsp_len = TransportSignaling::encode_connect_rsp(
+                    identifier,
+                    src_tcid,
+                    local_tcid,
+                    TcidConnectResult::Success,
+                    &mut resp_buf[1..],
+                )?;
+                Ok(1 + rsp_len)
+            }
+            TransportSignaling::ConnectRsp {
+                src_tcid,
+                dst_tcid,
+                result,
+                ..
+            } => {
+                let entry = self.find_mut(handle)?;
+                if result == TcidConnectResult::Success {
+                    // The peer accepted — create the channel locally using
+                    // the src_tcid we proposed. The dst_tcid is the peer's
+                    // local TCID (we don't need to store it separately since
+                    // routing is done by our local TCID).
+                    let cfg = ReliableModeConfig::default();
+                    entry
+                        .channels
+                        .create_ssap_reliable(src_tcid as u16, &cfg);
+                    if let Some(session) = &mut entry.ssap_session {
+                        session.reliable_tcid = Some(src_tcid as u16);
+                        session.reliable_mode = true;
+                    }
+                    pr_info!(
+                        "sparklink: TCID_Connect_Rsp success: local={:#04x} peer={:#04x}\n",
+                        src_tcid,
+                        dst_tcid
+                    );
+                } else {
+                    pr_info!(
+                        "sparklink: TCID_Connect_Rsp failed: result={}\n",
+                        result as u8
+                    );
+                    // Clear any pending reliable TCID.
+                    if let Some(session) = &mut entry.ssap_session {
+                        session.reliable_tcid = None;
+                    }
+                }
+                Ok(0) // No further response for a ConnectRsp.
+            }
+            TransportSignaling::DisconnectReq {
+                identifier,
+                src_tcid,
+                dst_tcid,
+            } => {
+                let entry = self.find_mut(handle)?;
+                // Tear down the reliable channel if it matches.
+                if let Some(ch) = &entry.channels.ssap_reliable {
+                    if ch.tcid == dst_tcid as u16 {
+                        entry.channels.ssap_reliable = None;
+                        if let Some(session) = &mut entry.ssap_session {
+                            session.reliable_tcid = None;
+                        }
+                    }
+                }
+                // Send DisconnectRsp.
+                if resp_buf.len() < 8 {
+                    return Err(ENOMEM);
+                }
+                resp_buf[0] = tcid::MANAGEMENT as u8;
+                resp_buf[1] = sig_code::TCID_DISCONNECT_RSP;
+                resp_buf[2] = identifier;
+                let dlen: u16 = 3;
+                let dl = dlen.to_le_bytes();
+                resp_buf[3] = dl[0];
+                resp_buf[4] = dl[1];
+                resp_buf[5] = src_tcid;
+                resp_buf[6] = dst_tcid;
+                resp_buf[7] = 0; // result = success
+                Ok(8)
+            }
+            TransportSignaling::DisconnectRsp { .. } => {
+                Ok(0) // Terminal — no response.
+            }
+        }
+    }
+
     /// Query SSAP session state for a connection.
     /// Returns (mtu, info_exchanged) on success.
     pub fn ssap_session_info(&self, handle: u16) -> Option<(u16, bool)> {
@@ -1599,6 +1813,12 @@ impl ConnManager {
             .ssap_session
             .as_ref()
             .map(|s| (s.mtu, s.info_exchanged))
+    }
+
+    /// Return the SSAP reliable TCID for a connection, if one exists.
+    pub fn ssap_reliable_tcid(&self, handle: u16) -> Option<u16> {
+        let entry = self.find(handle).ok()?;
+        entry.ssap_session.as_ref()?.reliable_tcid
     }
 
     /// Get a mutable reference to the SSAP session for a connection.
@@ -2217,5 +2437,277 @@ impl ConnManager {
             }
         }
         Err(ENOENT)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transport control signaling codec (T/XS 20002-2025 §7.3.3, §7.3.4)
+//
+// Signaling PDUs are exchanged on the management channel (TCID 0x02) using
+// a common envelope: [code:1][identifier:1][length:2 LE][data:variable].
+// ---------------------------------------------------------------------------
+
+/// Transport control signaling codes (T/XS 20002-2025 Table 59).
+pub mod sig_code {
+    pub const ERROR_RSP: u8 = 0x00;
+    pub const TCID_CONNECT_REQ: u8 = 0x10;
+    pub const TCID_CONNECT_RSP: u8 = 0x11;
+    pub const TCID_DISCONNECT_REQ: u8 = 0x12;
+    pub const TCID_DISCONNECT_RSP: u8 = 0x13;
+}
+
+/// First dynamic unicast TCID we allocate (range 0x80..=0xBF per standard).
+const DYNAMIC_TCID_BASE: u16 = 0x80;
+
+/// Reliable-mode channel configuration (T/XS 20002-2025 §7.3.4.1).
+#[derive(Copy, Clone, Debug)]
+pub struct ReliableModeConfig {
+    pub mtu: u16,
+    pub mps: u16,
+    pub tx_window: u8,
+    pub max_tx_threshold: u8,
+    pub retransmission_timeout: u16,
+    pub response_timeout: u16,
+    pub reorder_timeout: u16,
+    pub crc_init: u16,
+}
+
+impl Default for ReliableModeConfig {
+    fn default() -> Self {
+        Self {
+            mtu: 247,
+            mps: 247,
+            tx_window: 16,
+            max_tx_threshold: 4,
+            retransmission_timeout: 2000,
+            response_timeout: 2000,
+            reorder_timeout: 2000,
+            crc_init: 0,
+        }
+    }
+}
+
+/// Result codes for TCID_Connect_Rsp (T/XS 20002-2025 Table 60).
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TcidConnectResult {
+    Success = 0,
+    NoResources = 1,
+    MtuUnsupported = 2,
+    MpsUnsupported = 3,
+    SrcTcidUnexpected = 4,
+}
+
+impl TcidConnectResult {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Success,
+            1 => Self::NoResources,
+            2 => Self::MtuUnsupported,
+            3 => Self::MpsUnsupported,
+            4 => Self::SrcTcidUnexpected,
+            _ => Self::NoResources,
+        }
+    }
+}
+
+/// Transport control signaling PDU (decoded form).
+pub enum TransportSignaling {
+    /// TCID_Connect_Req (code 0x10).
+    ConnectReq {
+        identifier: u8,
+        src_tcid: u8,
+        config: ReliableModeConfig,
+    },
+    /// TCID_Connect_Rsp (code 0x11).
+    ConnectRsp {
+        identifier: u8,
+        src_tcid: u8,
+        dst_tcid: u8,
+        result: TcidConnectResult,
+    },
+    /// TCID_Disconnect_Req (code 0x12).
+    DisconnectReq {
+        identifier: u8,
+        src_tcid: u8,
+        dst_tcid: u8,
+    },
+    /// TCID_Disconnect_Rsp (code 0x13).
+    DisconnectRsp {
+        identifier: u8,
+        src_tcid: u8,
+        dst_tcid: u8,
+        result: u8,
+    },
+}
+
+impl TransportSignaling {
+    /// Encode a TCID_Connect_Req for reliable-mode channel creation.
+    ///
+    /// Wire format (after TCID prefix byte):
+    /// `[code=0x10][identifier][length LE16=18][srcTCID][optionOffset=0]`
+    /// `[E=0|M_EN=0|RFU=0][modeConfig(15 bytes)]`
+    pub fn encode_connect_req(
+        identifier: u8,
+        src_tcid: u8,
+        cfg: &ReliableModeConfig,
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        // modeConfig for reliable: mode(1)+mtu(2)+mps(2)+txWin(1)+maxTx(1)
+        //   +retxTimeout(2)+rspTimeout(2)+reorderTimeout(2)+crcInit(2) = 15
+        // data: srcTCID(1)+optionOffset(1)+flags(1)+modeConfig(15) = 18
+        const DATA_LEN: u16 = 18;
+        const TOTAL: usize = 4 + DATA_LEN as usize; // 22
+        if buf.len() < TOTAL {
+            return Err(ENOMEM);
+        }
+        buf[0] = sig_code::TCID_CONNECT_REQ;
+        buf[1] = identifier;
+        let len_bytes = DATA_LEN.to_le_bytes();
+        buf[2] = len_bytes[0];
+        buf[3] = len_bytes[1];
+        buf[4] = src_tcid;
+        buf[5] = 0; // optionOffset = 0 (no extensions)
+        buf[6] = 0; // E=0, M_EN=0, RFU=0
+        // modeConfig: transportMode=3 in upper nibble, RFU=0 in lower
+        buf[7] = 0x30;
+        let mtu = cfg.mtu.to_le_bytes();
+        buf[8] = mtu[0];
+        buf[9] = mtu[1];
+        let mps = cfg.mps.to_le_bytes();
+        buf[10] = mps[0];
+        buf[11] = mps[1];
+        buf[12] = cfg.tx_window;
+        buf[13] = cfg.max_tx_threshold;
+        let retx = cfg.retransmission_timeout.to_le_bytes();
+        buf[14] = retx[0];
+        buf[15] = retx[1];
+        let rsp = cfg.response_timeout.to_le_bytes();
+        buf[16] = rsp[0];
+        buf[17] = rsp[1];
+        let reorder = cfg.reorder_timeout.to_le_bytes();
+        buf[18] = reorder[0];
+        buf[19] = reorder[1];
+        let crc = cfg.crc_init.to_le_bytes();
+        buf[20] = crc[0];
+        buf[21] = crc[1];
+        Ok(TOTAL)
+    }
+
+    /// Encode a TCID_Connect_Rsp.
+    ///
+    /// Wire format: `[code=0x11][identifier][length LE16=4][srcTCID][dstTCID][result][LC=0|RFU]`
+    pub fn encode_connect_rsp(
+        identifier: u8,
+        src_tcid: u8,
+        dst_tcid: u8,
+        result: TcidConnectResult,
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        const DATA_LEN: u16 = 4;
+        const TOTAL: usize = 4 + DATA_LEN as usize; // 8
+        if buf.len() < TOTAL {
+            return Err(ENOMEM);
+        }
+        buf[0] = sig_code::TCID_CONNECT_RSP;
+        buf[1] = identifier;
+        let len_bytes = DATA_LEN.to_le_bytes();
+        buf[2] = len_bytes[0];
+        buf[3] = len_bytes[1];
+        buf[4] = src_tcid;
+        buf[5] = dst_tcid;
+        buf[6] = result as u8;
+        buf[7] = 0; // LC=0, RFU=0 (no lcConfig extension)
+        Ok(TOTAL)
+    }
+
+    /// Decode a transport control signaling PDU from raw data (after TCID byte).
+    ///
+    /// Input: `[code][identifier][length LE16][data...]`
+    pub fn decode(raw: &[u8]) -> Result<Self> {
+        if raw.len() < 4 {
+            return Err(EINVAL);
+        }
+        let code = raw[0];
+        let identifier = raw[1];
+        let data_len = u16::from_le_bytes([raw[2], raw[3]]) as usize;
+        if raw.len() < 4 + data_len {
+            return Err(EINVAL);
+        }
+        let data = &raw[4..4 + data_len];
+
+        match code {
+            sig_code::TCID_CONNECT_REQ => {
+                // data: srcTCID(1) + optionOffset(1) + flags(1) + modeConfig(>=15)
+                if data.len() < 18 {
+                    return Err(EINVAL);
+                }
+                let src_tcid = data[0];
+                // data[1] = optionOffset (ignored for now)
+                // data[2] = flags (E, M_EN, RFU — ignored for now)
+                // modeConfig starts at data[3]
+                let transport_mode = data[3] >> 4;
+                if transport_mode != 3 {
+                    // Only reliable mode supported for dynamic channels.
+                    return Err(ENOTSUPP);
+                }
+                let mtu = u16::from_le_bytes([data[4], data[5]]);
+                let mps = u16::from_le_bytes([data[6], data[7]]);
+                let tx_window = data[8];
+                let max_tx_threshold = data[9];
+                let retransmission_timeout = u16::from_le_bytes([data[10], data[11]]);
+                let response_timeout = u16::from_le_bytes([data[12], data[13]]);
+                let reorder_timeout = u16::from_le_bytes([data[14], data[15]]);
+                let crc_init = u16::from_le_bytes([data[16], data[17]]);
+                Ok(Self::ConnectReq {
+                    identifier,
+                    src_tcid,
+                    config: ReliableModeConfig {
+                        mtu,
+                        mps,
+                        tx_window,
+                        max_tx_threshold,
+                        retransmission_timeout,
+                        response_timeout,
+                        reorder_timeout,
+                        crc_init,
+                    },
+                })
+            }
+            sig_code::TCID_CONNECT_RSP => {
+                // data: srcTCID(1) + dstTCID(1) + result(1) + LC_flags(1)
+                if data.len() < 4 {
+                    return Err(EINVAL);
+                }
+                Ok(Self::ConnectRsp {
+                    identifier,
+                    src_tcid: data[0],
+                    dst_tcid: data[1],
+                    result: TcidConnectResult::from_u8(data[2]),
+                })
+            }
+            sig_code::TCID_DISCONNECT_REQ => {
+                if data.len() < 2 {
+                    return Err(EINVAL);
+                }
+                Ok(Self::DisconnectReq {
+                    identifier,
+                    src_tcid: data[0],
+                    dst_tcid: data[1],
+                })
+            }
+            sig_code::TCID_DISCONNECT_RSP => {
+                if data.len() < 3 {
+                    return Err(EINVAL);
+                }
+                Ok(Self::DisconnectRsp {
+                    identifier,
+                    src_tcid: data[0],
+                    dst_tcid: data[1],
+                    result: data[2],
+                })
+            }
+            _ => Err(ENOTSUPP),
+        }
     }
 }

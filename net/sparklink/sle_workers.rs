@@ -239,6 +239,22 @@ pub(crate) fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dl
                 let target_tcid = u16::from(raw[5]);
                 let credits = u16::from_le_bytes([raw[6], raw[7]]);
                 let _ = shared.conn.receive_credits(*handle, target_tcid, credits);
+            } else if u16::from(raw[0]) == sle_conn::tcid::MANAGEMENT
+                && raw.len() >= 5
+                && raw[1] != sle_conn::CREDIT_GRANT_PDU_TYPE
+            {
+                // Transport control signaling on management channel (T/XS 20002-2025 §7.3.4).
+                let sig_data = &raw[1..];
+                let mut resp_buf = [0u8; 32];
+                let resp_len = shared
+                    .conn
+                    .handle_transport_signaling(*handle, sig_data, &mut resp_buf)
+                    .unwrap_or(0);
+                if resp_len > 0 {
+                    let _ = shared
+                        .controller
+                        .send_data(*handle, &resp_buf[..resp_len]);
+                }
             } else if u16::from(raw[0]) == sle_conn::tcid::SERVICE_MGMT && raw.len() > 1 {
                 // SSAP PDU on service management channel (TCID 0x0A).
                 // Track RX credit for the reliable SMTC channel.
@@ -310,19 +326,84 @@ pub(crate) fn process_controller_event(shared: &mut SubsystemShared, ev: &sle_dl
                         );
                     }
                 }
+                // After ExchangeInfo negotiation: if reliable mode is agreed
+                // but the reliable channel is not yet created, initiate
+                // TCID_Connect_Req on the management channel.
+                let needs_connect = shared
+                    .conn
+                    .get_ssap_session(*handle)
+                    .map(|sess| sess.reliable_mode && sess.reliable_tcid.is_none())
+                    .unwrap_or(false);
+                if needs_connect {
+                    let cfg = sle_conn::ReliableModeConfig::default();
+                    let mut sig_buf = [0u8; 24];
+                    if let Ok(sig_len) =
+                        shared.conn.build_tcid_connect_req(*handle, &cfg, &mut sig_buf)
+                    {
+                        let _ = shared.controller.send_data(*handle, &sig_buf[..sig_len]);
+                    }
+                }
             } else {
-                // User data — strip TCID prefix if present, enqueue to rx_queue.
-                let tcid = if u16::from(raw[0]) == sle_conn::tcid::DEFAULT_DATA && raw.len() > 1 {
-                    let _ = shared
+                // Check if this is an SSAP PDU on the dynamic reliable channel.
+                let first_byte_tcid = u16::from(raw[0]);
+                let is_ssap_reliable = raw.len() > 1
+                    && shared
                         .conn
-                        .consume_rx_credit(*handle, sle_conn::tcid::DEFAULT_DATA);
-                    sle_conn::tcid::DEFAULT_DATA
+                        .ssap_reliable_tcid(*handle)
+                        .map(|t| t == first_byte_tcid)
+                        .unwrap_or(false);
+                if is_ssap_reliable {
+                    // SSAP PDU on reliable transport channel.
+                    let needs_grant = shared
+                        .conn
+                        .consume_rx_credit(*handle, first_byte_tcid);
+                    let pdu_data = &raw[1..];
+                    let mut resp_buf = [0u8; sle_ssap::SSAP_PDU_MAX];
+                    let resp_len = shared
+                        .conn
+                        .process_ssap_pdu(*handle, pdu_data, &mut shared.ssap, &mut resp_buf)
+                        .unwrap_or(0);
+                    if resp_len > 0
+                        && shared
+                            .conn
+                            .consume_tx_credit(*handle, first_byte_tcid)
+                            .is_ok()
+                    {
+                        let mut tx_buf = [0u8; 1 + sle_ssap::SSAP_PDU_MAX];
+                        tx_buf[0] = first_byte_tcid as u8;
+                        tx_buf[1..1 + resp_len].copy_from_slice(&resp_buf[..resp_len]);
+                        let _ = shared
+                            .controller
+                            .send_data(*handle, &tx_buf[..1 + resp_len]);
+                    }
+                    if needs_grant {
+                        if let Ok((granted, id)) = shared
+                            .conn
+                            .grant_credits(*handle, first_byte_tcid)
+                        {
+                            send_credit_grant(
+                                &shared.controller,
+                                *handle,
+                                first_byte_tcid,
+                                granted,
+                                id,
+                            );
+                        }
+                    }
                 } else {
-                    0 // Legacy data without TCID prefix.
-                };
-                let payload = if tcid != 0 { &raw[1..] } else { raw };
-                let seq = shared.conn.info(*handle).map(|e| e.seq.rx_seq).unwrap_or(0);
-                let _ = shared.conn.receive_data(*handle, payload, seq);
+                    // User data — strip TCID prefix if present, enqueue to rx_queue.
+                    let tcid = if u16::from(raw[0]) == sle_conn::tcid::DEFAULT_DATA && raw.len() > 1 {
+                        let _ = shared
+                            .conn
+                            .consume_rx_credit(*handle, sle_conn::tcid::DEFAULT_DATA);
+                        sle_conn::tcid::DEFAULT_DATA
+                    } else {
+                        0 // Legacy data without TCID prefix.
+                    };
+                    let payload = if tcid != 0 { &raw[1..] } else { raw };
+                    let seq = shared.conn.info(*handle).map(|e| e.seq.rx_seq).unwrap_or(0);
+                    let _ = shared.conn.receive_data(*handle, payload, seq);
+                }
             }
         }
         // -----------------------------------------------------------------

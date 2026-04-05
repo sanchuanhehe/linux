@@ -7924,6 +7924,74 @@ static void test_ssap_air_interface(int fd)
 		}
 	}
 
+	/* Step 5c: Inject a TCID_Connect_Req signaling PDU on management channel
+	 * to verify transport control signaling dispatcher.
+	 * Wire: [TCID=0x02][code=0x10][identifier=0x01][length=18,0]
+	 *        [srcTCID=0x82][optionOfs=0][flags=0]
+	 *        [mode=0x30][mtu=247,0][mps=247,0]
+	 *        [txWin=16][maxTx=4][retxTO=0xD0,0x07][rspTO=0xD0,0x07]
+	 *        [reorderTO=0xD0,0x07][crcInit=0,0]
+	 */
+	memset(&inj, 0, sizeof(inj));
+	inj.handle = handle;
+	inj.data[0]  = 0x02;  /* TCID: MANAGEMENT */
+	inj.data[1]  = 0x10;  /* code: TCID_Connect_Req */
+	inj.data[2]  = 0x01;  /* identifier */
+	inj.data[3]  = 18;    /* length low */
+	inj.data[4]  = 0;     /* length high */
+	inj.data[5]  = 0x82;  /* srcTCID (peer's proposed TCID) */
+	inj.data[6]  = 0;     /* optionOffset=0 */
+	inj.data[7]  = 0;     /* E=0, M_EN=0, RFU=0 */
+	inj.data[8]  = 0x30;  /* transportMode=3 (reliable) */
+	inj.data[9]  = 247;   /* mtu low */
+	inj.data[10] = 0;     /* mtu high */
+	inj.data[11] = 247;   /* mps low */
+	inj.data[12] = 0;     /* mps high */
+	inj.data[13] = 16;    /* txWindow */
+	inj.data[14] = 4;     /* maxTxThreshold */
+	inj.data[15] = 0xD0;  /* retransmissionTimeout low (2000ms) */
+	inj.data[16] = 0x07;  /* retransmissionTimeout high */
+	inj.data[17] = 0xD0;  /* responseTimeout low */
+	inj.data[18] = 0x07;  /* responseTimeout high */
+	inj.data[19] = 0xD0;  /* reorderTimeout low */
+	inj.data[20] = 0x07;  /* reorderTimeout high */
+	inj.data[21] = 0;     /* crcInit low */
+	inj.data[22] = 0;     /* crcInit high */
+	inj.length = 23;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
+	check("INJECT TCID_Connect_Req (reliable mode)", ret);
+
+	/* Verify that the reliable channel was created by checking CONN_INFO */
+	memset(&info, 0, sizeof(info));
+	info.handle = handle;
+	ret = ioctl(fd, SL_IOCTL_CONN_INFO, &info);
+	check("CONN_INFO (post TCID_Connect_Req)", ret);
+
+	if (ret == 0) {
+		if (info.ssap_reliable_mode == 1) {
+			printf("  OK:   ssap_reliable_mode=1 (after TCID_Connect_Req)\n");
+			ok_count++;
+		} else {
+			printf("  FAIL: ssap_reliable_mode=%u, expected 1\n",
+			       info.ssap_reliable_mode);
+			fail_count++;
+		}
+	}
+
+	/* Step 5d: Inject a TCID_Disconnect_Req to verify cleanup. */
+	memset(&inj, 0, sizeof(inj));
+	inj.handle = handle;
+	inj.data[0] = 0x02;  /* TCID: MANAGEMENT */
+	inj.data[1] = 0x12;  /* code: TCID_Disconnect_Req */
+	inj.data[2] = 0x02;  /* identifier */
+	inj.data[3] = 2;     /* length low */
+	inj.data[4] = 0;     /* length high */
+	inj.data[5] = 0x82;  /* srcTCID */
+	inj.data[6] = 0x81;  /* dstTCID (the one allocated for incoming ConnectReq) */
+	inj.length = 7;
+	ret = ioctl(fd, SL_IOCTL_INJECT_CONN_DATA, &inj);
+	check("INJECT TCID_Disconnect_Req", ret);
+
 	/* Step 6: Register a dedicated test service with a writable property
 	 * to avoid handle collisions from prior test registrations.
 	 */
